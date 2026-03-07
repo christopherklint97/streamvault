@@ -25,6 +25,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Install expect
+        run: sudo apt-get install -y expect
+
       - name: Install Tizen Studio CLI
         run: |
           curl -o tizen-installer "https://download.tizen.org/sdk/Installer/tizen-studio_${TIZEN_STUDIO_VER}/web-cli_Tizen_Studio_${TIZEN_STUDIO_VER}_ubuntu-64.bin"
@@ -32,42 +35,56 @@ jobs:
           ./tizen-installer --accept-license "$HOME/tizen-studio"
           rm tizen-installer
 
-      - name: Create Tizen certificate
+      - name: Create Tizen certificate and profile
         run: |
-          $HOME/tizen-studio/tools/ide/bin/tizen certificate \
+          TIZEN="$HOME/tizen-studio/tools/ide/bin/tizen"
+
+          $TIZEN certificate \
             -a StreamVault -p 1234 -c SE -ct Stockholm -o StreamVault -n StreamVault \
             -e streamvault@dev.local -f streamvault
 
-          $HOME/tizen-studio/tools/ide/bin/tizen security-profiles add \
+          $TIZEN security-profiles add \
             -n StreamVault \
             -a "$HOME/tizen-studio-data/keystore/author/streamvault.p12" \
             -p 1234
 
-          $HOME/tizen-studio/tools/ide/bin/tizen cli-config \
-            "profiles.path=$HOME/tizen-studio-data/profile/profiles.xml"
+          $TIZEN cli-config "profiles.path=$HOME/tizen-studio-data/profile/profiles.xml"
 
-      - name: Fix profile passwords
-        run: |
+          # Embed passwords directly in profiles.xml so tizen package doesn't prompt
           PROFILES="$HOME/tizen-studio-data/profile/profiles.xml"
+          sed -i "s|streamvault.pwd|1234|g" "$PROFILES"
           sed -i 's|password=""|password="tizenpkcs12passfordsigner"|g' "$PROFILES"
+          chmod 755 "$PROFILES"
 
-      - name: Build and sign WGT
+      - name: Build web app
+        working-directory: dist
         run: |
-          sudo apt-get install -y expect
-          cd dist
-
           $HOME/tizen-studio/tools/ide/bin/tizen build-web \
             -e ".*" -e "node_modules/*" -e "*.map"
 
+      - name: Package signed WGT
+        working-directory: dist
+        run: |
           expect -c '
-            spawn $env(HOME)/tizen-studio/tools/ide/bin/tizen package -t wgt -s StreamVault -- .buildResult
+            set timeout 30
+            spawn $env(HOME)/tizen-studio/tools/ide/bin/tizen package -t wgt -s StreamVault -- [pwd]/.buildResult
             expect {
-              "password:" { send "1234\r"; exp_continue }
+              -re ".*[Pp]assword.*" { send "1234\r"; exp_continue }
+              "Passphrase" { send "1234\r"; exp_continue }
               eof
             }
+            lassign [wait] pid spawnid os_error value
+            exit $value
           '
 
-          mv .buildResult/*.wgt "$GITHUB_WORKSPACE/StreamVault.wgt"
+      - name: Collect WGT
+        run: |
+          find dist -name "*.wgt" -exec cp {} StreamVault.wgt \;
+          ls -la StreamVault.wgt
+
+      - name: Print logs on failure
+        if: failure()
+        run: cat "$HOME/tizen-studio-data/cli/logs/cli.log" 2>/dev/null || echo "No log file"
 
       - name: Upload signed WGT
         uses: actions/upload-artifact@v4
