@@ -52,9 +52,18 @@ jobs:
 
           # Embed passwords directly in profiles.xml so tizen package doesn't prompt
           PROFILES="$HOME/tizen-studio-data/profile/profiles.xml"
-          sed -i "s|streamvault.pwd|1234|g" "$PROFILES"
+          cat "$PROFILES"
+
+          # Replace author cert password file path with actual password
+          sed -i "s|$HOME/tizen-studio-data/keystore/author/streamvault.pwd|1234|g" "$PROFILES"
+          # Replace distributor cert password file path with actual password
+          sed -i "s|$HOME/tizen-studio-data/tools/certificate-generator/certificates/distributor/tizen-distributor-signer.pwd|tizenpkcs12passfordsigner|g" "$PROFILES"
+          # Fill in any empty password fields for the distributor
           sed -i 's|password=""|password="tizenpkcs12passfordsigner"|g' "$PROFILES"
           chmod 755 "$PROFILES"
+
+          echo "--- Updated profiles.xml ---"
+          cat "$PROFILES"
 
       - name: Build web app
         working-directory: dist
