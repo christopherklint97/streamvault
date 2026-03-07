@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets"
+  id="http://streamvault.app" version="1.0.0" viewmodes="maximized">
+  <tizen:application id="Streamvault.StreamVault" package="Streamvault" required_version="6.5"/>
+  <content src="index.html"/>
+  <icon src="icon.svg"/>
+  <name>StreamVault</name>
+  <tizen:privilege name="http://tizen.org/privilege/internet"/>
+  <tizen:privilege name="http://tizen.org/privilege/tv.inputdevice"/>
+  <tizen:privilege name="http://developer.samsung.com/privilege/productinfo"/>
+  <tizen:privilege name="http://tizen.org/privilege/application.info"/>
+  <tizen:privilege name="http://developer.samsung.com/privilege/network.public"/>
+  <tizen:setting screen-orientation="landscape" context-menu="enable" background-support="disable" encryption="disable" install-location="auto" hwkey-event="enable"/>
+  <access origin="*" subdomains="true"/>
+  <tizen:metadata key="http://samsung.com/tv/metadata/prelaunch.support" value="true"/>
+</widget>
