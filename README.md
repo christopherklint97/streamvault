@@ -1,73 +1,55 @@
-# React + TypeScript + Vite
+# StreamVault
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+IPTV streaming app for Samsung Tizen smart TVs. Built with React, TypeScript, and Vite, targeting Tizen 6.5 (Chromium 85).
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- M3U playlist parsing and channel management
+- EPG (Electronic Program Guide) with virtual scrolling grid
+- AVPlay integration with HTML5 video fallback
+- D-pad/remote control navigation
+- Favorites management with persistent storage
+- Network status monitoring
 
-## React Compiler
+## Tech Stack
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- React 19, TypeScript 5.9, Vite 7
+- Zustand 5 for state management
+- Vitest for testing
+- Tizen TV CLI for packaging and deployment
 
-## Expanding the ESLint configuration
+## Project Structure
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```
+src/
+  services/     # M3U parser, EPG service, channel service, AVPlay wrapper
+  stores/       # Zustand stores (channel, favorites, player, app)
+  hooks/        # Focus navigation, remote keys, player, network status
+  components/   # Sidebar, ChannelCard, ChannelList, EPGGrid, Player, etc.
+  pages/        # Home, Settings
+  types.ts      # Core type definitions
+  tizen.d.ts    # Tizen API type declarations
+scripts/        # Signing, packaging, and deployment scripts
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Development
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev       # Start dev server
+npm run build     # TypeScript check + Vite build
+npm run lint      # ESLint
+npm run typecheck # TypeScript only
+npm run test      # Run tests
 ```
+
+## Tizen Deployment
+
+```bash
+npm run sign      # Build and sign WGT package
+npm run deploy    # Sign and deploy to connected TV
+```
+
+## CI/CD
+
+GitHub Actions workflow at `.github/workflows/build-deploy.yml` handles automated builds and WGT packaging.
