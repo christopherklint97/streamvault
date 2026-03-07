@@ -22,3 +22,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Certificates (sensitive)
+certs/
+*.p12
+*.wgt
+
+# Environment secrets
+.env
