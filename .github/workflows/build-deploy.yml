@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+env:
+  TIZEN_STUDIO_VER: "4.5.1"
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -13,8 +16,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: "20"
+          cache: "npm"
 
       - name: Install dependencies
         run: npm ci
@@ -22,21 +25,49 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Install cert tools
-        run: npm install @tizentv/tools @tizentv/webide-common-tizentv node-forge
-
-      - name: Generate Samsung certificates
-        env:
-          SAMSUNG_ACCESS_TOKEN: ${{ secrets.SAMSUNG_ACCESS_TOKEN }}
-          SAMSUNG_USER_ID: ${{ secrets.SAMSUNG_USER_ID }}
-          TV_DUID: ${{ secrets.TV_DUID }}
-        run: node scripts/generate-samsung-cert.cjs
-
-      - name: Sign WGT package
+      - name: Install Tizen Studio CLI
         run: |
-          # Use the generated Samsung certs to create a profiles.xml
-          # then sign and package the dist directory
-          node scripts/sign-wgt.cjs
+          curl -o tizen-installer "https://download.tizen.org/sdk/Installer/tizen-studio_${TIZEN_STUDIO_VER}/web-cli_Tizen_Studio_${TIZEN_STUDIO_VER}_ubuntu-64.bin"
+          chmod +x tizen-installer
+          ./tizen-installer --accept-license "$HOME/tizen-studio"
+          rm tizen-installer
+
+      - name: Create Tizen certificate
+        run: |
+          $HOME/tizen-studio/tools/ide/bin/tizen certificate \
+            -a StreamVault -p 1234 -c SE -ct Stockholm -o StreamVault -n StreamVault \
+            -e streamvault@dev.local -f streamvault
+
+          $HOME/tizen-studio/tools/ide/bin/tizen security-profiles add \
+            -n StreamVault \
+            -a "$HOME/tizen-studio-data/keystore/author/streamvault.p12" \
+            -p 1234
+
+          $HOME/tizen-studio/tools/ide/bin/tizen cli-config \
+            "profiles.path=$HOME/tizen-studio-data/profile/profiles.xml"
+
+      - name: Fix profile passwords
+        run: |
+          PROFILES="$HOME/tizen-studio-data/profile/profiles.xml"
+          sed -i 's|password=""|password="tizenpkcs12passfordsigner"|g' "$PROFILES"
+
+      - name: Build and sign WGT
+        run: |
+          sudo apt-get install -y expect
+          cd dist
+
+          $HOME/tizen-studio/tools/ide/bin/tizen build-web \
+            -e ".*" -e "node_modules/*" -e "*.map"
+
+          expect -c '
+            spawn $env(HOME)/tizen-studio/tools/ide/bin/tizen package -t wgt -s StreamVault -- .buildResult
+            expect {
+              "password:" { send "1234\r"; exp_continue }
+              eof
+            }
+          '
+
+          mv .buildResult/*.wgt "$GITHUB_WORKSPACE/StreamVault.wgt"
 
       - name: Upload signed WGT
         uses: actions/upload-artifact@v4
