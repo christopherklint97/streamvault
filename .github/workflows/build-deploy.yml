@@ -65,21 +65,23 @@ jobs:
       - name: Package signed WGT
         working-directory: dist
         run: |
-          expect -c '
-            set timeout 30
-            spawn $env(HOME)/tizen-studio/tools/ide/bin/tizen package -t wgt -s StreamVault -- [pwd]/.buildResult
-            expect {
-              -re ".*[Pp]assword.*" { send "1234\r"; exp_continue }
-              "Passphrase" { send "1234\r"; exp_continue }
-              eof
-            }
-            lassign [wait] pid spawnid os_error value
-            exit $value
-          '
+          cat > /tmp/package.exp << 'EXPECT'
+          set timeout 30
+          spawn $env(HOME)/tizen-studio/tools/ide/bin/tizen package -t wgt -s StreamVault -- [pwd]/.buildResult
+          expect {
+            "password:" { send "1234\r"; exp_continue }
+            "Password:" { send "1234\r"; exp_continue }
+            eof
+          }
+          lassign [wait] pid spawnid os_error value
+          exit $value
+          EXPECT
+          expect /tmp/package.exp
 
       - name: Collect WGT
         run: |
-          find dist -name "*.wgt" -exec cp {} StreamVault.wgt \;
+          find . -name "*.wgt" -type f | head -5
+          find . -name "*.wgt" -type f -exec cp {} StreamVault.wgt \;
           ls -la StreamVault.wgt
 
       - name: Print logs on failure
