@@ -17,7 +17,6 @@ import FocusZone from '../components/FocusZone';
 export default function Home() {
   const channels = useChannelStore((s) => s.channels);
   const programs = useChannelStore((s) => s.programs);
-  const groups = useChannelStore((s) => s.groups);
   const contentTypeCounts = useChannelStore((s) => s.contentTypeCounts);
   const favoriteIds = useFavoritesStore((s) => s.favoriteIds);
   const setChannel = usePlayerStore((s) => s.setChannel);
@@ -54,19 +53,10 @@ export default function Home() {
     [setChannel, navigate]
   );
 
-  const handleGroupSelect = useCallback(
-    (group: string) => {
-      useChannelStore.getState().setSelectedGroup(group);
-      navigate('channels');
-    },
-    [navigate]
-  );
-
   const lastWatchedProgram = lastWatchedChannel
     ? getCurrentProgram(programs, lastWatchedChannel.id)
     : null;
 
-  // Content type counts come from server categories (not loaded channels)
   const typeCounts = useMemo(() => ({
     livetv: contentTypeCounts['livetv'] || 0,
     movies: contentTypeCounts['movies'] || 0,
@@ -80,9 +70,7 @@ export default function Home() {
     [navigate]
   );
 
-  const displayGroups = groups.filter((g) => g !== 'All');
-
-  const hasContent = groups.length > 1 || channels.length > 0;
+  const hasContent = typeCounts.livetv > 0 || typeCounts.movies > 0 || typeCounts.series > 0 || channels.length > 0;
   if (!hasContent) {
     return (
       <FocusZone className="home home--empty">
@@ -195,9 +183,9 @@ export default function Home() {
         </div>
       )}
 
-      {/* Content Types */}
+      {/* Browse by Type */}
       <div className="home__section">
-        <h2 className="home__section-title">Browse by Type</h2>
+        <h2 className="home__section-title">Browse</h2>
         <div className="home__categories">
           {([
             { label: 'Live TV', view: 'channels' as View, count: typeCounts.livetv },
@@ -216,26 +204,6 @@ export default function Home() {
           ))}
         </div>
       </div>
-
-      {/* Categories */}
-      {displayGroups.length > 0 && (
-        <div className="home__section">
-          <h2 className="home__section-title">Categories</h2>
-          <div className="home__categories">
-            {displayGroups.slice(0, 12).map((group) => (
-              <button
-                key={group}
-                className="home__category-tile"
-                data-focusable
-                tabIndex={0}
-                onClick={() => handleGroupSelect(group)}
-              >
-                {group}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
     </FocusZone>
   );
 }

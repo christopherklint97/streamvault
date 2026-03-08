@@ -22,6 +22,14 @@ export interface Program {
 
 export type View = 'home' | 'channels' | 'movies' | 'series' | 'player' | 'settings';
 
+export interface Category {
+  id: string;
+  name: string;
+  content_type: ContentType;
+  stream_count: number;
+  fetched_at: number;
+}
+
 export interface PlayerState {
   status: 'idle' | 'loading' | 'playing' | 'paused' | 'error';
   currentChannel: Channel | null;

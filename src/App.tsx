@@ -10,12 +10,14 @@ import Sidebar from './components/Sidebar';
 import Toast from './components/Toast';
 import ExitDialog from './components/ExitDialog';
 import Player from './components/Player';
+import GroupList from './components/GroupList';
 import ChannelList from './components/ChannelList';
 import Home from './pages/Home';
 import Settings from './pages/Settings';
 
 function AppContent() {
   const currentView = useAppStore((s) => s.currentView);
+  const selectedGroup = useAppStore((s) => s.selectedGroup);
   const channels = useChannelStore((s) => s.channels);
   const isLoading = useChannelStore((s) => s.isLoading);
   const loadingMessage = useChannelStore((s) => s.loadingMessage);
@@ -54,28 +56,23 @@ function AppContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // When the view changes, push focus into the new content area
+  // When the view or group changes, push focus into the new content area
   useEffect(() => {
     if (currentView === 'player') return;
-    // Give React a frame to render the new view
     const raf = requestAnimationFrame(() => {
       const active = document.activeElement;
-      // Only push focus if it's lost (body/null/detached) — don't steal from sidebar
       const isSidebarFocused = active && (active as HTMLElement).closest?.('.sidebar');
       if (isSidebarFocused) return;
 
-      const container = document.querySelector('.app__content > [tabindex]') as HTMLElement | null;
-      if (container) {
-        container.focus();
-      }
+      const firstFocusable = document.querySelector('.app__content [data-focusable]') as HTMLElement | null;
+      firstFocusable?.focus();
     });
     return () => cancelAnimationFrame(raf);
-  }, [currentView]);
+  }, [currentView, selectedGroup]);
 
   // Handle LEFT key on main content to return focus to sidebar
   const handleMainKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.keyCode === KEY_CODES.LEFT) {
-      // If LEFT bubbled up here, no component consumed it — go to sidebar
       e.preventDefault();
       const activeItem = document.querySelector('.sidebar-item--active') as HTMLElement | null;
       const fallback = document.querySelector('.sidebar-item') as HTMLElement | null;
@@ -94,11 +91,20 @@ function AppContent() {
       case 'home':
         return <Home />;
       case 'channels':
-        return <ChannelList channels={channelsWithFavorites.filter(ch => ch.contentType === 'livetv')} />;
+        if (selectedGroup) {
+          return <ChannelList channels={channelsWithFavorites.filter(ch => ch.contentType === 'livetv')} groupName={selectedGroup} />;
+        }
+        return <GroupList contentType="livetv" />;
       case 'movies':
-        return <ChannelList channels={channelsWithFavorites.filter(ch => ch.contentType === 'movies')} />;
+        if (selectedGroup) {
+          return <ChannelList channels={channelsWithFavorites.filter(ch => ch.contentType === 'movies')} groupName={selectedGroup} />;
+        }
+        return <GroupList contentType="movies" />;
       case 'series':
-        return <ChannelList channels={channelsWithFavorites.filter(ch => ch.contentType === 'series')} />;
+        if (selectedGroup) {
+          return <ChannelList channels={channelsWithFavorites.filter(ch => ch.contentType === 'series')} groupName={selectedGroup} />;
+        }
+        return <GroupList contentType="series" />;
       case 'player':
         return <Player />;
       case 'settings':

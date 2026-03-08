@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Channel, Program } from '../types';
+import type { Channel, Program, Category } from '../types';
 import { getItem, setItem } from '../utils/storage';
 
 export type InputMode = 'xtream' | 'manual';
@@ -16,6 +16,7 @@ interface ChannelState {
   channels: Channel[];
   programs: Program[];
   programsByChannel: Map<string, Program[]>;
+  categories: Category[];
   groups: string[];
   regions: string[];
   contentTypeCounts: Record<string, number>;
@@ -58,9 +59,11 @@ const DEFAULT_SERVER_URL: string = typeof __SERVER_URL__ !== 'undefined' ? __SER
 
 interface ChannelActions {
   setApiBaseUrl: (url: string) => void;
+  fetchCategories: (contentType: string) => Promise<void>;
   fetchChannels: (group?: string) => Promise<void>;
   fetchPrograms: () => Promise<void>;
   fetchEpgForStream: (streamId: number) => Promise<Program[]>;
+  searchChannels: (query: string, contentType?: string) => Promise<Channel[]>;
   fetchConfig: () => Promise<void>;
   saveConfig: (config: Record<string, string>) => Promise<void>;
   triggerSync: () => Promise<void>;
@@ -93,6 +96,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
   channels: [],
   programs: [],
   programsByChannel: new Map(),
+  categories: [],
   groups: ['All'],
   regions: ['All'],
   contentTypeCounts: {},
@@ -115,6 +119,18 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
   setApiBaseUrl: (url: string) => {
     set({ apiBaseUrl: url });
     setItem(API_BASE_URL_KEY, url);
+  },
+
+  fetchCategories: async (contentType: string) => {
+    const { apiBaseUrl } = get();
+    if (!apiBaseUrl) return;
+    try {
+      const data = await apiFetch(apiBaseUrl, `/api/categories?type=${encodeURIComponent(contentType)}`);
+      set({ categories: data.categories || [] });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to fetch categories';
+      set({ error: msg });
+    }
   },
 
   fetchChannels: async (group?: string) => {
@@ -194,6 +210,19 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
       }
       set({ programsByChannel: newIndex });
       return programs;
+    } catch {
+      return [];
+    }
+  },
+
+  searchChannels: async (query: string, contentType?: string) => {
+    const { apiBaseUrl } = get();
+    if (!apiBaseUrl || !query.trim()) return [];
+    try {
+      const params = new URLSearchParams({ q: query });
+      if (contentType) params.set('type', contentType);
+      const data = await apiFetch(apiBaseUrl, `/api/search?${params}`);
+      return data.channels as Channel[];
     } catch {
       return [];
     }

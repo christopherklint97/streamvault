@@ -4,6 +4,7 @@ import type { View } from '../types';
 interface AppState {
   currentView: View;
   previousView: View | null;
+  selectedGroup: string | null;
   showExitDialog: boolean;
   showToast: boolean;
   toastMessage: string;
@@ -12,6 +13,8 @@ interface AppState {
 interface AppActions {
   navigate: (view: View) => void;
   goBack: () => void;
+  selectGroup: (group: string) => void;
+  clearGroup: () => void;
   showExitConfirm: () => void;
   hideExitConfirm: () => void;
   showToastMessage: (msg: string) => void;
@@ -22,6 +25,7 @@ let toastTimer: ReturnType<typeof setTimeout> | null = null;
 export const useAppStore = create<AppState & AppActions>()((set, get) => ({
   currentView: 'home',
   previousView: null,
+  selectedGroup: null,
   showExitDialog: false,
   showToast: false,
   toastMessage: '',
@@ -31,13 +35,23 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
     set({
       previousView: currentView,
       currentView: view,
+      selectedGroup: null,
       showExitDialog: false,
     });
   },
 
-  goBack: () => {
-    const { currentView, previousView } = get();
+  selectGroup: (group: string) => {
+    set({ selectedGroup: group });
+  },
 
+  clearGroup: () => {
+    set({ selectedGroup: null });
+  },
+
+  goBack: () => {
+    const { currentView, previousView, selectedGroup } = get();
+
+    // From player, go back to previous view
     if (currentView === 'player' && previousView) {
       set({
         currentView: previousView,
@@ -47,10 +61,18 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
       return;
     }
 
+    // If inside a group, go back to group list
+    if (selectedGroup) {
+      set({ selectedGroup: null });
+      return;
+    }
+
+    // From a content view, go home
     if (currentView !== 'home') {
       set({
-        currentView: previousView ?? 'home',
+        currentView: 'home',
         previousView: null,
+        selectedGroup: null,
         showExitDialog: false,
       });
       return;

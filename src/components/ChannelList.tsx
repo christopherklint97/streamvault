@@ -1,38 +1,44 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import type { Channel } from '../types';
-import { useChannelStore } from '../stores/channelStore';
 import { usePlayerStore } from '../stores/playerStore';
 import { useAppStore } from '../stores/appStore';
-import { searchChannels } from '../services/channel-service';
 import ChannelCard from './ChannelCard';
 import VirtualGrid from './VirtualGrid';
 import FocusZone from './FocusZone';
 
 interface ChannelListProps {
   channels: Channel[];
+  groupName: string;
 }
 
 const COLUMN_COUNT = 5;
 
-export default function ChannelList({ channels }: ChannelListProps) {
+export default function ChannelList({ channels, groupName }: ChannelListProps) {
   const [searchQuery, setSearchQuery] = useState('');
-  const groups = useChannelStore((s) => s.groups);
-  const regions = useChannelStore((s) => s.regions);
-  const selectedGroup = useChannelStore((s) => s.selectedGroup);
-  const selectedRegion = useChannelStore((s) => s.selectedRegion);
-  const setSelectedGroup = useChannelStore((s) => s.setSelectedGroup);
-  const setSelectedRegion = useChannelStore((s) => s.setSelectedRegion);
   const setChannel = usePlayerStore((s) => s.setChannel);
   const navigate = useAppStore((s) => s.navigate);
+  const gridContainerRef = useRef<HTMLDivElement>(null);
 
-  const filteredChannels = searchChannels(
-    channels.filter((ch) => {
-      const groupMatch = selectedGroup === 'All' || ch.group === selectedGroup;
-      const regionMatch = selectedRegion === 'All' || ch.region === selectedRegion;
-      return groupMatch && regionMatch;
-    }),
-    searchQuery
-  );
+  // Client-side filter within the loaded group
+  const displayChannels = useMemo(() => {
+    if (!searchQuery.trim()) return channels;
+    const q = searchQuery.toLowerCase();
+    return channels.filter((ch) => ch.name.toLowerCase().includes(q));
+  }, [channels, searchQuery]);
+
+  // Re-focus first card when channels change
+  const prevCountRef = useRef(channels.length);
+  useEffect(() => {
+    if (channels.length !== prevCountRef.current) {
+      prevCountRef.current = channels.length;
+      requestAnimationFrame(() => {
+        const container = gridContainerRef.current;
+        if (!container) return;
+        const firstCard = container.querySelector('[data-focusable]') as HTMLElement | null;
+        firstCard?.focus({ preventScroll: true });
+      });
+    }
+  }, [channels.length]);
 
   const handleSelect = useCallback(
     (channel: Channel) => {
@@ -44,11 +50,12 @@ export default function ChannelList({ channels }: ChannelListProps) {
 
   return (
     <FocusZone className="channel-list">
+      <h1 className="channel-list__title">{groupName}</h1>
       <div className="channel-list__search">
         <input
           className="channel-list__search-input"
           type="text"
-          placeholder="Search channels..."
+          placeholder={`Search in ${groupName}...`}
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           data-focusable
@@ -65,66 +72,34 @@ export default function ChannelList({ channels }: ChannelListProps) {
           </button>
         )}
       </div>
-      <div className="channel-list__filters">
-        <div className="filter-row">
-          <span className="filter-label">Group:</span>
-          <div className="filter-chips">
-            {groups.map((group) => (
-              <button
-                key={group}
-                className={`filter-chip${selectedGroup === group ? ' filter-chip--active' : ''}`}
-                data-focusable
-                tabIndex={0}
-                onClick={() => setSelectedGroup(group)}
-              >
-                {group}
-              </button>
-            ))}
+      <div className="channel-list__count">
+        {`${displayChannels.length} item${displayChannels.length !== 1 ? 's' : ''}`}
+      </div>
+      <div ref={gridContainerRef}>
+        {displayChannels.length === 0 ? (
+          <div className="channel-list__empty">
+            {searchQuery ? 'No matches found.' : 'Loading...'}
           </div>
-        </div>
-        {regions.length > 1 && (
-          <div className="filter-row">
-            <span className="filter-label">Region:</span>
-            <div className="filter-chips">
-              {regions.map((region) => (
-                <button
-                  key={region}
-                  className={`filter-chip${selectedRegion === region ? ' filter-chip--active' : ''}`}
-                  data-focusable
-                  tabIndex={0}
-                  onClick={() => setSelectedRegion(region)}
-                >
-                  {region}
-                </button>
-              ))}
-            </div>
-          </div>
+        ) : (
+          <VirtualGrid
+            itemCount={displayChannels.length}
+            columnCount={COLUMN_COUNT}
+            rowHeight={240}
+            containerHeight={800}
+            renderItem={(index: number) => {
+              const channel = displayChannels[index];
+              return (
+                <ChannelCard
+                  key={channel.id}
+                  channel={channel}
+                  isFocused={false}
+                  onSelect={() => handleSelect(channel)}
+                />
+              );
+            }}
+          />
         )}
       </div>
-      <div className="channel-list__count">
-        {filteredChannels.length} channel{filteredChannels.length !== 1 ? 's' : ''}
-      </div>
-      {filteredChannels.length === 0 ? (
-        <div className="channel-list__empty">No channels found</div>
-      ) : (
-        <VirtualGrid
-          itemCount={filteredChannels.length}
-          columnCount={COLUMN_COUNT}
-          rowHeight={220}
-          containerHeight={800}
-          renderItem={(index: number) => {
-            const channel = filteredChannels[index];
-            return (
-              <ChannelCard
-                key={channel.id}
-                channel={channel}
-                isFocused={false}
-                onSelect={() => handleSelect(channel)}
-              />
-            );
-          }}
-        />
-      )}
     </FocusZone>
   );
 }
