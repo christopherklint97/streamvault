@@ -27,3 +27,15 @@ export interface PlayerState {
   currentChannel: Channel | null;
   errorMessage: string;
 }
+
+export interface WatchProgress {
+  channelId: string;
+  /** Current playback position in seconds */
+  position: number;
+  /** Total duration in seconds (0 for live content) */
+  duration: number;
+  /** Timestamp of last update */
+  updatedAt: number;
+  /** Content type at time of watching */
+  contentType: ContentType;
+}

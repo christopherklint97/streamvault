@@ -3,6 +3,9 @@ import { usePlayerStore } from '../stores/playerStore';
 import type { PlayerState } from '../types';
 import type { SubtitleTrack } from '../services/avplay';
 import { TizenPlayer, HTML5Player } from '../services/avplay';
+import { saveWatchProgress, getWatchProgress } from '../services/channel-service';
+
+const PROGRESS_SAVE_INTERVAL = 10_000; // Save progress every 10 seconds
 
 export function usePlayer(): {
   play: () => void;
@@ -20,6 +23,48 @@ export function usePlayer(): {
   const [currentSubtitleIndex, setCurrentSubtitleIndex] = useState(-1);
   const [subtitleText, setSubtitleText] = useState('');
   const playerRef = useRef<TizenPlayer | HTML5Player | null>(null);
+  const progressIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const saveCurrentProgress = useCallback(() => {
+    const channel = usePlayerStore.getState().currentChannel;
+    if (!channel) return;
+
+    // Don't track progress for live TV
+    if (channel.contentType === 'livetv') return;
+
+    if (typeof webapis !== 'undefined' && webapis.avplay) {
+      try {
+        const position = webapis.avplay.getCurrentTime() / 1000;
+        const duration = webapis.avplay.getDuration() / 1000;
+        if (duration > 0) {
+          saveWatchProgress(channel.id, position, duration, channel.contentType);
+        }
+      } catch {
+        // Player may not be in a valid state
+      }
+    } else if (videoRef.current) {
+      const video = videoRef.current;
+      const position = video.currentTime;
+      const duration = video.duration;
+      if (duration > 0 && isFinite(duration)) {
+        saveWatchProgress(channel.id, position, duration, channel.contentType);
+      }
+    }
+  }, []);
+
+  const startProgressTracking = useCallback(() => {
+    if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
+    progressIntervalRef.current = setInterval(saveCurrentProgress, PROGRESS_SAVE_INTERVAL);
+  }, [saveCurrentProgress]);
+
+  const stopProgressTracking = useCallback(() => {
+    if (progressIntervalRef.current) {
+      clearInterval(progressIntervalRef.current);
+      progressIntervalRef.current = null;
+    }
+    // Final save on stop
+    saveCurrentProgress();
+  }, [saveCurrentProgress]);
 
   const play = useCallback(() => {
     const channel = usePlayerStore.getState().currentChannel;
@@ -27,6 +72,12 @@ export function usePlayer(): {
 
     const setStatus = usePlayerStore.getState().setStatus;
     const setError = usePlayerStore.getState().setError;
+
+    // Check for saved progress to resume from
+    const savedProgress = channel.contentType !== 'livetv'
+      ? getWatchProgress(channel.id)
+      : null;
+    const resumePosition = savedProgress ? savedProgress.position : 0;
 
     setStatus('loading');
 
@@ -53,14 +104,21 @@ export function usePlayer(): {
           onsubtitlechange: (_duration: number, text: string) => {
             tizenPlayer.onSubtitleText?.(text);
           },
-          onstreamcompleted: () => setStatus('idle'),
+          onstreamcompleted: () => {
+            saveCurrentProgress();
+            setStatus('idle');
+          },
           ondrmevent: () => {},
         });
         avplay.prepareAsync(
           () => {
+            if (resumePosition > 0) {
+              avplay.seekTo(resumePosition * 1000);
+            }
             avplay.play();
             setStatus('playing');
             setSubtitleTracks(tizenPlayer.getSubtitleTracks());
+            startProgressTracking();
           },
           () => setError('Failed to prepare stream')
         );
@@ -81,12 +139,20 @@ export function usePlayer(): {
 
         video.src = channel.url;
         video.onloadeddata = () => {
+          if (resumePosition > 0) {
+            video.currentTime = resumePosition;
+          }
           setStatus('playing');
           setSubtitleTracks(html5Player.getSubtitleTracks());
+          startProgressTracking();
         };
         video.onwaiting = () => setStatus('loading');
         video.onplaying = () => setStatus('playing');
         video.onerror = () => setError('Failed to play stream');
+        video.onended = () => {
+          saveCurrentProgress();
+          setStatus('idle');
+        };
         video.play().catch(() => setError('Playback blocked'));
 
         // Listen for text tracks being added
@@ -95,10 +161,12 @@ export function usePlayer(): {
         });
       }
     }
-  }, []);
+  }, [saveCurrentProgress, startProgressTracking]);
 
   const stop = useCallback(() => {
     const setStatus = usePlayerStore.getState().setStatus;
+
+    stopProgressTracking();
 
     if (typeof webapis !== 'undefined' && webapis.avplay) {
       try {
@@ -118,7 +186,7 @@ export function usePlayer(): {
     setCurrentSubtitleIndex(-1);
     setSubtitleText('');
     setStatus('idle');
-  }, []);
+  }, [stopProgressTracking]);
 
   const retry = useCallback(() => {
     const clearError = usePlayerStore.getState().clearError;
