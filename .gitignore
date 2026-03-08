@@ -30,3 +30,9 @@ certs/
 
 # Environment secrets
 .env
+
+# Build artifacts
+*.tpk
+
+# Device maps
+.sdb.devicemap
