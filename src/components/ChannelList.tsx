@@ -59,7 +59,7 @@ export default function ChannelList({ channels }: ChannelListProps) {
   };
 
   return (
-    <div className="channel-list">
+    <div className="channel-list" ref={containerRef} tabIndex={0}>
       <div className="channel-list__search">
         <input
           className="channel-list__search-input"

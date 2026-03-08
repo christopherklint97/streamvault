@@ -97,8 +97,8 @@ export default function EPGGrid() {
 
       switch (e.keyCode) {
         case KEY_CODES.UP:
-          e.preventDefault();
           if (focusRow > 0) {
+            e.preventDefault();
             const newRow = focusRow - 1;
             setFocusRow(newRow);
             setFocusCol(0);
@@ -106,10 +106,11 @@ export default function EPGGrid() {
               setScrollOffset(newRow);
             }
           }
+          // At top edge: let it bubble
           break;
         case KEY_CODES.DOWN:
-          e.preventDefault();
           if (focusRow < channels.length - 1) {
+            e.preventDefault();
             const newRow = focusRow + 1;
             setFocusRow(newRow);
             setFocusCol(0);
@@ -117,14 +118,20 @@ export default function EPGGrid() {
               setScrollOffset(newRow - VISIBLE_ROWS + 1);
             }
           }
+          // At bottom edge: let it bubble
           break;
         case KEY_CODES.LEFT:
-          e.preventDefault();
-          if (focusCol > 0) setFocusCol(focusCol - 1);
+          if (focusCol > 0) {
+            e.preventDefault();
+            setFocusCol(focusCol - 1);
+          }
+          // At left edge: let it bubble to sidebar handler
           break;
         case KEY_CODES.RIGHT:
-          e.preventDefault();
-          if (focusCol < channelPrograms.length - 1) setFocusCol(focusCol + 1);
+          if (focusCol < channelPrograms.length - 1) {
+            e.preventDefault();
+            setFocusCol(focusCol + 1);
+          }
           break;
         case KEY_CODES.ENTER:
           e.preventDefault();

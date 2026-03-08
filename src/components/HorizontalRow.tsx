@@ -42,6 +42,7 @@ export default function HorizontalRow({ title, channels, onSelect }: HorizontalR
             e.preventDefault();
             e.stopPropagation();
           }
+          // At left edge: let event bubble so sidebar can catch it
           break;
         case KEY_CODES.RIGHT:
           if (focusIndex < channels.length - 1) {
@@ -67,6 +68,7 @@ export default function HorizontalRow({ title, channels, onSelect }: HorizontalR
           const cards = container.querySelectorAll('[data-focusable]');
           const card = cards[next] as HTMLElement;
           card?.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+          (card as HTMLElement)?.focus();
         }
       }
     },

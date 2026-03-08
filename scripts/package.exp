@@ -5,7 +5,7 @@ set env_home $env(HOME)
 spawn ${env_home}/tizen-studio/tools/ide/bin/tizen package -t wgt -s StreamVault -- [pwd]/dist/.buildResult
 
 expect {
-    "Author password:" { send "1234\r"; exp_continue }
+    "Author password:" { send "$env(CERT_AUTHOR_PASSWORD)\r"; exp_continue }
     "Yes: (Y), No: (N) ?" { send "Y\r"; exp_continue }
     eof
 }

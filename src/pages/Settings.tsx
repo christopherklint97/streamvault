@@ -80,18 +80,19 @@ export default function Settings() {
   }, [showToastMessage]);
 
   const handleInputKeyDown = (e: React.KeyboardEvent) => {
-    // Allow normal typing in input fields - only intercept navigation keys
+    // Allow navigation keys to bubble for focus navigation and sidebar
     if (
       e.keyCode === KEY_CODES.UP ||
-      e.keyCode === KEY_CODES.DOWN
+      e.keyCode === KEY_CODES.DOWN ||
+      e.keyCode === KEY_CODES.LEFT ||
+      e.keyCode === KEY_CODES.RIGHT ||
+      e.keyCode === KEY_CODES.ENTER ||
+      e.keyCode === KEY_CODES.BACK
     ) {
-      // Let focus navigation handle it
       return;
     }
     // Stop propagation for all other keys so typing works
-    if (e.keyCode !== KEY_CODES.ENTER && e.keyCode !== KEY_CODES.BACK) {
-      e.stopPropagation();
-    }
+    e.stopPropagation();
   };
 
   return (

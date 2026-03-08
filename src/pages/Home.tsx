@@ -87,6 +87,24 @@ export default function Home() {
         <div className="home__welcome">
           <h1>Welcome to StreamVault</h1>
           <p>Go to Settings to add a playlist URL and start watching.</p>
+          <button
+            className="home__welcome-btn"
+            data-focusable
+            tabIndex={0}
+            onClick={() => navigate('settings')}
+            onKeyDown={(e) => {
+              if (e.keyCode === KEY_CODES.ENTER) {
+                e.preventDefault();
+                navigate('settings');
+              } else if (e.keyCode === KEY_CODES.LEFT) {
+                e.preventDefault();
+                const sidebarItem = document.querySelector('.sidebar-item') as HTMLElement | null;
+                sidebarItem?.focus();
+              }
+            }}
+          >
+            Open Settings
+          </button>
         </div>
       </div>
     );

@@ -14,10 +14,10 @@ const ACCESS_TOKEN = process.env.SAMSUNG_ACCESS_TOKEN;
 const USER_ID = process.env.SAMSUNG_USER_ID;
 const TV_DUID = process.env.TV_DUID;
 const CERT_DIR = path.resolve(__dirname, '..', 'certs');
-const CERT_PASSWORD = 'streamvault';
+const CERT_PASSWORD = process.env.CERT_AUTHOR_PASSWORD;
 
-if (!ACCESS_TOKEN || !USER_ID || !TV_DUID) {
-  console.error('Required env vars: SAMSUNG_ACCESS_TOKEN, SAMSUNG_USER_ID, TV_DUID');
+if (!ACCESS_TOKEN || !USER_ID || !TV_DUID || !CERT_PASSWORD) {
+  console.error('Required env vars: SAMSUNG_ACCESS_TOKEN, SAMSUNG_USER_ID, TV_DUID, CERT_AUTHOR_PASSWORD');
   process.exit(1);
 }
 

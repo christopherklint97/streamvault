@@ -14,24 +14,30 @@ const PROJECT_DIR = path.resolve(__dirname, '..');
 const DIST_DIR = path.join(PROJECT_DIR, 'dist');
 const CERT_DIR = path.join(PROJECT_DIR, 'certs');
 const WGT_FILE = path.join(PROJECT_DIR, 'StreamVault.wgt');
-const CERT_PASSWORD = 'streamvault';
-
 // Check if Samsung certs exist, otherwise fall back to tizen-tv-dev-cli
 let authorP12, authorPassword, distributorP12, distributorPassword;
 
 if (fs.existsSync(path.join(CERT_DIR, 'author.p12'))) {
-  console.log('Using Samsung certificates from certs/');
+  console.log('Using certificates from certs/');
   authorP12 = path.join(CERT_DIR, 'author.p12');
-  authorPassword = CERT_PASSWORD;
+  authorPassword = process.env.CERT_AUTHOR_PASSWORD;
   distributorP12 = path.join(CERT_DIR, 'distributor.p12');
-  distributorPassword = CERT_PASSWORD;
+  distributorPassword = process.env.CERT_DIST_PASSWORD;
+  if (!authorPassword || !distributorPassword) {
+    console.error('Error: CERT_AUTHOR_PASSWORD and CERT_DIST_PASSWORD env vars required. Add them to .env.');
+    process.exit(1);
+  }
 } else {
   console.log('Samsung certs not found, falling back to tizen-tv-dev-cli dev certs');
   const devCliPath = path.dirname(require.resolve('tizen-tv-dev-cli/package.json'));
   authorP12 = path.join(devCliPath, 'resource/Author/tizentvapp.p12');
-  authorPassword = 'tizentvapp';
+  authorPassword = process.env.CERT_AUTHOR_PASSWORD;
   distributorP12 = path.join(devCliPath, 'resource/certificate-generator/certificates/distributor/tizen-distributor-signer.p12');
-  distributorPassword = 'tizenpkcs12passfordsigner';
+  distributorPassword = process.env.CERT_DIST_PASSWORD;
+  if (!authorPassword || !distributorPassword) {
+    console.error('Error: CERT_AUTHOR_PASSWORD and CERT_DIST_PASSWORD env vars required. Add them to .env.');
+    process.exit(1);
+  }
 }
 
 function loadP12(p12Path, password) {
@@ -42,14 +48,16 @@ function loadP12(p12Path, password) {
   let privateKey = null;
   const certs = [];
 
-  for (const bag of p12.getBags({ bagType: forge.oids.pkcs8ShroudedKeyBag }).values()) {
-    for (const item of bag) {
+  const keyBags = p12.getBags({ bagType: forge.oids.pkcs8ShroudedKeyBag });
+  for (const bagType of Object.keys(keyBags)) {
+    for (const item of keyBags[bagType]) {
       if (item.key) privateKey = item.key;
     }
   }
 
-  for (const bag of p12.getBags({ bagType: forge.oids.certBag }).values()) {
-    for (const item of bag) {
+  const certBags = p12.getBags({ bagType: forge.oids.certBag });
+  for (const bagType of Object.keys(certBags)) {
+    for (const item of certBags[bagType]) {
       if (item.cert) certs.push(item.cert);
     }
   }
