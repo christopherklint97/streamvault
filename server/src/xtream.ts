@@ -171,6 +171,7 @@ export async function fetchXtreamStreamsByCategory(
         region: '',
         content_type: 'livetv',
         category_id: categoryId,
+        sort_order: s.num || 0,
       });
     }
   } else if (type === 'vod') {
@@ -189,6 +190,7 @@ export async function fetchXtreamStreamsByCategory(
         region: '',
         content_type: 'movies',
         category_id: categoryId,
+        sort_order: s.num || 0,
       });
     }
   } else {
@@ -207,12 +209,38 @@ export async function fetchXtreamStreamsByCategory(
         region: '',
         content_type: 'series',
         category_id: categoryId,
+        sort_order: s.num || 0,
       });
     }
   }
 
   logger.info(`Fetched ${channels.length} streams for category "${categoryName}" (${categoryId})`);
   return channels;
+}
+
+// ---------- Fetch all categories' streams (iterates per-category, caches each) ----------
+
+export async function fetchAllCategoryStreams(
+  config: XtreamConfig,
+  categories: Array<{ id: string; name: string }>,
+  onCategoryDone: (categoryId: string, channels: DBChannel[]) => void,
+): Promise<number> {
+  let totalFetched = 0;
+
+  for (const cat of categories) {
+    try {
+      const channels = await fetchXtreamStreamsByCategory(config, cat.id, cat.name);
+      onCategoryDone(cat.id, channels);
+      totalFetched += channels.length;
+      logger.debug(`Cached ${channels.length} streams for "${cat.name}"`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      logger.warn(`Failed to fetch category "${cat.name}": ${msg}`);
+    }
+  }
+
+  logger.info(`Fetched all categories: ${totalFetched} total streams from ${categories.length} categories`);
+  return totalFetched;
 }
 
 // ---------- On-demand: short EPG for specific streams ----------

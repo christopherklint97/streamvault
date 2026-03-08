@@ -5,9 +5,10 @@ import {
   getPrograms, getConfig, setConfig,
   getCategories, getCategoryByName, getContentTypeCounts,
   saveChannelsForCategory, markCategoryFetched,
+  searchChannelsByName, getChannelCountByContentType,
 } from './db.js';
 import { getStatus, sync, cancelSync, startupSync } from './sync.js';
-import { fetchXtreamStreamsByCategory, fetchXtreamShortEpg } from './xtream.js';
+import { fetchXtreamStreamsByCategory, fetchXtreamShortEpg, fetchAllCategoryStreams } from './xtream.js';
 import type { XtreamConfig } from './xtream.js';
 import { logger } from './logger.js';
 
@@ -111,6 +112,110 @@ app.get('/api/channels', async (req, res) => {
 
   const regions = ['All', ...getRegions()];
   res.json({ channels, groups, regions, contentTypeCounts });
+});
+
+// ---------- Search ----------
+
+// Track ongoing fetch-all operations to avoid duplicates
+const fetchAllInProgress = new Set<string>();
+
+app.get('/api/search', async (req, res) => {
+  const q = (req.query.q as string || '').trim();
+  const contentType = req.query.type as string | undefined;
+  const inputMode = getConfig('input_mode', 'manual');
+
+  if (!q) {
+    res.json({ channels: [], fetching: false });
+    return;
+  }
+
+  // If xtream mode and no channels cached for this content type, fetch all categories first
+  let fetching = false;
+  if (inputMode === 'xtream' && contentType) {
+    const cachedCount = getChannelCountByContentType(contentType);
+    if (cachedCount === 0 && !fetchAllInProgress.has(contentType)) {
+      // Trigger background fetch of all categories for this content type
+      fetching = true;
+      fetchAllInProgress.add(contentType);
+      const config = getXtreamConfig();
+      if (config) {
+        const cats = getCategories(contentType);
+        const unfetchedCats = cats.filter(c => !c.fetched_at);
+        if (unfetchedCats.length > 0) {
+          // Fire and forget — results will be available on next search
+          fetchAllCategoryStreams(config, unfetchedCats, (catId, channels) => {
+            saveChannelsForCategory(catId, channels);
+            markCategoryFetched(catId, channels.length);
+          }).finally(() => {
+            fetchAllInProgress.delete(contentType);
+            logger.info(`Background fetch complete for ${contentType}`);
+          });
+        } else {
+          fetchAllInProgress.delete(contentType);
+          fetching = false;
+        }
+      } else {
+        fetchAllInProgress.delete(contentType);
+        fetching = false;
+      }
+    } else if (fetchAllInProgress.has(contentType)) {
+      fetching = true;
+    }
+  }
+
+  // Search what we have cached
+  const dbChannels = searchChannelsByName(q, contentType);
+  const channels = dbChannels.map(ch => ({
+    id: ch.id,
+    name: ch.name,
+    url: ch.url,
+    logo: ch.logo,
+    group: ch.grp,
+    region: ch.region,
+    contentType: ch.content_type,
+    isFavorite: false,
+  }));
+
+  res.json({ channels, fetching });
+});
+
+// Fetch all streams for a content type (iterates through categories)
+app.post('/api/fetch-all', async (req, res) => {
+  const contentType = req.body.contentType as string;
+  if (!contentType) {
+    res.status(400).json({ error: 'contentType required' });
+    return;
+  }
+
+  if (fetchAllInProgress.has(contentType)) {
+    res.json({ ok: true, message: 'Already fetching' });
+    return;
+  }
+
+  const config = getXtreamConfig();
+  if (!config) {
+    res.status(400).json({ error: 'Xtream not configured' });
+    return;
+  }
+
+  const cats = getCategories(contentType);
+  const unfetchedCats = cats.filter(c => !c.fetched_at);
+
+  if (unfetchedCats.length === 0) {
+    res.json({ ok: true, message: 'All categories already cached' });
+    return;
+  }
+
+  fetchAllInProgress.add(contentType);
+  res.json({ ok: true, message: `Fetching ${unfetchedCats.length} categories` });
+
+  fetchAllCategoryStreams(config, unfetchedCats, (catId, channels) => {
+    saveChannelsForCategory(catId, channels);
+    markCategoryFetched(catId, channels.length);
+  }).finally(() => {
+    fetchAllInProgress.delete(contentType);
+    logger.info(`Fetch-all complete for ${contentType}`);
+  });
 });
 
 // ---------- Programs ----------

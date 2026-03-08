@@ -74,6 +74,16 @@ try {
 
 db.exec('CREATE INDEX IF NOT EXISTS idx_channels_category_id ON channels(category_id)');
 
+// Migration: add sort_order column to existing channels table
+try {
+  db.prepare('SELECT sort_order FROM channels LIMIT 1').get();
+} catch {
+  db.exec('ALTER TABLE channels ADD COLUMN sort_order INTEGER DEFAULT 0');
+  logger.info('Migrated channels table: added sort_order column');
+}
+
+db.exec('CREATE INDEX IF NOT EXISTS idx_channels_name ON channels(name COLLATE NOCASE)');
+
 // ---------- Config helpers ----------
 
 export function getConfig(key: string, fallback = ''): string {
@@ -147,10 +157,11 @@ export interface DBChannel {
   region: string;
   content_type: string;
   category_id?: string;
+  sort_order?: number;
 }
 
 const insertChannel = db.prepare(
-  'INSERT OR REPLACE INTO channels (id, name, url, logo, grp, region, content_type, category_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  'INSERT OR REPLACE INTO channels (id, name, url, logo, grp, region, content_type, category_id, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
 );
 
 const clearChannels = db.prepare('DELETE FROM channels');
@@ -158,7 +169,7 @@ const clearChannels = db.prepare('DELETE FROM channels');
 const insertChannelsBatch = db.transaction((channels: DBChannel[]) => {
   clearChannels.run();
   for (const ch of channels) {
-    insertChannel.run(ch.id, ch.name, ch.url, ch.logo, ch.grp, ch.region, ch.content_type, ch.category_id || '');
+    insertChannel.run(ch.id, ch.name, ch.url, ch.logo, ch.grp, ch.region, ch.content_type, ch.category_id || '', ch.sort_order ?? 0);
   }
 });
 
@@ -176,7 +187,7 @@ const clearChannelsByCategory = db.prepare('DELETE FROM channels WHERE category_
 const insertChannelsForCategory = db.transaction((categoryId: string, channels: DBChannel[]) => {
   clearChannelsByCategory.run(categoryId);
   for (const ch of channels) {
-    insertChannel.run(ch.id, ch.name, ch.url, ch.logo, ch.grp, ch.region, ch.content_type, ch.category_id || '');
+    insertChannel.run(ch.id, ch.name, ch.url, ch.logo, ch.grp, ch.region, ch.content_type, ch.category_id || '', ch.sort_order ?? 0);
   }
 });
 
@@ -185,15 +196,32 @@ export function saveChannelsForCategory(categoryId: string, channels: DBChannel[
 }
 
 export function getChannels(): DBChannel[] {
-  return db.prepare('SELECT * FROM channels ORDER BY name').all() as DBChannel[];
+  return db.prepare('SELECT * FROM channels ORDER BY sort_order, name').all() as DBChannel[];
 }
 
 export function getChannelsByGroup(group: string): DBChannel[] {
-  return db.prepare('SELECT * FROM channels WHERE grp = ? ORDER BY name').all(group) as DBChannel[];
+  return db.prepare('SELECT * FROM channels WHERE grp = ? ORDER BY sort_order, name').all(group) as DBChannel[];
 }
 
 export function getChannelsByContentType(contentType: string): DBChannel[] {
-  return db.prepare('SELECT * FROM channels WHERE content_type = ? ORDER BY name').all(contentType) as DBChannel[];
+  return db.prepare('SELECT * FROM channels WHERE content_type = ? ORDER BY sort_order, name').all(contentType) as DBChannel[];
+}
+
+export function searchChannelsByName(query: string, contentType?: string): DBChannel[] {
+  const pattern = `%${query}%`;
+  if (contentType) {
+    return db.prepare(
+      'SELECT * FROM channels WHERE name LIKE ? AND content_type = ? ORDER BY sort_order, name LIMIT 200'
+    ).all(pattern, contentType) as DBChannel[];
+  }
+  return db.prepare(
+    'SELECT * FROM channels WHERE name LIKE ? ORDER BY sort_order, name LIMIT 200'
+  ).all(pattern) as DBChannel[];
+}
+
+export function getChannelCountByContentType(contentType: string): number {
+  const row = db.prepare('SELECT COUNT(*) as count FROM channels WHERE content_type = ?').get(contentType) as { count: number };
+  return row.count;
 }
 
 export function getChannelCountByCategory(categoryId: string): number {
