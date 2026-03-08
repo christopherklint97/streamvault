@@ -1,13 +1,12 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import type { Channel } from '../types';
 import { useChannelStore } from '../stores/channelStore';
 import { usePlayerStore } from '../stores/playerStore';
 import { useAppStore } from '../stores/appStore';
-import { useFocusNavigation } from '../hooks/useFocusNavigation';
 import { searchChannels } from '../services/channel-service';
-import { KEY_CODES } from '../utils/keys';
 import ChannelCard from './ChannelCard';
 import VirtualGrid from './VirtualGrid';
+import FocusZone from './FocusZone';
 
 interface ChannelListProps {
   channels: Channel[];
@@ -16,7 +15,6 @@ interface ChannelListProps {
 const COLUMN_COUNT = 5;
 
 export default function ChannelList({ channels }: ChannelListProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const groups = useChannelStore((s) => s.groups);
   const regions = useChannelStore((s) => s.regions);
@@ -36,8 +34,6 @@ export default function ChannelList({ channels }: ChannelListProps) {
     searchQuery
   );
 
-  const { focusIndex } = useFocusNavigation(containerRef, COLUMN_COUNT);
-
   const handleSelect = useCallback(
     (channel: Channel) => {
       setChannel(channel);
@@ -46,20 +42,8 @@ export default function ChannelList({ channels }: ChannelListProps) {
     [setChannel, navigate]
   );
 
-  const handleFilterKeyDown = (e: React.KeyboardEvent, type: 'group' | 'region', values: string[], current: string) => {
-    if (e.keyCode === KEY_CODES.LEFT || e.keyCode === KEY_CODES.RIGHT) {
-      e.preventDefault();
-      const idx = values.indexOf(current);
-      const next = e.keyCode === KEY_CODES.RIGHT
-        ? values[(idx + 1) % values.length]
-        : values[(idx - 1 + values.length) % values.length];
-      if (type === 'group') setSelectedGroup(next);
-      else setSelectedRegion(next);
-    }
-  };
-
   return (
-    <div className="channel-list" ref={containerRef} tabIndex={0}>
+    <FocusZone className="channel-list">
       <div className="channel-list__search">
         <input
           className="channel-list__search-input"
@@ -92,7 +76,6 @@ export default function ChannelList({ channels }: ChannelListProps) {
                 data-focusable
                 tabIndex={0}
                 onClick={() => setSelectedGroup(group)}
-                onKeyDown={(e) => handleFilterKeyDown(e, 'group', groups, selectedGroup)}
               >
                 {group}
               </button>
@@ -110,7 +93,6 @@ export default function ChannelList({ channels }: ChannelListProps) {
                   data-focusable
                   tabIndex={0}
                   onClick={() => setSelectedRegion(region)}
-                  onKeyDown={(e) => handleFilterKeyDown(e, 'region', regions, selectedRegion)}
                 >
                   {region}
                 </button>
@@ -130,20 +112,19 @@ export default function ChannelList({ channels }: ChannelListProps) {
           columnCount={COLUMN_COUNT}
           rowHeight={220}
           containerHeight={800}
-          focusIndex={focusIndex}
           renderItem={(index: number) => {
             const channel = filteredChannels[index];
             return (
               <ChannelCard
                 key={channel.id}
                 channel={channel}
-                isFocused={index === focusIndex}
+                isFocused={false}
                 onSelect={() => handleSelect(channel)}
               />
             );
           }}
         />
       )}
-    </div>
+    </FocusZone>
   );
 }

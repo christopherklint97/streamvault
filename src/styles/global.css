@@ -238,6 +238,43 @@ a {
   box-shadow: 0 4px 20px rgba(255, 71, 87, 0.3);
 }
 
+/* --- App Loading Banner (global, shows during background sync) --- */
+.app__loading-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 9998;
+  background: var(--sv-bg-raised);
+  border-bottom: 1px solid var(--sv-border-subtle);
+  padding: 10px 24px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  animation: slideUp 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.app__loading-bar {
+  flex: 0 0 200px;
+  height: 4px;
+  background: var(--sv-bg-overlay);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.app__loading-fill {
+  height: 100%;
+  background: var(--sv-gradient-accent);
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+.app__loading-text {
+  font-size: 16px;
+  color: var(--sv-text-secondary);
+  font-weight: 500;
+}
+
 /* --- Sidebar --- */
 .sidebar {
   position: fixed;
@@ -1700,6 +1737,107 @@ a {
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+}
+
+/* --- Settings Progress Bar --- */
+.settings__progress {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 22px;
+  background: var(--sv-bg-raised);
+  border: 1px solid var(--sv-border-subtle);
+  border-radius: var(--sv-radius-md);
+}
+
+.settings__progress-bar {
+  width: 100%;
+  height: 6px;
+  background: var(--sv-bg-overlay);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.settings__progress-fill {
+  height: 100%;
+  background: var(--sv-gradient-accent);
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+.settings__progress-text {
+  font-size: 18px;
+  color: var(--sv-text-secondary);
+  font-weight: 500;
+}
+
+.settings__progress-count {
+  font-size: 16px;
+  color: var(--sv-text-muted);
+}
+
+.settings__success {
+  background: rgba(0, 212, 255, 0.08);
+  border: 1px solid rgba(0, 212, 255, 0.25);
+  border-radius: var(--sv-radius-md);
+  padding: 14px 22px;
+  font-size: 18px;
+  color: var(--sv-accent);
+  font-weight: 500;
+}
+
+/* --- Settings Mode Toggle --- */
+.settings__mode-toggle {
+  display: flex;
+  gap: 0;
+  border-radius: var(--sv-radius-md);
+  overflow: hidden;
+  border: 2px solid var(--sv-border-medium);
+  align-self: flex-start;
+}
+
+.settings__mode-btn {
+  padding: 12px 28px;
+  font-family: var(--sv-font-display);
+  font-size: 19px;
+  font-weight: 600;
+  background: var(--sv-bg-surface);
+  color: var(--sv-text-muted);
+  border: none;
+  transition:
+    background var(--sv-transition-fast),
+    color var(--sv-transition-fast);
+}
+
+.settings__mode-btn--active {
+  background: var(--sv-gradient-accent);
+  color: #ffffff;
+}
+
+.settings__mode-btn:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--sv-accent);
+}
+
+/* --- Settings Sync Toggle --- */
+.settings__sync-toggle {
+  padding: 8px 20px;
+  font-family: var(--sv-font-display);
+  font-size: 18px;
+  font-weight: 600;
+  background: var(--sv-bg-surface);
+  color: var(--sv-accent);
+  border: 2px solid var(--sv-accent-dim);
+  border-radius: var(--sv-radius-md);
+  transition:
+    border-color var(--sv-transition-fast),
+    box-shadow var(--sv-transition-fast);
+}
+
+.settings__sync-toggle:focus {
+  border-color: var(--sv-accent);
+  box-shadow: 0 0 0 3px var(--sv-accent-dim);
+  outline: none;
 }
 
 /* --- Channel Logo --- */

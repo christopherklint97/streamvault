@@ -1,6 +1,5 @@
 import { memo } from 'react';
 import type { Channel } from '../types';
-import { KEY_CODES } from '../utils/keys';
 import ChannelLogo from './ChannelLogo';
 
 interface ChannelCardProps {
@@ -10,19 +9,11 @@ interface ChannelCardProps {
 }
 
 function ChannelCardInner({ channel, isFocused, onSelect }: ChannelCardProps) {
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.keyCode === KEY_CODES.ENTER) {
-      e.preventDefault();
-      onSelect();
-    }
-  };
-
   return (
     <div
       className={`channel-card${isFocused ? ' channel-card--focused' : ''}`}
       data-focusable
       tabIndex={0}
-      onKeyDown={handleKeyDown}
       onClick={onSelect}
     >
       <div className="channel-card__logo-container">

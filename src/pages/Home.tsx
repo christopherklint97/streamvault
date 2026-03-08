@@ -12,7 +12,7 @@ import {
 } from '../services/channel-service';
 import { getCurrentProgram } from '../services/epg-service';
 import HorizontalRow from '../components/HorizontalRow';
-import { KEY_CODES } from '../utils/keys';
+import FocusZone from '../components/FocusZone';
 
 export default function Home() {
   const channels = useChannelStore((s) => s.channels);
@@ -78,12 +78,11 @@ export default function Home() {
     [navigate]
   );
 
-  // Filter groups to exclude 'All'
   const displayGroups = groups.filter((g) => g !== 'All');
 
   if (channels.length === 0) {
     return (
-      <div className="home home--empty">
+      <FocusZone className="home home--empty">
         <div className="home__welcome">
           <h1>Welcome to StreamVault</h1>
           <p>Go to Settings to add a playlist URL and start watching.</p>
@@ -92,27 +91,17 @@ export default function Home() {
             data-focusable
             tabIndex={0}
             onClick={() => navigate('settings')}
-            onKeyDown={(e) => {
-              if (e.keyCode === KEY_CODES.ENTER) {
-                e.preventDefault();
-                navigate('settings');
-              } else if (e.keyCode === KEY_CODES.LEFT) {
-                e.preventDefault();
-                const sidebarItem = document.querySelector('.sidebar-item') as HTMLElement | null;
-                sidebarItem?.focus();
-              }
-            }}
           >
             Open Settings
           </button>
         </div>
-      </div>
+      </FocusZone>
     );
   }
 
   return (
-    <div className="home">
-      {/* Continue Watching (movies/series with saved progress) */}
+    <FocusZone className="home">
+      {/* Continue Watching */}
       {continueWatchingChannels.length > 0 && (
         <div className="home__section">
           <h2 className="home__section-title">Continue Watching</h2>
@@ -129,12 +118,6 @@ export default function Home() {
                   data-focusable
                   tabIndex={0}
                   onClick={() => handleSelectChannel(ch)}
-                  onKeyDown={(e) => {
-                    if (e.keyCode === KEY_CODES.ENTER) {
-                      e.preventDefault();
-                      handleSelectChannel(ch);
-                    }
-                  }}
                 >
                   <div className="home__cw-logo">
                     {ch.logo ? (
@@ -150,10 +133,7 @@ export default function Home() {
                     <span className="home__cw-group">{ch.group}</span>
                   </div>
                   <div className="home__cw-progress-bar">
-                    <div
-                      className="home__cw-progress-fill"
-                      style={{ width: `${pct}%` }}
-                    />
+                    <div className="home__cw-progress-fill" style={{ width: `${pct}%` }} />
                   </div>
                 </div>
               );
@@ -162,7 +142,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* Last Watched (hero card for quick resume) */}
+      {/* Last Watched */}
       {lastWatchedChannel && (
         <div className="home__section">
           <h2 className="home__section-title">Pick Up Where You Left Off</h2>
@@ -171,12 +151,6 @@ export default function Home() {
             data-focusable
             tabIndex={0}
             onClick={() => handleSelectChannel(lastWatchedChannel)}
-            onKeyDown={(e) => {
-              if (e.keyCode === KEY_CODES.ENTER) {
-                e.preventDefault();
-                handleSelectChannel(lastWatchedChannel);
-              }
-            }}
           >
             <div className="home__hero-logo">
               {lastWatchedChannel.logo ? (
@@ -233,12 +207,6 @@ export default function Home() {
               data-focusable
               tabIndex={0}
               onClick={() => handleContentTypeSelect(item.view)}
-              onKeyDown={(e) => {
-                if (e.keyCode === KEY_CODES.ENTER) {
-                  e.preventDefault();
-                  handleContentTypeSelect(item.view);
-                }
-              }}
             >
               {item.label} ({item.count})
             </button>
@@ -258,12 +226,6 @@ export default function Home() {
                 data-focusable
                 tabIndex={0}
                 onClick={() => handleGroupSelect(group)}
-                onKeyDown={(e) => {
-                  if (e.keyCode === KEY_CODES.ENTER) {
-                    e.preventDefault();
-                    handleGroupSelect(group);
-                  }
-                }}
               >
                 {group}
               </button>
@@ -271,6 +233,6 @@ export default function Home() {
           </div>
         </div>
       )}
-    </div>
+    </FocusZone>
   );
 }

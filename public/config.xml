@@ -3,7 +3,7 @@
   id="http://streamvault.app" version="1.0.0" viewmodes="maximized">
   <tizen:application id="StrmVault0.StreamVault" package="StrmVault0" required_version="6.5"/>
   <content src="index.html"/>
-  <icon src="icon.svg"/>
+  <icon src="icon.png"/>
   <name>StreamVault</name>
   <tizen:privilege name="http://tizen.org/privilege/internet"/>
   <tizen:privilege name="http://tizen.org/privilege/tv.inputdevice"/>

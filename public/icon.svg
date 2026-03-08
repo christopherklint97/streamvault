@@ -1,11 +1,31 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#1a1a2e"/>
-      <stop offset="100%" style="stop-color:#0a0a1a"/>
+      <stop offset="0%" stop-color="#0c0c16"/>
+      <stop offset="100%" stop-color="#06060c"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00d4ff"/>
+      <stop offset="100%" stop-color="#7c5cfc"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00d4ff" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#7c5cfc" stop-opacity="0.1"/>
     </linearGradient>
   </defs>
-  <rect width="512" height="512" rx="64" fill="url(#bg)"/>
-  <text x="256" y="280" font-family="Arial,sans-serif" font-size="180" font-weight="bold"
-    fill="#00a8ff" text-anchor="middle" dominant-baseline="middle">SV</text>
+  <!-- Background -->
+  <rect width="512" height="512" rx="80" fill="url(#bg)"/>
+  <!-- Subtle glow behind icon -->
+  <circle cx="256" cy="240" r="140" fill="url(#glow)"/>
+  <!-- Vault/shield shape -->
+  <path d="M256 100 L370 160 L370 300 C370 370 320 410 256 430 C192 410 142 370 142 300 L142 160 Z"
+    fill="none" stroke="url(#accent)" stroke-width="12" stroke-linejoin="round"/>
+  <!-- Play triangle inside vault -->
+  <path d="M224 200 L224 310 L320 255 Z" fill="url(#accent)"/>
+  <!-- Stream lines (signal waves) -->
+  <path d="M340 150 Q380 180 380 220" fill="none" stroke="#00d4ff" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
+  <path d="M355 130 Q405 170 405 220" fill="none" stroke="#00d4ff" stroke-width="5" stroke-linecap="round" opacity="0.4"/>
+  <!-- App name -->
+  <text x="256" y="478" font-family="Arial,Helvetica,sans-serif" font-size="48" font-weight="800"
+    fill="url(#accent)" text-anchor="middle" letter-spacing="4">STREAMVAULT</text>
 </svg>

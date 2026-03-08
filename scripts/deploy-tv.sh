@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Build, sign, and deploy StreamVault to Samsung TV
 # Usage: ./scripts/deploy-tv.sh
-# Requires: TV_IP env var, box64, sdb, tizen CLI, python3 with pexpect
+# Requires: TV_IP env var, box64, sdb, tizen CLI
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -23,6 +23,10 @@ REMOTE_PATH="/home/owner/share/tmp/sdk_tools/StreamVault.wgt"
 TIZEN="$HOME/tizen-studio/tools/ide/bin/tizen"
 AUTHOR_PASSWORD="${CERT_AUTHOR_PASSWORD:-}"
 DIST_PASSWORD="${CERT_DIST_PASSWORD:-}"
+AUTHOR_CERT="${CERT_AUTHOR_P12:-$HOME/tizen-studio-data/keystore/author/streamvault-author2.p12}"
+DIST_CERT="$HOME/tizen-studio/tools/certificate-generator/certificates/distributor/tizen-distributor-signer.p12"
+DIST_CA="$HOME/tizen-studio/tools/certificate-generator/certificates/distributor/tizen-distributor-ca.cer"
+PROFILES_XML="$HOME/tizen-studio-data/profile/profiles.xml"
 
 if [ -z "$AUTHOR_PASSWORD" ] || [ -z "$DIST_PASSWORD" ]; then
   echo "Error: CERT_AUTHOR_PASSWORD and CERT_DIST_PASSWORD must be set. Add them to .env."
@@ -34,50 +38,28 @@ if [ -z "$TV_IP" ]; then
   exit 1
 fi
 
+# Step 0: Ensure profiles.xml has inline passwords (Tizen Studio 2025 broke .pwd file support)
+echo "Configuring signing profile..."
+mkdir -p "$(dirname "$PROFILES_XML")"
+cat > "$PROFILES_XML" << XMLEOF
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<profiles active="StreamVault" version="3.1">
+    <profile name="StreamVault">
+        <profileitem ca="" distributor="0" key="$AUTHOR_CERT" password="$AUTHOR_PASSWORD" rootca=""/>
+        <profileitem ca="$DIST_CA" distributor="1" key="$DIST_CERT" password="$DIST_PASSWORD" rootca=""/>
+        <profileitem ca="" distributor="2" key="" password="" rootca=""/>
+    </profile>
+</profiles>
+XMLEOF
+"$TIZEN" cli-config "profiles.path=$PROFILES_XML" > /dev/null 2>&1
+
 # Step 1: Build
 echo "Building StreamVault..."
 npm run build
 
-# Step 2: Sign and package WGT using tizen CLI via pexpect
-# Handles password prompts if not saved, or runs straight through if saved
+# Step 2: Sign and package WGT
 echo "Signing and packaging WGT..."
-PYTHONPATH=/usr/lib/python3/dist-packages python3 << PYEOF
-import pexpect, sys
-
-child = pexpect.spawn(
-    '${TIZEN} package -t wgt -s StreamVault -- ${DIST_DIR}',
-    timeout=60
-)
-child.logfile_read = sys.stdout.buffer
-
-while True:
-    i = child.expect([
-        'Author password:',
-        'Distributor1 password:',
-        r'Yes:.*No:.*\?',
-        'Package File Location:',
-        'error',
-        pexpect.EOF,
-        pexpect.TIMEOUT
-    ], timeout=30)
-    if i == 0:
-        child.sendline('${AUTHOR_PASSWORD}')
-    elif i == 1:
-        child.sendline('${DIST_PASSWORD}')
-    elif i == 2:
-        child.sendline('N')
-    elif i == 3:
-        # Success - wait for EOF
-        child.expect(pexpect.EOF, timeout=5)
-        break
-    elif i >= 4:
-        break
-
-child.close()
-if child.exitstatus and child.exitstatus != 0:
-    print(f"\nSigning failed with exit code {child.exitstatus}")
-    sys.exit(child.exitstatus)
-PYEOF
+"$TIZEN" package -t wgt -s StreamVault -- "$DIST_DIR"
 
 WGT_FILE="$DIST_DIR/StreamVault.wgt"
 if [ ! -f "$WGT_FILE" ]; then

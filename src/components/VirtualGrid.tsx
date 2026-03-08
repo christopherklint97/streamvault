@@ -7,7 +7,6 @@ interface VirtualGridProps {
   rowHeight: number;
   containerHeight: number;
   renderItem: (index: number) => ReactNode;
-  focusIndex: number;
   className?: string;
 }
 
@@ -19,7 +18,6 @@ export default function VirtualGrid({
   rowHeight,
   containerHeight,
   renderItem,
-  focusIndex,
   className,
 }: VirtualGridProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -52,20 +50,28 @@ export default function VirtualGrid({
     };
   }, []);
 
-  // Auto-scroll to keep focusIndex visible
+  // Auto-scroll to keep focused item visible
   useEffect(() => {
-    if (focusIndex < 0 || !containerRef.current) return;
-    const focusRow = Math.floor(focusIndex / columnCount);
-    const rowTop = focusRow * rowHeight;
-    const rowBottom = rowTop + rowHeight;
-    const currentScrollTop = containerRef.current.scrollTop;
+    const container = containerRef.current;
+    if (!container) return;
 
-    if (rowTop < currentScrollTop) {
-      containerRef.current.scrollTop = rowTop;
-    } else if (rowBottom > currentScrollTop + containerHeight) {
-      containerRef.current.scrollTop = rowBottom - containerHeight;
-    }
-  }, [focusIndex, columnCount, rowHeight, containerHeight]);
+    const handleFocusIn = (e: FocusEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.hasAttribute('data-focusable')) return;
+
+      const targetRect = target.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+
+      if (targetRect.top < containerRect.top) {
+        container.scrollTop -= containerRect.top - targetRect.top + rowHeight;
+      } else if (targetRect.bottom > containerRect.bottom) {
+        container.scrollTop += targetRect.bottom - containerRect.bottom + rowHeight;
+      }
+    };
+
+    container.addEventListener('focusin', handleFocusIn);
+    return () => container.removeEventListener('focusin', handleFocusIn);
+  }, [rowHeight]);
 
   const rows: ReactNode[] = [];
   for (let row = startRow; row <= endRow; row++) {

@@ -1,6 +1,5 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 import type { Channel } from '../types';
-import { KEY_CODES } from '../utils/keys';
 import ChannelCard from './ChannelCard';
 
 interface HorizontalRowProps {
@@ -11,7 +10,6 @@ interface HorizontalRowProps {
 
 export default function HorizontalRow({ title, channels, onSelect }: HorizontalRowProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [focusIndex, setFocusIndex] = useState(0);
   const [showLeftArrow, setShowLeftArrow] = useState(false);
   const [showRightArrow, setShowRightArrow] = useState(false);
 
@@ -31,63 +29,35 @@ export default function HorizontalRow({ title, channels, onSelect }: HorizontalR
     }
   }, [updateArrows, channels]);
 
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      let next = focusIndex;
+  // Keep focused card scrolled into view via focus event listener
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
 
-      switch (e.keyCode) {
-        case KEY_CODES.LEFT:
-          if (focusIndex > 0) {
-            next = focusIndex - 1;
-            e.preventDefault();
-            e.stopPropagation();
-          }
-          // At left edge: let event bubble so sidebar can catch it
-          break;
-        case KEY_CODES.RIGHT:
-          if (focusIndex < channels.length - 1) {
-            next = focusIndex + 1;
-            e.preventDefault();
-            e.stopPropagation();
-          }
-          break;
-        case KEY_CODES.ENTER:
-          e.preventDefault();
-          if (channels[focusIndex]) {
-            onSelect(channels[focusIndex]);
-          }
-          return;
-        default:
-          return;
+    const handleFocusIn = (e: FocusEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.hasAttribute('data-focusable')) {
+        target.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
       }
+    };
 
-      if (next !== focusIndex) {
-        setFocusIndex(next);
-        const container = scrollRef.current;
-        if (container) {
-          const cards = container.querySelectorAll('[data-focusable]');
-          const card = cards[next] as HTMLElement;
-          card?.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
-          (card as HTMLElement)?.focus();
-        }
-      }
-    },
-    [focusIndex, channels, onSelect]
-  );
+    el.addEventListener('focusin', handleFocusIn);
+    return () => el.removeEventListener('focusin', handleFocusIn);
+  }, []);
 
   if (channels.length === 0) return null;
 
   return (
-    <div className="horizontal-row" onKeyDown={handleKeyDown}>
+    <div className="horizontal-row">
       <h2 className="horizontal-row__title">{title}</h2>
       <div className="horizontal-row__container">
         {showLeftArrow && <div className="horizontal-row__arrow horizontal-row__arrow--left">{'\u25C0'}</div>}
         <div className="horizontal-row__scroll" ref={scrollRef}>
-          {channels.map((channel, idx) => (
+          {channels.map((channel) => (
             <ChannelCard
               key={channel.id}
               channel={channel}
-              isFocused={idx === focusIndex}
+              isFocused={false}
               onSelect={() => onSelect(channel)}
             />
           ))}

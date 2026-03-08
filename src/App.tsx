@@ -19,7 +19,9 @@ function AppContent() {
   const currentView = useAppStore((s) => s.currentView);
   const channels = useChannelStore((s) => s.channels);
   const playlistUrl = useChannelStore((s) => s.playlistUrl);
-  const loadPlaylist = useChannelStore((s) => s.loadPlaylist);
+  const isLoading = useChannelStore((s) => s.isLoading);
+  const loadingMessage = useChannelStore((s) => s.loadingMessage);
+  const loadingPhase = useChannelStore((s) => s.loadingPhase);
   const favoriteIds = useFavoritesStore((s) => s.favoriteIds);
   const { isOnline } = useNetworkStatus();
 
@@ -35,7 +37,7 @@ function AppContent() {
         'ColorF2Yellow', 'ColorF3Blue', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
       ];
       for (const key of keysToRegister) {
-        try { tizen.tvinputdevice.registerKey(key); } catch (_) { /* ignore */ }
+        try { tizen.tvinputdevice.registerKey(key); } catch { /* ignore */ }
       }
     }
 
@@ -46,13 +48,34 @@ function AppContent() {
     });
   }, []);
 
-  // Auto-load channels on mount if URL exists
+  const checkAndSync = useChannelStore((s) => s.checkAndSync);
+
+  // Auto-sync on mount — runs in background without blocking navigation
   useEffect(() => {
-    if (playlistUrl && channels.length === 0) {
-      loadPlaylist(playlistUrl);
+    if (playlistUrl) {
+      checkAndSync();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // When the view changes, push focus into the new content area
+  // so the new FocusZone (or EPGGrid) receives focus and activates
+  useEffect(() => {
+    if (currentView === 'player') return;
+    // Give React a frame to render the new view
+    const raf = requestAnimationFrame(() => {
+      const active = document.activeElement;
+      // Only push focus if it's lost (body/null/detached) — don't steal from sidebar
+      const isSidebarFocused = active && (active as HTMLElement).closest?.('.sidebar');
+      if (isSidebarFocused) return;
+
+      const container = document.querySelector('.app__content > [tabindex]') as HTMLElement | null;
+      if (container) {
+        container.focus();
+      }
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [currentView]);
 
   // Handle LEFT key on main content to return focus to sidebar
   const handleMainKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -97,6 +120,24 @@ function AppContent() {
       {!isOnline && (
         <div className="app__offline-banner">
           No network connection. Some features may be unavailable.
+        </div>
+      )}
+      {isLoading && currentView !== 'settings' && currentView !== 'player' && (
+        <div className="app__loading-banner">
+          <div className="app__loading-bar">
+            <div
+              className="app__loading-fill"
+              style={{
+                width: loadingPhase === 'fetching-playlist' ? '15%'
+                  : loadingPhase === 'parsing-playlist' ? '40%'
+                  : loadingPhase === 'fetching-epg' ? '60%'
+                  : loadingPhase === 'parsing-epg' ? '85%'
+                  : loadingPhase === 'done' ? '100%'
+                  : '0%',
+              }}
+            />
+          </div>
+          <span className="app__loading-text">{loadingMessage}</span>
         </div>
       )}
       {currentView !== 'player' && <Sidebar />}

@@ -5,10 +5,10 @@ import { usePlayerStore } from '../stores/playerStore';
 import { useAppStore } from '../stores/appStore';
 import { KEY_CODES } from '../utils/keys';
 
-const SLOT_WIDTH = 180; // pixels per 30-min slot
+const SLOT_WIDTH = 180;
 const ROW_HEIGHT = 64;
 const VISIBLE_ROWS = 15;
-const HOUR_SLOTS = 2; // 2 slots per hour (30 min each)
+const HOUR_SLOTS = 2;
 const TIMELINE_HOURS = 6;
 const CHANNEL_COL_WIDTH = 180;
 
@@ -32,6 +32,12 @@ function formatTime(date: Date): string {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+/**
+ * EPGGrid keeps its own 2D focus management because it uses
+ * virtual scrolling with absolutely-positioned program cells.
+ * Spatial navigation doesn't work well here since off-screen
+ * items don't have DOM elements.
+ */
 export default function EPGGrid() {
   const channels = useChannelStore((s) => s.channels);
   const programs = useChannelStore((s) => s.programs);
@@ -46,7 +52,6 @@ export default function EPGGrid() {
 
   const now = useMemo(() => new Date(), []);
 
-  // Timeline start: round down to the current hour
   const timelineStart = useMemo(() => {
     const d = new Date(now);
     d.setMinutes(0, 0, 0);
@@ -57,7 +62,6 @@ export default function EPGGrid() {
     return new Date(timelineStart.getTime() + TIMELINE_HOURS * 60 * 60 * 1000);
   }, [timelineStart]);
 
-  // Generate time slot headers
   const timeSlots = useMemo(() => {
     const slots: Date[] = [];
     for (let i = 0; i < TIMELINE_HOURS * HOUR_SLOTS; i++) {
@@ -66,7 +70,6 @@ export default function EPGGrid() {
     return slots;
   }, [timelineStart]);
 
-  // Programs for a given channel within the timeline window (O(1) lookup + small filter)
   const getChannelPrograms = useCallback(
     (channelId: string): Program[] => {
       const channelProgs = programsByChannel.get(channelId) || [];
@@ -77,12 +80,10 @@ export default function EPGGrid() {
     [programsByChannel, timelineStart, timelineEnd]
   );
 
-  // Virtual scrolling: visible channel slice
   const visibleStart = scrollOffset;
   const visibleEnd = Math.min(scrollOffset + VISIBLE_ROWS, channels.length);
   const visibleChannels = channels.slice(visibleStart, visibleEnd);
 
-  // Current time indicator position
   const nowOffset = useMemo(() => {
     const diffMs = now.getTime() - timelineStart.getTime();
     const totalMs = TIMELINE_HOURS * 60 * 60 * 1000;
@@ -102,11 +103,8 @@ export default function EPGGrid() {
             const newRow = focusRow - 1;
             setFocusRow(newRow);
             setFocusCol(0);
-            if (newRow < scrollOffset) {
-              setScrollOffset(newRow);
-            }
+            if (newRow < scrollOffset) setScrollOffset(newRow);
           }
-          // At top edge: let it bubble
           break;
         case KEY_CODES.DOWN:
           if (focusRow < channels.length - 1) {
@@ -114,18 +112,15 @@ export default function EPGGrid() {
             const newRow = focusRow + 1;
             setFocusRow(newRow);
             setFocusCol(0);
-            if (newRow >= scrollOffset + VISIBLE_ROWS) {
-              setScrollOffset(newRow - VISIBLE_ROWS + 1);
-            }
+            if (newRow >= scrollOffset + VISIBLE_ROWS) setScrollOffset(newRow - VISIBLE_ROWS + 1);
           }
-          // At bottom edge: let it bubble
           break;
         case KEY_CODES.LEFT:
           if (focusCol > 0) {
             e.preventDefault();
             setFocusCol(focusCol - 1);
           }
-          // At left edge: let it bubble to sidebar handler
+          // At left edge: let bubble to sidebar
           break;
         case KEY_CODES.RIGHT:
           if (focusCol < channelPrograms.length - 1) {
@@ -145,8 +140,6 @@ export default function EPGGrid() {
     [focusRow, focusCol, channels, scrollOffset, getChannelPrograms, setChannel, navigate]
   );
 
-  // Reset focusCol when row changes in the key handler instead
-
   if (programs.length === 0) {
     return (
       <div className="epg-grid epg-grid--empty">
@@ -160,7 +153,6 @@ export default function EPGGrid() {
 
   return (
     <div className="epg-grid" ref={containerRef} tabIndex={0} onKeyDown={handleKeyDown}>
-      {/* Timeline header */}
       <div className="epg-grid__header">
         <div className="epg-grid__channel-header" style={{ width: CHANNEL_COL_WIDTH }}>
           Channel
@@ -171,40 +163,28 @@ export default function EPGGrid() {
               {formatTime(slot)}
             </div>
           ))}
-          {/* Current time indicator */}
           {nowOffset > 0 && nowOffset < TIMELINE_HOURS * HOUR_SLOTS * SLOT_WIDTH && (
-            <div
-              className="epg-grid__now-indicator"
-              style={{ left: CHANNEL_COL_WIDTH + nowOffset }}
-            />
+            <div className="epg-grid__now-indicator" style={{ left: CHANNEL_COL_WIDTH + nowOffset }} />
           )}
         </div>
       </div>
-
-      {/* Channel rows */}
       <div className="epg-grid__body">
         {visibleChannels.map((channel, rowIdx) => {
           const actualRow = visibleStart + rowIdx;
           const channelPrograms = getChannelPrograms(channel.id);
-
           return (
             <div
               key={channel.id}
               className={`epg-grid__row${actualRow === focusRow ? ' epg-grid__row--focused' : ''}`}
               style={{ height: ROW_HEIGHT }}
             >
-              <div
-                className="epg-grid__channel-name"
-                style={{ width: CHANNEL_COL_WIDTH }}
-              >
+              <div className="epg-grid__channel-name" style={{ width: CHANNEL_COL_WIDTH }}>
                 {channel.logo && (
                   <img
                     className="epg-grid__channel-logo"
                     src={channel.logo}
                     alt=""
-                    onError={(e) => {
-                      (e.target as HTMLImageElement).style.display = 'none';
-                    }}
+                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                   />
                 )}
                 <span>{channel.name}</span>
@@ -214,15 +194,9 @@ export default function EPGGrid() {
                   const progStart = Math.max(prog.start.getTime(), timelineStart.getTime());
                   const progEnd = Math.min(prog.stop.getTime(), timelineEnd.getTime());
                   const totalMs = TIMELINE_HOURS * 60 * 60 * 1000;
-                  const leftPx =
-                    ((progStart - timelineStart.getTime()) / totalMs) *
-                    (TIMELINE_HOURS * HOUR_SLOTS * SLOT_WIDTH);
-                  const widthPx =
-                    ((progEnd - progStart) / totalMs) *
-                    (TIMELINE_HOURS * HOUR_SLOTS * SLOT_WIDTH);
-
+                  const leftPx = ((progStart - timelineStart.getTime()) / totalMs) * (TIMELINE_HOURS * HOUR_SLOTS * SLOT_WIDTH);
+                  const widthPx = ((progEnd - progStart) / totalMs) * (TIMELINE_HOURS * HOUR_SLOTS * SLOT_WIDTH);
                   const isFocused = actualRow === focusRow && colIdx === focusCol;
-
                   return (
                     <div
                       key={`${prog.channelId}-${prog.start.getTime()}`}
