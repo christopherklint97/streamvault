@@ -1,4 +1,4 @@
-import { useMemo, useCallback } from 'react';
+import { useMemo, useCallback, useRef, useEffect } from 'react';
 import type { Channel, View } from '../types';
 import { useChannelStore } from '../stores/channelStore';
 import { useFavoritesStore } from '../stores/favoritesStore';
@@ -11,8 +11,8 @@ import {
   getWatchProgress,
 } from '../services/channel-service';
 import { getCurrentProgram } from '../services/epg-service';
+import { KEY_CODES } from '../utils/keys';
 import HorizontalRow from '../components/HorizontalRow';
-import FocusZone from '../components/FocusZone';
 
 export default function Home() {
   const channels = useChannelStore((s) => s.channels);
@@ -21,6 +21,7 @@ export default function Home() {
   const favoriteIds = useFavoritesStore((s) => s.favoriteIds);
   const setChannel = usePlayerStore((s) => s.setChannel);
   const navigate = useAppStore((s) => s.navigate);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const favoriteChannels = useMemo(
     () => channels.filter((ch) => favoriteIds.has(ch.id)),
@@ -63,17 +64,69 @@ export default function Home() {
     series: contentTypeCounts['series'] || 0,
   }), [contentTypeCounts]);
 
-  const handleContentTypeSelect = useCallback(
-    (view: View) => {
-      navigate(view);
-    },
-    [navigate]
-  );
+  // Simple key handler: ENTER clicks, UP/DOWN/LEFT/RIGHT navigate focusables
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const active = document.activeElement as HTMLElement;
+    if (!active) return;
+
+    // Text inputs: pass through LEFT/RIGHT
+    if (active.tagName === 'INPUT' && (e.keyCode === KEY_CODES.LEFT || e.keyCode === KEY_CODES.RIGHT)) return;
+
+    if (e.keyCode === KEY_CODES.ENTER) {
+      if (active.tagName !== 'INPUT') {
+        e.preventDefault();
+        active.click();
+      }
+      return;
+    }
+
+    // Simple sequential navigation through all focusables
+    const container = containerRef.current;
+    if (!container) return;
+    const items = container.querySelectorAll('[data-focusable]') as NodeListOf<HTMLElement>;
+    if (items.length === 0) return;
+
+    let idx = -1;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i] === active) { idx = i; break; }
+    }
+
+    let next = idx;
+    if (e.keyCode === KEY_CODES.DOWN) {
+      next = Math.min(idx + 1, items.length - 1);
+    } else if (e.keyCode === KEY_CODES.UP) {
+      next = Math.max(idx - 1, 0);
+    } else if (e.keyCode === KEY_CODES.RIGHT) {
+      next = Math.min(idx + 1, items.length - 1);
+    } else if (e.keyCode === KEY_CODES.LEFT) {
+      if (idx <= 0) return; // bubble to sidebar
+      next = idx - 1;
+    } else {
+      return;
+    }
+
+    if (next !== idx && next >= 0) {
+      e.preventDefault();
+      e.stopPropagation();
+      items[next].focus({ preventScroll: true });
+      items[next].scrollIntoView({ block: 'nearest' });
+    }
+  }, []);
+
+  // Auto-focus first item on mount
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      const container = containerRef.current;
+      if (!container) return;
+      const first = container.querySelector('[data-focusable]') as HTMLElement | null;
+      first?.focus({ preventScroll: true });
+    });
+  }, []);
 
   const hasContent = typeCounts.livetv > 0 || typeCounts.movies > 0 || typeCounts.series > 0 || channels.length > 0;
   if (!hasContent) {
     return (
-      <FocusZone className="home home--empty">
+      <div className="home home--empty" ref={containerRef} onKeyDown={handleKeyDown}>
         <div className="home__welcome">
           <h1>Welcome to StreamVault</h1>
           <p>Go to Settings to add a playlist URL and start watching.</p>
@@ -86,12 +139,12 @@ export default function Home() {
             Open Settings
           </button>
         </div>
-      </FocusZone>
+      </div>
     );
   }
 
   return (
-    <FocusZone className="home">
+    <div className="home" ref={containerRef} onKeyDown={handleKeyDown}>
       {/* Continue Watching */}
       {continueWatchingChannels.length > 0 && (
         <div className="home__section">
@@ -107,7 +160,7 @@ export default function Home() {
                   key={ch.id}
                   className="home__cw-card"
                   data-focusable
-                  tabIndex={0}
+                  tabIndex={-1}
                   onClick={() => handleSelectChannel(ch)}
                 >
                   <div className="home__cw-logo">
@@ -140,7 +193,7 @@ export default function Home() {
           <div
             className="home__hero-card"
             data-focusable
-            tabIndex={0}
+            tabIndex={-1}
             onClick={() => handleSelectChannel(lastWatchedChannel)}
           >
             <div className="home__hero-logo">
@@ -196,14 +249,14 @@ export default function Home() {
               key={item.view}
               className="home__category-tile"
               data-focusable
-              tabIndex={0}
-              onClick={() => handleContentTypeSelect(item.view)}
+              tabIndex={-1}
+              onClick={() => navigate(item.view)}
             >
               {item.label} ({item.count})
             </button>
           ))}
         </div>
       </div>
-    </FocusZone>
+    </div>
   );
 }

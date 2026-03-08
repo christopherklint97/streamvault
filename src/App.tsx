@@ -1,4 +1,4 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useMemo } from 'react';
 import { useAppStore } from './stores/appStore';
 import { useChannelStore } from './stores/channelStore';
 import { useFavoritesStore } from './stores/favoritesStore';
@@ -31,7 +31,6 @@ function AppContent() {
 
   // Register Tizen remote keys and set initial focus
   useEffect(() => {
-    // Register non-default keys on Tizen
     if (typeof tizen !== 'undefined' && tizen.tvinputdevice) {
       const keysToRegister = [
         'MediaPlay', 'MediaPause', 'MediaStop', 'MediaFastForward', 'MediaRewind',
@@ -43,7 +42,6 @@ function AppContent() {
       }
     }
 
-    // Set initial focus on first sidebar item
     requestAnimationFrame(() => {
       const firstItem = document.querySelector('.sidebar-item') as HTMLElement | null;
       firstItem?.focus();
@@ -56,20 +54,6 @@ function AppContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // When the view or group changes, push focus into the new content area
-  useEffect(() => {
-    if (currentView === 'player') return;
-    const raf = requestAnimationFrame(() => {
-      const active = document.activeElement;
-      const isSidebarFocused = active && (active as HTMLElement).closest?.('.sidebar');
-      if (isSidebarFocused) return;
-
-      const firstFocusable = document.querySelector('.app__content [data-focusable]') as HTMLElement | null;
-      firstFocusable?.focus();
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [currentView, selectedGroup]);
-
   // Handle LEFT key on main content to return focus to sidebar
   const handleMainKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.keyCode === KEY_CODES.LEFT) {
@@ -80,11 +64,14 @@ function AppContent() {
     }
   }, []);
 
-  // Merge favorite status into channels
-  const channelsWithFavorites = channels.map((ch) => ({
-    ...ch,
-    isFavorite: favoriteIds.has(ch.id),
-  }));
+  // Memoize to avoid creating new channel objects every render
+  const channelsWithFavorites = useMemo(
+    () => channels.map((ch) => ({
+      ...ch,
+      isFavorite: favoriteIds.has(ch.id),
+    })),
+    [channels, favoriteIds]
+  );
 
   const renderView = () => {
     switch (currentView) {

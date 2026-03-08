@@ -4,16 +4,15 @@ import ChannelLogo from './ChannelLogo';
 
 interface ChannelCardProps {
   channel: Channel;
-  isFocused: boolean;
   onSelect: () => void;
 }
 
-function ChannelCardInner({ channel, isFocused, onSelect }: ChannelCardProps) {
+function ChannelCardInner({ channel, onSelect }: ChannelCardProps) {
   return (
     <div
-      className={`channel-card${isFocused ? ' channel-card--focused' : ''}`}
+      className="channel-card"
       data-focusable
-      tabIndex={0}
+      tabIndex={-1}
       onClick={onSelect}
     >
       <div className="channel-card__logo-container">

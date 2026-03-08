@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback, useEffect } from 'react';
+import { useRef, useEffect } from 'react';
 import type { Channel } from '../types';
 import ChannelCard from './ChannelCard';
 
@@ -10,26 +10,8 @@ interface HorizontalRowProps {
 
 export default function HorizontalRow({ title, channels, onSelect }: HorizontalRowProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [showLeftArrow, setShowLeftArrow] = useState(false);
-  const [showRightArrow, setShowRightArrow] = useState(false);
 
-  const updateArrows = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    setShowLeftArrow(el.scrollLeft > 10);
-    setShowRightArrow(el.scrollLeft + el.clientWidth < el.scrollWidth - 10);
-  }, []);
-
-  useEffect(() => {
-    updateArrows();
-    const el = scrollRef.current;
-    if (el) {
-      el.addEventListener('scroll', updateArrows);
-      return () => el.removeEventListener('scroll', updateArrows);
-    }
-  }, [updateArrows, channels]);
-
-  // Keep focused card scrolled into view via focus event listener
+  // Keep focused card scrolled into view
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -50,19 +32,14 @@ export default function HorizontalRow({ title, channels, onSelect }: HorizontalR
   return (
     <div className="horizontal-row">
       <h2 className="horizontal-row__title">{title}</h2>
-      <div className="horizontal-row__container">
-        {showLeftArrow && <div className="horizontal-row__arrow horizontal-row__arrow--left">{'\u25C0'}</div>}
-        <div className="horizontal-row__scroll" ref={scrollRef}>
-          {channels.map((channel) => (
-            <ChannelCard
-              key={channel.id}
-              channel={channel}
-              isFocused={false}
-              onSelect={() => onSelect(channel)}
-            />
-          ))}
-        </div>
-        {showRightArrow && <div className="horizontal-row__arrow horizontal-row__arrow--right">{'\u25B6'}</div>}
+      <div className="horizontal-row__scroll" ref={scrollRef}>
+        {channels.map((channel) => (
+          <ChannelCard
+            key={channel.id}
+            channel={channel}
+            onSelect={() => onSelect(channel)}
+          />
+        ))}
       </div>
     </div>
   );
