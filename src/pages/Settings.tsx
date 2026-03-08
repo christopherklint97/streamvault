@@ -44,17 +44,15 @@ export default function Settings() {
   const channelCount = useChannelStore((s) => s.channelCount);
   const syncInterval = useChannelStore((s) => s.syncInterval);
   const lastSyncTime = useChannelStore((s) => s.lastSyncTime);
-  const setInputMode = useChannelStore((s) => s.setInputMode);
-  const setXtreamCredentials = useChannelStore((s) => s.setXtreamCredentials);
-  const setPlaylistUrl = useChannelStore((s) => s.setPlaylistUrl);
-  const setEpgUrl = useChannelStore((s) => s.setEpgUrl);
-  const loadPlaylist = useChannelStore((s) => s.loadPlaylist);
-  const loadEPG = useChannelStore((s) => s.loadEPG);
-  const loadFromXtream = useChannelStore((s) => s.loadFromXtream);
-  const setSyncInterval = useChannelStore((s) => s.setSyncInterval);
-  const syncNow = useChannelStore((s) => s.syncNow);
+  const apiBaseUrl = useChannelStore((s) => s.apiBaseUrl);
+  const setApiBaseUrl = useChannelStore((s) => s.setApiBaseUrl);
+  const saveConfig = useChannelStore((s) => s.saveConfig);
+  const triggerSync = useChannelStore((s) => s.triggerSync);
+  const cancelSync = useChannelStore((s) => s.cancelSync);
+  const hydrate = useChannelStore((s) => s.hydrate);
   const showToastMessage = useAppStore((s) => s.showToastMessage);
 
+  const [localApiUrl, setLocalApiUrl] = useState(apiBaseUrl);
   const [localServerUrl, setLocalServerUrl] = useState(xtreamCredentials.serverUrl);
   const [localUsername, setLocalUsername] = useState(xtreamCredentials.username);
   const [localPassword, setLocalPassword] = useState(xtreamCredentials.password);
@@ -62,48 +60,59 @@ export default function Settings() {
   const [localEpgUrl, setLocalEpgUrl] = useState(epgUrl);
   const [fieldError, setFieldError] = useState('');
 
-  const handleModeSwitch = useCallback((mode: InputMode) => {
-    setInputMode(mode);
+  const handleConnectServer = useCallback(async () => {
+    if (!localApiUrl.trim()) { setFieldError('Please enter a server URL'); return; }
+    if (!isValidUrl(localApiUrl)) { setFieldError('Server URL must start with http:// or https://'); return; }
     setFieldError('');
-  }, [setInputMode]);
+    const url = localApiUrl.trim().replace(/\/+$/, '');
+    setApiBaseUrl(url);
+    // Test connection + load data
+    try {
+      const response = await fetch(`${url}/api/status`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      showToastMessage('Connected to server');
+      // Trigger full hydration
+      setTimeout(() => hydrate(), 100);
+    } catch {
+      setFieldError('Cannot connect to server');
+    }
+  }, [localApiUrl, setApiBaseUrl, showToastMessage, hydrate]);
 
-  const handleLoadXtream = useCallback(async () => {
+  const handleModeSwitch = useCallback(async (mode: InputMode) => {
+    setFieldError('');
+    await saveConfig({ inputMode: mode });
+  }, [saveConfig]);
+
+  const handleSaveXtream = useCallback(async () => {
     if (!localServerUrl.trim()) { setFieldError('Please enter a server URL'); return; }
     if (!isValidUrl(localServerUrl)) { setFieldError('Server URL must start with http:// or https://'); return; }
     if (!localUsername.trim()) { setFieldError('Please enter a username'); return; }
     if (!localPassword.trim()) { setFieldError('Please enter a password'); return; }
     setFieldError('');
-    setXtreamCredentials({ serverUrl: localServerUrl.trim(), username: localUsername.trim(), password: localPassword.trim() });
-    await loadFromXtream();
-    const state = useChannelStore.getState();
-    if (!state.error) showToastMessage(`Loaded ${state.channels.length} channels`);
-  }, [localServerUrl, localUsername, localPassword, setXtreamCredentials, loadFromXtream, showToastMessage]);
+    await saveConfig({
+      inputMode: 'xtream',
+      xtreamServer: localServerUrl.trim(),
+      xtreamUsername: localUsername.trim(),
+      xtreamPassword: localPassword.trim(),
+    });
+    await triggerSync();
+  }, [localServerUrl, localUsername, localPassword, saveConfig, triggerSync]);
 
-  const handleLoadPlaylist = useCallback(async () => {
+  const handleSavePlaylist = useCallback(async () => {
     if (!localPlaylistUrl.trim()) { setFieldError('Please enter a playlist URL'); return; }
     if (!isValidUrl(localPlaylistUrl)) { setFieldError('URL must start with http:// or https://'); return; }
     setFieldError('');
-    setPlaylistUrl(localPlaylistUrl);
-    await loadPlaylist(localPlaylistUrl);
-    const state = useChannelStore.getState();
-    if (!state.error) showToastMessage(`Loaded ${state.channels.length} channels`);
-  }, [localPlaylistUrl, setPlaylistUrl, loadPlaylist, showToastMessage]);
-
-  const handleLoadEPG = useCallback(async () => {
-    if (!localEpgUrl.trim()) { setFieldError('Please enter an EPG URL'); return; }
-    if (!isValidUrl(localEpgUrl)) { setFieldError('URL must start with http:// or https://'); return; }
-    setFieldError('');
-    setEpgUrl(localEpgUrl);
-    await loadEPG(localEpgUrl);
-    const state = useChannelStore.getState();
-    if (!state.error) showToastMessage('EPG data loaded successfully');
-  }, [localEpgUrl, setEpgUrl, loadEPG, showToastMessage]);
+    await saveConfig({
+      inputMode: 'manual',
+      playlistUrl: localPlaylistUrl.trim(),
+      epgUrl: localEpgUrl.trim(),
+    });
+    await triggerSync();
+  }, [localPlaylistUrl, localEpgUrl, saveConfig, triggerSync]);
 
   const handleSyncNow = useCallback(async () => {
-    await syncNow();
-    const state = useChannelStore.getState();
-    if (!state.error) showToastMessage('Sync complete');
-  }, [syncNow, showToastMessage]);
+    await triggerSync();
+  }, [triggerSync]);
 
   const handleClearFavorites = useCallback(() => {
     const store = useFavoritesStore.getState();
@@ -117,14 +126,16 @@ export default function Settings() {
     showToastMessage('Recently watched cleared');
   }, [showToastMessage]);
 
-  const handleSyncCycle = useCallback(() => {
+  const handleSyncCycle = useCallback(async () => {
     const currentIndex = SYNC_OPTIONS.findIndex((o) => o.value === syncInterval);
     const nextIndex = (currentIndex + 1) % SYNC_OPTIONS.length;
-    setSyncInterval(SYNC_OPTIONS[nextIndex].value);
-    showToastMessage(`Sync: ${SYNC_OPTIONS[nextIndex].label}`);
-  }, [syncInterval, setSyncInterval, showToastMessage]);
+    const next = SYNC_OPTIONS[nextIndex];
+    await saveConfig({ syncInterval: next.value });
+    showToastMessage(`Sync: ${next.label}`);
+  }, [syncInterval, saveConfig, showToastMessage]);
 
   const syncLabel = SYNC_OPTIONS.find((o) => o.value === syncInterval)?.label ?? 'Every 24 hours';
+  const isConnected = !!apiBaseUrl;
 
   return (
     <FocusZone className="settings">
@@ -139,18 +150,32 @@ export default function Settings() {
             <div
               className="settings__progress-fill"
               style={{
-                width: loadingPhase === 'fetching-playlist' ? '15%'
-                  : loadingPhase === 'parsing-playlist' ? '40%'
-                  : loadingPhase === 'fetching-epg' ? '60%'
-                  : loadingPhase === 'parsing-epg' ? '85%'
+                width: loadingPhase === 'fetching-playlist' ? '10%'
+                  : loadingPhase === 'parsing-playlist' ? '30%'
+                  : loadingPhase === 'fetching-epg' ? '50%'
+                  : loadingPhase === 'parsing-epg' ? '70%'
                   : loadingPhase === 'done' ? '100%' : '0%',
               }}
             />
           </div>
           <span className="settings__progress-text">{loadingMessage}</span>
           {channelCount > 0 && loadingPhase !== 'fetching-playlist' && (
-            <span className="settings__progress-count">{channelCount} channels found</span>
+            <span className="settings__progress-count">{channelCount.toLocaleString()} channels found</span>
           )}
+          <button
+            className="settings__btn settings__btn--cancel"
+            data-focusable
+            tabIndex={0}
+            onClick={() => {
+              cancelSync();
+              requestAnimationFrame(() => {
+                const target = document.querySelector('.settings [data-focusable]') as HTMLElement | null;
+                target?.focus();
+              });
+            }}
+          >
+            Cancel
+          </button>
         </div>
       )}
 
@@ -158,158 +183,177 @@ export default function Settings() {
         <div className="settings__success">{loadingMessage}</div>
       )}
 
-      {/* Input Mode Toggle */}
+      {/* Server Connection */}
       <div className="settings__section">
-        <h2 className="settings__section-title">Playlist Source</h2>
-        <div className="settings__mode-toggle">
-          <button
-            className={`settings__mode-btn${inputMode === 'xtream' ? ' settings__mode-btn--active' : ''}`}
+        <h2 className="settings__section-title">Server</h2>
+        <div className="settings__field">
+          <label className="settings__label">StreamVault Server URL</label>
+          <input
+            className="settings__input"
+            type="text"
             data-focusable
             tabIndex={0}
-            onClick={() => handleModeSwitch('xtream')}
-          >
-            Xtream Codes
-          </button>
-          <button
-            className={`settings__mode-btn${inputMode === 'manual' ? ' settings__mode-btn--active' : ''}`}
-            data-focusable
-            tabIndex={0}
-            onClick={() => handleModeSwitch('manual')}
-          >
-            Direct URL
-          </button>
+            value={localApiUrl}
+            onChange={(e) => setLocalApiUrl(e.target.value)}
+            placeholder="http://192.168.0.100:3001"
+          />
         </div>
-      </div>
-
-      {/* Xtream Codes Input */}
-      {inputMode === 'xtream' && (
-        <div className="settings__section">
-          <h2 className="settings__section-title">Xtream Codes Login</h2>
-          <div className="settings__field">
-            <label className="settings__label">Server URL</label>
-            <input
-              className="settings__input"
-              type="text"
-              data-focusable
-              tabIndex={0}
-              value={localServerUrl}
-              onChange={(e) => setLocalServerUrl(e.target.value)}
-              placeholder="http://example.com"
-            />
-          </div>
-          <div className="settings__field">
-            <label className="settings__label">Username</label>
-            <input
-              className="settings__input"
-              type="text"
-              data-focusable
-              tabIndex={0}
-              value={localUsername}
-              onChange={(e) => setLocalUsername(e.target.value)}
-              placeholder="Your username"
-            />
-          </div>
-          <div className="settings__field">
-            <label className="settings__label">Password</label>
-            <input
-              className="settings__input"
-              type="text"
-              data-focusable
-              tabIndex={0}
-              value={localPassword}
-              onChange={(e) => setLocalPassword(e.target.value)}
-              placeholder="Your password"
-            />
-          </div>
-          {fieldError && <span className="settings__field-error">{fieldError}</span>}
-          <button className="settings__btn" data-focusable tabIndex={0} onClick={handleLoadXtream} disabled={isLoading}>
-            {isLoading ? 'Loading...' : 'Connect & Load'}
-          </button>
-        </div>
-      )}
-
-      {/* Manual URL Input */}
-      {inputMode === 'manual' && (
-        <>
-          <div className="settings__section">
-            <h2 className="settings__section-title">Playlist</h2>
-            <div className="settings__field">
-              <label className="settings__label">Playlist URL (M3U/M3U8)</label>
-              <input
-                className="settings__input"
-                type="text"
-                data-focusable
-                tabIndex={0}
-                value={localPlaylistUrl}
-                onChange={(e) => setLocalPlaylistUrl(e.target.value)}
-                placeholder="https://example.com/playlist.m3u"
-              />
-            </div>
-            {fieldError && <span className="settings__field-error">{fieldError}</span>}
-            <button className="settings__btn" data-focusable tabIndex={0} onClick={handleLoadPlaylist} disabled={isLoading}>
-              {isLoading ? 'Loading...' : 'Load Channels'}
-            </button>
-          </div>
-          <div className="settings__section">
-            <h2 className="settings__section-title">EPG (Electronic Program Guide)</h2>
-            <div className="settings__field">
-              <label className="settings__label">EPG URL (XMLTV)</label>
-              <input
-                className="settings__input"
-                type="text"
-                data-focusable
-                tabIndex={0}
-                value={localEpgUrl}
-                onChange={(e) => setLocalEpgUrl(e.target.value)}
-                placeholder="https://example.com/epg.xml"
-              />
-            </div>
-            <button className="settings__btn" data-focusable tabIndex={0} onClick={handleLoadEPG} disabled={isLoading}>
-              {isLoading ? 'Loading...' : 'Load EPG'}
-            </button>
-          </div>
-        </>
-      )}
-
-      {/* Sync Settings */}
-      <div className="settings__section">
-        <h2 className="settings__section-title">Sync</h2>
-        <div className="settings__info-row">
-          <span className="settings__info-label">Last synced:</span>
-          <span className="settings__info-value">{formatSyncTime(lastSyncTime)}</span>
-        </div>
-        <div className="settings__info-row">
-          <span className="settings__info-label">Auto-sync:</span>
-          <button className="settings__sync-toggle" data-focusable tabIndex={0} onClick={handleSyncCycle}>
-            {syncLabel}
-          </button>
-        </div>
-        <button className="settings__btn" data-focusable tabIndex={0} onClick={handleSyncNow} disabled={isLoading || !playlistUrl}>
-          {isLoading ? 'Syncing...' : 'Sync Now'}
+        {fieldError && !isConnected && <span className="settings__field-error">{fieldError}</span>}
+        <button className="settings__btn" data-focusable tabIndex={0} onClick={handleConnectServer}>
+          {isConnected ? 'Reconnect' : 'Connect'}
         </button>
       </div>
 
-      {/* Info */}
-      <div className="settings__section">
-        <h2 className="settings__section-title">Info</h2>
-        <div className="settings__info-row">
-          <span className="settings__info-label">Channels loaded:</span>
-          <span className="settings__info-value">{channels.length}</span>
-        </div>
-      </div>
+      {isConnected && (
+        <>
+          {/* Input Mode Toggle */}
+          <div className="settings__section">
+            <h2 className="settings__section-title">Playlist Source</h2>
+            <div className="settings__mode-toggle">
+              <button
+                className={`settings__mode-btn${inputMode === 'xtream' ? ' settings__mode-btn--active' : ''}`}
+                data-focusable
+                tabIndex={0}
+                onClick={() => handleModeSwitch('xtream')}
+              >
+                Xtream Codes
+              </button>
+              <button
+                className={`settings__mode-btn${inputMode === 'manual' ? ' settings__mode-btn--active' : ''}`}
+                data-focusable
+                tabIndex={0}
+                onClick={() => handleModeSwitch('manual')}
+              >
+                Direct URL
+              </button>
+            </div>
+          </div>
 
-      {/* Data Management */}
-      <div className="settings__section">
-        <h2 className="settings__section-title">Data Management</h2>
-        <div className="settings__btn-row">
-          <button className="settings__btn settings__btn--danger" data-focusable tabIndex={0} onClick={handleClearFavorites}>
-            Clear Favorites
-          </button>
-          <button className="settings__btn settings__btn--danger" data-focusable tabIndex={0} onClick={handleClearRecent}>
-            Clear Recently Watched
-          </button>
-        </div>
-      </div>
+          {/* Xtream Codes Input */}
+          {inputMode === 'xtream' && (
+            <div className="settings__section">
+              <h2 className="settings__section-title">Xtream Codes Login</h2>
+              <div className="settings__field">
+                <label className="settings__label">Server URL</label>
+                <input
+                  className="settings__input"
+                  type="text"
+                  data-focusable
+                  tabIndex={0}
+                  value={localServerUrl}
+                  onChange={(e) => setLocalServerUrl(e.target.value)}
+                  placeholder="http://example.com"
+                />
+              </div>
+              <div className="settings__field">
+                <label className="settings__label">Username</label>
+                <input
+                  className="settings__input"
+                  type="text"
+                  data-focusable
+                  tabIndex={0}
+                  value={localUsername}
+                  onChange={(e) => setLocalUsername(e.target.value)}
+                  placeholder="Your username"
+                />
+              </div>
+              <div className="settings__field">
+                <label className="settings__label">Password</label>
+                <input
+                  className="settings__input"
+                  type="text"
+                  data-focusable
+                  tabIndex={0}
+                  value={localPassword}
+                  onChange={(e) => setLocalPassword(e.target.value)}
+                  placeholder="Your password"
+                />
+              </div>
+              {fieldError && isConnected && <span className="settings__field-error">{fieldError}</span>}
+              <button className="settings__btn" data-focusable tabIndex={0} onClick={handleSaveXtream} disabled={isLoading}>
+                {isLoading ? 'Syncing...' : 'Connect & Sync'}
+              </button>
+            </div>
+          )}
+
+          {/* Manual URL Input */}
+          {inputMode === 'manual' && (
+            <>
+              <div className="settings__section">
+                <h2 className="settings__section-title">Playlist</h2>
+                <div className="settings__field">
+                  <label className="settings__label">Playlist URL (M3U/M3U8)</label>
+                  <input
+                    className="settings__input"
+                    type="text"
+                    data-focusable
+                    tabIndex={0}
+                    value={localPlaylistUrl}
+                    onChange={(e) => setLocalPlaylistUrl(e.target.value)}
+                    placeholder="https://example.com/playlist.m3u"
+                  />
+                </div>
+                <div className="settings__field">
+                  <label className="settings__label">EPG URL (XMLTV, optional)</label>
+                  <input
+                    className="settings__input"
+                    type="text"
+                    data-focusable
+                    tabIndex={0}
+                    value={localEpgUrl}
+                    onChange={(e) => setLocalEpgUrl(e.target.value)}
+                    placeholder="https://example.com/epg.xml"
+                  />
+                </div>
+                {fieldError && isConnected && <span className="settings__field-error">{fieldError}</span>}
+                <button className="settings__btn" data-focusable tabIndex={0} onClick={handleSavePlaylist} disabled={isLoading}>
+                  {isLoading ? 'Syncing...' : 'Save & Sync'}
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* Sync Settings */}
+          <div className="settings__section">
+            <h2 className="settings__section-title">Sync</h2>
+            <div className="settings__info-row">
+              <span className="settings__info-label">Last synced:</span>
+              <span className="settings__info-value">{formatSyncTime(lastSyncTime)}</span>
+            </div>
+            <div className="settings__info-row">
+              <span className="settings__info-label">Auto-sync:</span>
+              <button className="settings__sync-toggle" data-focusable tabIndex={0} onClick={handleSyncCycle}>
+                {syncLabel}
+              </button>
+            </div>
+            <button className="settings__btn" data-focusable tabIndex={0} onClick={handleSyncNow} disabled={isLoading}>
+              {isLoading ? 'Syncing...' : 'Sync Now'}
+            </button>
+          </div>
+
+          {/* Info */}
+          <div className="settings__section">
+            <h2 className="settings__section-title">Info</h2>
+            <div className="settings__info-row">
+              <span className="settings__info-label">Channels loaded:</span>
+              <span className="settings__info-value">{channels.length}</span>
+            </div>
+          </div>
+
+          {/* Data Management */}
+          <div className="settings__section">
+            <h2 className="settings__section-title">Data Management</h2>
+            <div className="settings__btn-row">
+              <button className="settings__btn settings__btn--danger" data-focusable tabIndex={0} onClick={handleClearFavorites}>
+                Clear Favorites
+              </button>
+              <button className="settings__btn settings__btn--danger" data-focusable tabIndex={0} onClick={handleClearRecent}>
+                Clear Recently Watched
+              </button>
+            </div>
+          </div>
+        </>
+      )}
     </FocusZone>
   );
 }

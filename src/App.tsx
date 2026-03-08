@@ -18,10 +18,11 @@ import Settings from './pages/Settings';
 function AppContent() {
   const currentView = useAppStore((s) => s.currentView);
   const channels = useChannelStore((s) => s.channels);
-  const playlistUrl = useChannelStore((s) => s.playlistUrl);
   const isLoading = useChannelStore((s) => s.isLoading);
   const loadingMessage = useChannelStore((s) => s.loadingMessage);
   const loadingPhase = useChannelStore((s) => s.loadingPhase);
+  const cancelSync = useChannelStore((s) => s.cancelSync);
+  const hydrate = useChannelStore((s) => s.hydrate);
   const favoriteIds = useFavoritesStore((s) => s.favoriteIds);
   const { isOnline } = useNetworkStatus();
 
@@ -48,13 +49,9 @@ function AppContent() {
     });
   }, []);
 
-  const checkAndSync = useChannelStore((s) => s.checkAndSync);
-
-  // Auto-sync on mount — runs in background without blocking navigation
+  // Hydrate from server on startup
   useEffect(() => {
-    if (playlistUrl) {
-      checkAndSync();
-    }
+    hydrate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -128,16 +125,23 @@ function AppContent() {
             <div
               className="app__loading-fill"
               style={{
-                width: loadingPhase === 'fetching-playlist' ? '15%'
-                  : loadingPhase === 'parsing-playlist' ? '40%'
-                  : loadingPhase === 'fetching-epg' ? '60%'
-                  : loadingPhase === 'parsing-epg' ? '85%'
+                width: loadingPhase === 'fetching-playlist' ? '10%'
+                  : loadingPhase === 'parsing-playlist' ? '30%'
+                  : loadingPhase === 'fetching-epg' ? '50%'
+                  : loadingPhase === 'parsing-epg' ? '70%'
                   : loadingPhase === 'done' ? '100%'
                   : '0%',
               }}
             />
           </div>
           <span className="app__loading-text">{loadingMessage}</span>
+          <button className="app__loading-cancel" onClick={() => {
+            cancelSync();
+            requestAnimationFrame(() => {
+              const sidebar = document.querySelector('.sidebar-item--active, .sidebar-item') as HTMLElement | null;
+              sidebar?.focus();
+            });
+          }}>Cancel</button>
         </div>
       )}
       {currentView !== 'player' && <Sidebar />}

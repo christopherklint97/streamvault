@@ -273,6 +273,26 @@ a {
   font-size: 16px;
   color: var(--sv-text-secondary);
   font-weight: 500;
+  flex: 1;
+}
+
+.app__loading-cancel {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: var(--sv-text-secondary);
+  padding: 4px 14px;
+  border-radius: var(--sv-radius-sm);
+  font-size: 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.app__loading-cancel:hover,
+.app__loading-cancel:focus {
+  background: rgba(255, 80, 80, 0.2);
+  border-color: rgba(255, 80, 80, 0.4);
+  color: #ff6b6b;
+  outline: none;
 }
 
 /* --- Sidebar --- */
@@ -1774,6 +1794,20 @@ a {
 .settings__progress-count {
   font-size: 16px;
   color: var(--sv-text-muted);
+}
+
+.settings__btn--cancel {
+  background: rgba(255, 80, 80, 0.15);
+  border: 1px solid rgba(255, 80, 80, 0.3);
+  color: #ff6b6b;
+  margin-top: 4px;
+  align-self: flex-start;
+}
+
+.settings__btn--cancel:hover,
+.settings__btn--cancel:focus {
+  background: rgba(255, 80, 80, 0.25);
+  border-color: rgba(255, 80, 80, 0.5);
 }
 
 .settings__success {

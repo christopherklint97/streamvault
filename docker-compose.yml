@@ -1,0 +1,13 @@
+services:
+  server:
+    container_name: streamvault-server
+    build:
+      context: ./server
+    ports:
+      - "3002:3001"
+    volumes:
+      - streamvault_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  streamvault_data:

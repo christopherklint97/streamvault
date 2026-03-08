@@ -2,14 +2,14 @@ import { describe, it, expect } from 'vitest';
 import { parseM3U } from '../m3u-parser';
 
 describe('parseM3U', () => {
-  it('parses a normal playlist with multiple channels', () => {
+  it('parses a normal playlist with multiple channels', async () => {
     const content = `#EXTM3U
 #EXTINF:-1 tvg-id="ch1" tvg-name="Channel One" tvg-logo="http://example.com/logo1.png" group-title="News" tvg-country="US",Channel 1
 http://stream.example.com/ch1.m3u8
 #EXTINF:-1 tvg-id="ch2" tvg-name="Channel Two" tvg-logo="http://example.com/logo2.png" group-title="Sports",Channel 2
 http://stream.example.com/ch2.m3u8`;
 
-    const channels = parseM3U(content);
+    const channels = await parseM3U(content);
 
     expect(channels).toHaveLength(2);
 
@@ -27,32 +27,32 @@ http://stream.example.com/ch2.m3u8`;
     expect(channels[1].logo).toBe('http://example.com/logo2.png');
   });
 
-  it('returns empty array for empty string', () => {
-    expect(parseM3U('')).toEqual([]);
+  it('returns empty array for empty string', async () => {
+    expect(await parseM3U('')).toEqual([]);
   });
 
-  it('returns empty array for header only', () => {
-    expect(parseM3U('#EXTM3U\n')).toEqual([]);
+  it('returns empty array for header only', async () => {
+    expect(await parseM3U('#EXTM3U\n')).toEqual([]);
   });
 
-  it('handles malformed EXTINF with no comma', () => {
+  it('handles malformed EXTINF with no comma', async () => {
     const content = `#EXTM3U
 #EXTINF:-1 tvg-name="Test Channel"
 http://stream.example.com/test.m3u8`;
 
-    const channels = parseM3U(content);
+    const channels = await parseM3U(content);
 
     expect(channels).toHaveLength(1);
     expect(channels[0].name).toBe('Test Channel');
     expect(channels[0].url).toBe('http://stream.example.com/test.m3u8');
   });
 
-  it('handles malformed EXTINF with missing attributes', () => {
+  it('handles malformed EXTINF with missing attributes', async () => {
     const content = `#EXTM3U
 #EXTINF:-1,Bare Channel
 http://stream.example.com/bare.m3u8`;
 
-    const channels = parseM3U(content);
+    const channels = await parseM3U(content);
 
     expect(channels).toHaveLength(1);
     expect(channels[0].name).toBe('Bare Channel');
@@ -61,104 +61,104 @@ http://stream.example.com/bare.m3u8`;
     expect(channels[0].region).toBe('');
   });
 
-  it('handles UTF-8 BOM', () => {
+  it('handles UTF-8 BOM', async () => {
     const content = `\uFEFF#EXTM3U
 #EXTINF:-1 tvg-name="BOM Channel",BOM Channel
 http://stream.example.com/bom.m3u8`;
 
-    const channels = parseM3U(content);
+    const channels = await parseM3U(content);
 
     expect(channels).toHaveLength(1);
     expect(channels[0].name).toBe('BOM Channel');
   });
 
-  it('handles Windows line endings (\\r\\n)', () => {
+  it('handles Windows line endings (\\r\\n)', async () => {
     const content = '#EXTM3U\r\n#EXTINF:-1 tvg-name="Win Channel",Win Channel\r\nhttp://stream.example.com/win.m3u8\r\n';
 
-    const channels = parseM3U(content);
+    const channels = await parseM3U(content);
 
     expect(channels).toHaveLength(1);
     expect(channels[0].name).toBe('Win Channel');
     expect(channels[0].url).toBe('http://stream.example.com/win.m3u8');
   });
 
-  it('deduplicates by URL, keeping the first occurrence', () => {
+  it('deduplicates by URL, keeping the first occurrence', async () => {
     const content = `#EXTM3U
 #EXTINF:-1 tvg-name="First",First
 http://stream.example.com/dup.m3u8
 #EXTINF:-1 tvg-name="Second",Second
 http://stream.example.com/dup.m3u8`;
 
-    const channels = parseM3U(content);
+    const channels = await parseM3U(content);
 
     expect(channels).toHaveLength(1);
     expect(channels[0].name).toBe('First');
   });
 
-  it('skips non-standard directives like #EXTVLCOPT', () => {
+  it('skips non-standard directives like #EXTVLCOPT', async () => {
     const content = `#EXTM3U
 #EXTINF:-1 tvg-name="VLC Channel",VLC Channel
 #EXTVLCOPT:http-user-agent=MyAgent
 http://stream.example.com/vlc.m3u8`;
 
-    const channels = parseM3U(content);
+    const channels = await parseM3U(content);
 
     expect(channels).toHaveLength(1);
     expect(channels[0].name).toBe('VLC Channel');
     expect(channels[0].url).toBe('http://stream.example.com/vlc.m3u8');
   });
 
-  it('uses empty string for missing tvg-logo', () => {
+  it('uses empty string for missing tvg-logo', async () => {
     const content = `#EXTM3U
 #EXTINF:-1 tvg-name="No Logo",No Logo
 http://stream.example.com/nologo.m3u8`;
 
-    const channels = parseM3U(content);
+    const channels = await parseM3U(content);
 
     expect(channels).toHaveLength(1);
     expect(channels[0].logo).toBe('');
   });
 
-  it('preserves URLs with query parameters', () => {
+  it('preserves URLs with query parameters', async () => {
     const content = `#EXTM3U
 #EXTINF:-1 tvg-name="Query Channel",Query Channel
 http://stream.example.com/ch.m3u8?token=abc123&quality=high`;
 
-    const channels = parseM3U(content);
+    const channels = await parseM3U(content);
 
     expect(channels).toHaveLength(1);
     expect(channels[0].url).toBe('http://stream.example.com/ch.m3u8?token=abc123&quality=high');
   });
 
-  it('uses tvg-name over display name when tvg-name is set', () => {
+  it('uses tvg-name over display name when tvg-name is set', async () => {
     const content = `#EXTM3U
 #EXTINF:-1 tvg-name="Official Name",Display Name
 http://stream.example.com/name.m3u8`;
 
-    const channels = parseM3U(content);
+    const channels = await parseM3U(content);
 
     expect(channels).toHaveLength(1);
     expect(channels[0].name).toBe('Official Name');
   });
 
-  it('falls back to display name when tvg-name is not set', () => {
+  it('falls back to display name when tvg-name is not set', async () => {
     const content = `#EXTM3U
 #EXTINF:-1 group-title="Group",Fallback Name
 http://stream.example.com/fallback.m3u8`;
 
-    const channels = parseM3U(content);
+    const channels = await parseM3U(content);
 
     expect(channels).toHaveLength(1);
     expect(channels[0].name).toBe('Fallback Name');
   });
 
-  it('skips a URL line without preceding EXTINF', () => {
+  it('skips a URL line without preceding EXTINF', async () => {
     const content = `#EXTM3U
 http://stream.example.com/orphan.m3u8
 #EXTINF:-1 tvg-name="Valid",Valid
 http://stream.example.com/valid.m3u8`;
 
-    const channels = parseM3U(content);
+    const channels = await parseM3U(content);
 
     expect(channels).toHaveLength(1);
     expect(channels[0].name).toBe('Valid');

@@ -111,63 +111,65 @@ function normalizeContent(content: string): string {
   return normalized;
 }
 
+export interface ParseProgress {
+  parsed: number;
+  total: number;
+}
+
 /**
  * Parse M3U/M3U8 playlist content into an array of Channel objects.
- * Handles standard M3U extended format with EXTINF directives.
+ * Async with chunked processing to keep UI responsive.
  * Deduplicates channels by URL, keeping the first occurrence.
  */
-export function parseM3U(content: string): Channel[] {
+export async function parseM3U(
+  content: string,
+  onProgress?: (progress: ParseProgress) => void,
+  signal?: AbortSignal,
+): Promise<Channel[]> {
   const normalized = normalizeContent(content);
   const lines = normalized.split('\n');
   const channels: Channel[] = [];
   const seenUrls = new Set<string>();
+  const totalLines = lines.length;
 
   let currentExtInf: string | null = null;
+  const YIELD_EVERY = 2000; // yield to UI every N lines
 
   for (let i = 0; i < lines.length; i++) {
+    if (signal?.aborted) return channels;
+
+    // Yield to UI periodically
+    if (i > 0 && i % YIELD_EVERY === 0) {
+      onProgress?.({ parsed: channels.length, total: Math.floor(totalLines / 2) });
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
     const line = lines[i].trim();
 
-    // Skip empty lines
-    if (line === '') {
-      continue;
-    }
+    if (line === '') continue;
+    if (line.startsWith('#EXTM3U')) continue;
 
-    // Skip the M3U header
-    if (line.startsWith('#EXTM3U')) {
-      continue;
-    }
-
-    // Capture EXTINF lines
     if (line.startsWith('#EXTINF:')) {
       currentExtInf = line;
       continue;
     }
 
-    // Skip non-standard directives (e.g., #EXTVLCOPT, #EXTGRP, etc.)
-    if (line.startsWith('#')) {
-      continue;
-    }
+    if (line.startsWith('#')) continue;
 
-    // This line should be a URL. If we have no preceding EXTINF, skip it.
     const url = line;
-    if (!currentExtInf) {
-      continue;
-    }
+    if (!currentExtInf) continue;
 
-    // Deduplicate by URL
     if (seenUrls.has(url)) {
       currentExtInf = null;
       continue;
     }
     seenUrls.add(url);
 
-    // Extract attributes from the EXTINF line
     const tvgName = extractAttribute(currentExtInf, 'tvg-name');
     const tvgLogo = extractAttribute(currentExtInf, 'tvg-logo');
     const groupTitle = extractAttribute(currentExtInf, 'group-title');
     const tvgCountry = extractAttribute(currentExtInf, 'tvg-country');
 
-    // The display name is the fallback if tvg-name is not set
     const displayName = extractDisplayName(currentExtInf);
     const name = tvgName || displayName || 'Unknown Channel';
 
@@ -186,19 +188,24 @@ export function parseM3U(content: string): Channel[] {
     currentExtInf = null;
   }
 
+  onProgress?.({ parsed: channels.length, total: channels.length });
   return channels;
 }
 
 /**
  * Fetch an M3U/M3U8 playlist from a URL and parse it into channels.
  */
-export async function parseM3UFromUrl(url: string): Promise<Channel[]> {
-  const response = await fetch(url);
+export async function parseM3UFromUrl(
+  url: string,
+  onProgress?: (progress: ParseProgress) => void,
+  signal?: AbortSignal,
+): Promise<Channel[]> {
+  const response = await fetch(url, { signal });
   if (!response.ok) {
     throw new Error(
       `Failed to fetch M3U playlist: ${response.status} ${response.statusText}`
     );
   }
   const content = await response.text();
-  return parseM3U(content);
+  return parseM3U(content, onProgress, signal);
 }

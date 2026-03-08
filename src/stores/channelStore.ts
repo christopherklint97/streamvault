@@ -1,12 +1,10 @@
 import { create } from 'zustand';
 import type { Channel, Program } from '../types';
-import { parseM3U } from '../services/m3u-parser';
-import { fetchEPG } from '../services/epg-service';
 import { getItem, setItem } from '../utils/storage';
 
 export type InputMode = 'xtream' | 'manual';
 export type SyncInterval = 'startup' | '6h' | '12h' | '24h' | 'manual';
-export type LoadingPhase = 'idle' | 'fetching-playlist' | 'parsing-playlist' | 'fetching-epg' | 'parsing-epg' | 'done';
+export type LoadingPhase = 'idle' | 'fetching-playlist' | 'parsing-playlist' | 'fetching-epg' | 'parsing-epg' | 'done' | 'error';
 
 export interface XtreamCredentials {
   serverUrl: string;
@@ -33,6 +31,8 @@ interface ChannelState {
   channelCount: number;
   syncInterval: SyncInterval;
   lastSyncTime: number;
+  apiBaseUrl: string;
+  _hydrated: boolean;
 }
 
 function buildProgramIndex(programs: Program[]): Map<string, Program[]> {
@@ -51,294 +51,240 @@ function buildProgramIndex(programs: Program[]): Map<string, Program[]> {
   return index;
 }
 
-function buildXtreamUrls(creds: XtreamCredentials): { playlistUrl: string; epgUrl: string } {
-  let base = creds.serverUrl.trim();
-  // Remove trailing slash
-  if (base.endsWith('/')) base = base.slice(0, -1);
-  const playlistUrl = `${base}/get.php?username=${encodeURIComponent(creds.username)}&password=${encodeURIComponent(creds.password)}&type=m3u&output=mpegts`;
-  const epgUrl = `${base}/xmltv.php?username=${encodeURIComponent(creds.username)}&password=${encodeURIComponent(creds.password)}`;
-  return { playlistUrl, epgUrl };
-}
+declare const __SERVER_URL__: string;
+const API_BASE_URL_KEY = 'streamvault_api_url';
+const DEFAULT_SERVER_URL: string = typeof __SERVER_URL__ !== 'undefined' ? __SERVER_URL__ : '';
 
 interface ChannelActions {
-  loadPlaylist: (url: string) => Promise<void>;
-  setChannels: (channels: Channel[]) => void;
-  loadEPG: (url: string) => Promise<void>;
+  setApiBaseUrl: (url: string) => void;
+  fetchChannels: () => Promise<void>;
+  fetchPrograms: () => Promise<void>;
+  fetchConfig: () => Promise<void>;
+  saveConfig: (config: Record<string, string>) => Promise<void>;
+  triggerSync: () => Promise<void>;
+  cancelSync: () => void;
+  pollStatus: () => Promise<void>;
   setSelectedGroup: (group: string) => void;
   setSelectedRegion: (region: string) => void;
-  setPlaylistUrl: (url: string) => void;
-  setEpgUrl: (url: string) => void;
-  setInputMode: (mode: InputMode) => void;
-  setXtreamCredentials: (creds: XtreamCredentials) => void;
-  loadFromXtream: () => Promise<void>;
-  loadAll: (playlistUrl: string, epgUrl: string) => Promise<void>;
-  setSyncInterval: (interval: SyncInterval) => void;
-  checkAndSync: () => Promise<void>;
-  syncNow: () => Promise<void>;
+  hydrate: () => Promise<void>;
 }
 
-const PLAYLIST_URL_KEY = 'streamvault_playlist_url';
-const EPG_URL_KEY = 'streamvault_epg_url';
-const INPUT_MODE_KEY = 'streamvault_input_mode';
-const XTREAM_CREDS_KEY = 'streamvault_xtream_creds';
-const CACHED_CHANNELS_KEY = 'streamvault_cached_channels';
-const CACHED_PROGRAMS_KEY = 'streamvault_cached_programs';
-const SYNC_INTERVAL_KEY = 'streamvault_sync_interval';
-const LAST_SYNC_KEY = 'streamvault_last_sync';
-
-function extractGroupsAndRegions(channels: Channel[]): { groups: string[]; regions: string[] } {
-  const groups = Array.from(new Set(channels.map((ch) => ch.group).filter(Boolean)));
-  groups.sort();
-  groups.unshift('All');
-  const regions = Array.from(new Set(channels.map((ch) => ch.region).filter(Boolean)));
-  regions.sort();
-  regions.unshift('All');
-  return { groups, regions };
+async function apiFetch(baseUrl: string, path: string, options?: RequestInit) {
+  const url = `${baseUrl}${path}`;
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    throw new Error(`API error: ${response.status} ${response.statusText}`);
+  }
+  return response.json();
 }
 
-// Load cached channels on init
-function loadCachedChannels(): Channel[] {
-  return getItem<Channel[]>(CACHED_CHANNELS_KEY, []);
-}
+let pollInterval: ReturnType<typeof setInterval> | null = null;
 
-function loadCachedPrograms(): Program[] {
-  const raw = getItem<Array<{ channelId: string; title: string; description: string; start: string; stop: string; category: string }>>(CACHED_PROGRAMS_KEY, []);
-  // Rehydrate Date objects
-  return raw.map((p) => ({
-    ...p,
-    start: new Date(p.start),
-    stop: new Date(p.stop),
-  }));
+function stopPolling() {
+  if (pollInterval) {
+    clearInterval(pollInterval);
+    pollInterval = null;
+  }
 }
-
-const cachedChannels = loadCachedChannels();
-const cachedPrograms = loadCachedPrograms();
-const cachedGroupsRegions = extractGroupsAndRegions(cachedChannels);
 
 export const useChannelStore = create<ChannelState & ChannelActions>()((set, get) => ({
-  channels: cachedChannels,
-  programs: cachedPrograms,
-  programsByChannel: buildProgramIndex(cachedPrograms),
-  groups: cachedGroupsRegions.groups,
-  regions: cachedGroupsRegions.regions,
+  channels: [],
+  programs: [],
+  programsByChannel: new Map(),
+  groups: ['All'],
+  regions: ['All'],
   selectedGroup: 'All',
   selectedRegion: 'All',
   isLoading: false,
   error: null,
-  playlistUrl: getItem<string>(PLAYLIST_URL_KEY, ''),
-  epgUrl: getItem<string>(EPG_URL_KEY, ''),
-  inputMode: getItem<InputMode>(INPUT_MODE_KEY, 'xtream'),
-  xtreamCredentials: getItem<XtreamCredentials>(XTREAM_CREDS_KEY, { serverUrl: '', username: '', password: '' }),
+  playlistUrl: '',
+  epgUrl: '',
+  inputMode: 'xtream',
+  xtreamCredentials: { serverUrl: '', username: '', password: '' },
   loadingPhase: 'idle',
   loadingMessage: '',
-  channelCount: cachedChannels.length,
-  syncInterval: getItem<SyncInterval>(SYNC_INTERVAL_KEY, '24h'),
-  lastSyncTime: getItem<number>(LAST_SYNC_KEY, 0),
+  channelCount: 0,
+  syncInterval: '24h',
+  lastSyncTime: 0,
+  apiBaseUrl: getItem<string>(API_BASE_URL_KEY, DEFAULT_SERVER_URL),
+  _hydrated: false,
 
-  loadPlaylist: async (url: string) => {
-    set({ isLoading: true, error: null, loadingPhase: 'fetching-playlist', loadingMessage: 'Downloading playlist...' });
+  setApiBaseUrl: (url: string) => {
+    set({ apiBaseUrl: url });
+    setItem(API_BASE_URL_KEY, url);
+  },
+
+  fetchChannels: async () => {
+    const { apiBaseUrl } = get();
+    if (!apiBaseUrl) return;
     try {
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch playlist: ${response.status} ${response.statusText}`);
-      }
-      set({ loadingPhase: 'parsing-playlist', loadingMessage: 'Downloading playlist data...' });
-      const text = await response.text();
-      set({ loadingMessage: 'Parsing channels...' });
-      const channels = parseM3U(text);
-      const { groups, regions } = extractGroupsAndRegions(channels);
-
+      const data = await apiFetch(apiBaseUrl, '/api/channels');
+      const channels: Channel[] = data.channels;
       set({
         channels,
-        groups,
-        regions,
-        isLoading: false,
-        error: null,
-        playlistUrl: url,
-        loadingPhase: 'done',
-        loadingMessage: `Loaded ${channels.length} channels`,
+        groups: data.groups,
+        regions: data.regions,
         channelCount: channels.length,
       });
-
-      setItem(PLAYLIST_URL_KEY, url);
-      setItem(CACHED_CHANNELS_KEY, channels);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load playlist';
-      set({ isLoading: false, error: message, loadingPhase: 'idle', loadingMessage: '' });
+      const msg = err instanceof Error ? err.message : 'Failed to fetch channels';
+      set({ error: msg });
     }
   },
 
-  setChannels: (channels: Channel[]) => {
-    const { groups, regions } = extractGroupsAndRegions(channels);
-    set({ channels, groups, regions });
-  },
-
-  loadEPG: async (url: string) => {
-    set({ isLoading: true, error: null, loadingPhase: 'fetching-epg', loadingMessage: 'Downloading EPG data...' });
+  fetchPrograms: async () => {
+    const { apiBaseUrl } = get();
+    if (!apiBaseUrl) return;
     try {
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch EPG: ${response.status} ${response.statusText}`);
-      }
-      set({ loadingPhase: 'parsing-epg', loadingMessage: 'Parsing program guide...' });
-      const text = await response.text();
-      const programs = fetchEPG(text);
-
+      const now = Date.now();
+      const to = now + 24 * 60 * 60 * 1000;
+      const data = await apiFetch(apiBaseUrl, `/api/programs?from=${now - 6 * 60 * 60 * 1000}&to=${to}`);
+      const programs: Program[] = data.programs.map((p: { channelId: string; title: string; description: string; start: string; stop: string; category: string }) => ({
+        channelId: p.channelId,
+        title: p.title,
+        description: p.description,
+        start: new Date(p.start),
+        stop: new Date(p.stop),
+        category: p.category,
+      }));
       set({
         programs,
         programsByChannel: buildProgramIndex(programs),
-        isLoading: false,
-        error: null,
-        epgUrl: url,
-        loadingPhase: 'done',
-        loadingMessage: `Loaded ${programs.length} programs`,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to fetch programs';
+      set({ error: msg });
+    }
+  },
+
+  fetchConfig: async () => {
+    const { apiBaseUrl } = get();
+    if (!apiBaseUrl) return;
+    try {
+      const data = await apiFetch(apiBaseUrl, '/api/config');
+      set({
+        inputMode: data.inputMode || 'xtream',
+        playlistUrl: data.playlistUrl || '',
+        epgUrl: data.epgUrl || '',
+        xtreamCredentials: {
+          serverUrl: data.xtreamServer || '',
+          username: data.xtreamUsername || '',
+          password: data.xtreamPassword || '',
+        },
+        syncInterval: data.syncInterval || '24h',
+      });
+    } catch {
+      // Config fetch failure is non-critical
+    }
+  },
+
+  saveConfig: async (config: Record<string, string>) => {
+    const { apiBaseUrl } = get();
+    if (!apiBaseUrl) return;
+    try {
+      await apiFetch(apiBaseUrl, '/api/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+      });
+      // Update local state to match
+      if (config.inputMode) set({ inputMode: config.inputMode as InputMode });
+      if (config.playlistUrl !== undefined) set({ playlistUrl: config.playlistUrl });
+      if (config.epgUrl !== undefined) set({ epgUrl: config.epgUrl });
+      if (config.xtreamServer !== undefined || config.xtreamUsername !== undefined || config.xtreamPassword !== undefined) {
+        const creds = get().xtreamCredentials;
+        set({
+          xtreamCredentials: {
+            serverUrl: config.xtreamServer ?? creds.serverUrl,
+            username: config.xtreamUsername ?? creds.username,
+            password: config.xtreamPassword ?? creds.password,
+          },
+        });
+      }
+      if (config.syncInterval) set({ syncInterval: config.syncInterval as SyncInterval });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to save config';
+      set({ error: msg });
+    }
+  },
+
+  triggerSync: async () => {
+    const { apiBaseUrl } = get();
+    if (!apiBaseUrl) return;
+    set({ isLoading: true, error: null, loadingPhase: 'fetching-playlist', loadingMessage: 'Starting sync...' });
+    try {
+      await apiFetch(apiBaseUrl, '/api/sync', { method: 'POST' });
+      // Start polling for status
+      get().pollStatus();
+      pollInterval = setInterval(() => { get().pollStatus(); }, 2000);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to start sync';
+      set({ isLoading: false, error: msg, loadingPhase: 'idle', loadingMessage: '' });
+    }
+  },
+
+  cancelSync: () => {
+    const { apiBaseUrl } = get();
+    if (!apiBaseUrl) return;
+    stopPolling();
+    apiFetch(apiBaseUrl, '/api/sync/cancel', { method: 'POST' }).catch(() => {});
+    set({ isLoading: false, loadingPhase: 'idle', loadingMessage: 'Sync cancelled' });
+  },
+
+  pollStatus: async () => {
+    const { apiBaseUrl } = get();
+    if (!apiBaseUrl) return;
+    try {
+      const status = await apiFetch(apiBaseUrl, '/api/status');
+      set({
+        loadingPhase: status.phase,
+        loadingMessage: status.message,
+        channelCount: status.channelCount,
+        lastSyncTime: status.lastSyncTime,
+        isLoading: status.isSyncing,
       });
 
-      setItem(EPG_URL_KEY, url);
-      setItem(CACHED_PROGRAMS_KEY, programs);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load EPG';
-      set({ isLoading: false, error: message, loadingPhase: 'idle', loadingMessage: '' });
+      if (!status.isSyncing) {
+        stopPolling();
+        // Sync finished — fetch fresh data
+        if (status.phase === 'done') {
+          await Promise.all([get().fetchChannels(), get().fetchPrograms()]);
+        }
+      }
+    } catch {
+      stopPolling();
+      set({ isLoading: false, loadingPhase: 'idle' });
     }
   },
 
   setSelectedGroup: (group: string) => set({ selectedGroup: group }),
   setSelectedRegion: (region: string) => set({ selectedRegion: region }),
 
-  setPlaylistUrl: (url: string) => {
-    set({ playlistUrl: url });
-    setItem(PLAYLIST_URL_KEY, url);
-  },
-
-  setEpgUrl: (url: string) => {
-    set({ epgUrl: url });
-    setItem(EPG_URL_KEY, url);
-  },
-
-  setInputMode: (mode: InputMode) => {
-    set({ inputMode: mode });
-    setItem(INPUT_MODE_KEY, mode);
-  },
-
-  setXtreamCredentials: (creds: XtreamCredentials) => {
-    set({ xtreamCredentials: creds });
-    setItem(XTREAM_CREDS_KEY, creds);
-  },
-
-  loadFromXtream: async () => {
-    const { xtreamCredentials } = get();
-    if (!xtreamCredentials.serverUrl || !xtreamCredentials.username || !xtreamCredentials.password) {
-      set({ error: 'Please fill in all Xtream Codes fields' });
+  hydrate: async () => {
+    if (get()._hydrated) return;
+    const { apiBaseUrl } = get();
+    if (!apiBaseUrl) {
+      set({ _hydrated: true });
       return;
     }
-    const { playlistUrl, epgUrl } = buildXtreamUrls(xtreamCredentials);
-    set({ playlistUrl, epgUrl });
-    setItem(PLAYLIST_URL_KEY, playlistUrl);
-    setItem(EPG_URL_KEY, epgUrl);
-    setItem(XTREAM_CREDS_KEY, xtreamCredentials);
-    await get().loadAll(playlistUrl, epgUrl);
-  },
-
-  loadAll: async (playlistUrl: string, epgUrl: string) => {
-    // Load playlist
-    set({ isLoading: true, error: null, loadingPhase: 'fetching-playlist', loadingMessage: 'Downloading playlist...' });
     try {
-      const playlistResponse = await fetch(playlistUrl);
-      if (!playlistResponse.ok) {
-        throw new Error(`Failed to fetch playlist: ${playlistResponse.status} ${playlistResponse.statusText}`);
+      // Fetch config, channels, and programs in parallel
+      await Promise.all([
+        get().fetchConfig(),
+        get().fetchChannels(),
+        get().fetchPrograms(),
+      ]);
+
+      // Check if server is currently syncing
+      const status = await apiFetch(apiBaseUrl, '/api/status');
+      if (status.isSyncing) {
+        set({ isLoading: true, loadingPhase: status.phase, loadingMessage: status.message });
+        pollInterval = setInterval(() => { get().pollStatus(); }, 2000);
       }
-      set({ loadingPhase: 'parsing-playlist', loadingMessage: 'Downloading playlist data...' });
-      const playlistText = await playlistResponse.text();
-      set({ loadingMessage: 'Parsing channels...' });
-      const channels = parseM3U(playlistText);
-      const { groups, regions } = extractGroupsAndRegions(channels);
-
-      set({
-        channels,
-        groups,
-        regions,
-        playlistUrl,
-        channelCount: channels.length,
-        loadingMessage: `Parsed ${channels.length} channels. Loading EPG...`,
-      });
-      setItem(PLAYLIST_URL_KEY, playlistUrl);
-      setItem(CACHED_CHANNELS_KEY, channels);
+      set({ lastSyncTime: status.lastSyncTime, _hydrated: true });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load playlist';
-      set({ isLoading: false, error: message, loadingPhase: 'idle', loadingMessage: '' });
-      return;
+      const msg = err instanceof Error ? err.message : 'Cannot connect to server';
+      set({ error: msg, _hydrated: true });
     }
-
-    // Load EPG
-    set({ loadingPhase: 'fetching-epg', loadingMessage: 'Downloading EPG data...' });
-    try {
-      const epgResponse = await fetch(epgUrl);
-      if (!epgResponse.ok) {
-        throw new Error(`Failed to fetch EPG: ${epgResponse.status} ${epgResponse.statusText}`);
-      }
-      set({ loadingPhase: 'parsing-epg', loadingMessage: 'Parsing program guide...' });
-      const epgText = await epgResponse.text();
-      const programs = fetchEPG(epgText);
-
-      const now = Date.now();
-      set({
-        programs,
-        programsByChannel: buildProgramIndex(programs),
-        isLoading: false,
-        error: null,
-        epgUrl,
-        loadingPhase: 'done',
-        loadingMessage: `Sync complete: ${get().channels.length} channels, ${programs.length} programs`,
-        lastSyncTime: now,
-      });
-      setItem(EPG_URL_KEY, epgUrl);
-      setItem(CACHED_PROGRAMS_KEY, programs);
-      setItem(LAST_SYNC_KEY, now);
-    } catch (err) {
-      // EPG failed but playlist succeeded — partial success
-      const message = err instanceof Error ? err.message : 'Failed to load EPG';
-      const now = Date.now();
-      set({
-        isLoading: false,
-        error: `Channels loaded but EPG failed: ${message}`,
-        loadingPhase: 'done',
-        loadingMessage: `Loaded ${get().channels.length} channels (EPG failed)`,
-        lastSyncTime: now,
-      });
-      setItem(LAST_SYNC_KEY, now);
-    }
-  },
-
-  setSyncInterval: (interval: SyncInterval) => {
-    set({ syncInterval: interval });
-    setItem(SYNC_INTERVAL_KEY, interval);
-  },
-
-  checkAndSync: async () => {
-    const { syncInterval, lastSyncTime, playlistUrl, epgUrl, isLoading } = get();
-    if (isLoading || !playlistUrl || syncInterval === 'manual') return;
-
-    const now = Date.now();
-    let intervalMs = 0;
-    switch (syncInterval) {
-      case 'startup': intervalMs = 0; break; // always sync on startup
-      case '6h': intervalMs = 6 * 60 * 60 * 1000; break;
-      case '12h': intervalMs = 12 * 60 * 60 * 1000; break;
-      case '24h': intervalMs = 24 * 60 * 60 * 1000; break;
-    }
-
-    if (syncInterval === 'startup' || (now - lastSyncTime) >= intervalMs) {
-      await get().loadAll(playlistUrl, epgUrl);
-    }
-  },
-
-  syncNow: async () => {
-    const { playlistUrl, epgUrl, isLoading } = get();
-    if (isLoading) return;
-    if (!playlistUrl) {
-      set({ error: 'No playlist URL configured' });
-      return;
-    }
-    await get().loadAll(playlistUrl, epgUrl);
   },
 }));
