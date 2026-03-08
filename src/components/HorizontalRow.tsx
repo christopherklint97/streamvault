@@ -11,7 +11,7 @@ interface HorizontalRowProps {
 export default function HorizontalRow({ title, channels, onSelect }: HorizontalRowProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Keep focused card scrolled into view
+  // Keep focused card scrolled into view using manual scrollLeft (cheaper than scrollIntoView)
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -19,7 +19,10 @@ export default function HorizontalRow({ title, channels, onSelect }: HorizontalR
     const handleFocusIn = (e: FocusEvent) => {
       const target = e.target as HTMLElement;
       if (target.hasAttribute('data-focusable')) {
-        target.scrollIntoView({ block: 'nearest', inline: 'center' });
+        const targetLeft = target.offsetLeft;
+        const targetWidth = target.offsetWidth;
+        const containerWidth = el.clientWidth;
+        el.scrollLeft = Math.max(0, targetLeft - (containerWidth - targetWidth) / 2);
       }
     };
 
@@ -37,7 +40,7 @@ export default function HorizontalRow({ title, channels, onSelect }: HorizontalR
           <ChannelCard
             key={channel.id}
             channel={channel}
-            onSelect={() => onSelect(channel)}
+            onSelect={onSelect}
           />
         ))}
       </div>

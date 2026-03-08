@@ -18,7 +18,6 @@ http://stream.example.com/ch2.m3u8`;
     expect(channels[0].group).toBe('News');
     expect(channels[0].logo).toBe('http://example.com/logo1.png');
     expect(channels[0].region).toBe('US');
-    expect(channels[0].isFavorite).toBe(false);
     expect(channels[0].id).toBeTruthy();
 
     expect(channels[1].name).toBe('Channel Two');

@@ -181,7 +181,6 @@ export async function parseM3U(
       group: groupTitle || 'Uncategorized',
       region: tvgCountry || '',
       contentType: inferContentType(groupTitle, name),
-      isFavorite: false,
     };
 
     channels.push(channel);

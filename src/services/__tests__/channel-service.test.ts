@@ -10,7 +10,6 @@ const makeChannel = (name: string, group: string, region: string): Channel => ({
   group,
   region,
   contentType: 'livetv',
-  isFavorite: false,
 });
 
 const channels: Channel[] = [

@@ -174,7 +174,7 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
             <ChannelCard
               key={channel.id}
               channel={channel}
-              onSelect={() => handleSelect(channel)}
+              onSelect={handleSelect}
             />
           ))
         )}

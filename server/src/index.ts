@@ -92,7 +92,6 @@ app.get('/api/channels', async (req, res) => {
     group: ch.grp,
     region: ch.region,
     contentType: ch.content_type,
-    isFavorite: false,
   }));
 
   // Groups come from categories in xtream mode, from channels in manual mode
@@ -173,7 +172,6 @@ app.get('/api/search', async (req, res) => {
     group: ch.grp,
     region: ch.region,
     contentType: ch.content_type,
-    isFavorite: false,
   }));
 
   res.json({ channels, fetching });

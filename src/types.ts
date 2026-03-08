@@ -8,7 +8,6 @@ export interface Channel {
   group: string;
   region: string;
   contentType: ContentType;
-  isFavorite: boolean;
 }
 
 export interface Program {

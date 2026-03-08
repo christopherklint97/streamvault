@@ -125,9 +125,9 @@ export default function Player() {
         </div>
       )}
 
-      {/* OSD bar */}
-      {showOSD && currentChannel && playerState.status !== 'error' && (
-        <div className="player__osd">
+      {/* OSD bar - always rendered, fades in/out */}
+      {currentChannel && playerState.status !== 'error' && (
+        <div className={`player__osd${showOSD ? ' player__osd--visible' : ''}`}>
           <div className="player__osd-info">
             <span className="player__osd-channel-name">{currentChannel.name}</span>
             {currentProgram && (

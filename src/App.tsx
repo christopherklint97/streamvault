@@ -1,7 +1,6 @@
 import { useEffect, useCallback, useMemo } from 'react';
 import { useAppStore } from './stores/appStore';
 import { useChannelStore } from './stores/channelStore';
-import { useFavoritesStore } from './stores/favoritesStore';
 import { useRemoteKeys } from './hooks/useRemoteKeys';
 import { useNetworkStatus } from './hooks/useNetworkStatus';
 import { KEY_CODES } from './utils/keys';
@@ -24,7 +23,6 @@ function AppContent() {
   const loadingPhase = useChannelStore((s) => s.loadingPhase);
   const cancelSync = useChannelStore((s) => s.cancelSync);
   const hydrate = useChannelStore((s) => s.hydrate);
-  const favoriteIds = useFavoritesStore((s) => s.favoriteIds);
   const { isOnline } = useNetworkStatus();
 
   useRemoteKeys();
@@ -64,14 +62,13 @@ function AppContent() {
     }
   }, []);
 
-  // Memoize to avoid creating new channel objects every render
-  const channelsWithFavorites = useMemo(
-    () => channels.map((ch) => ({
-      ...ch,
-      isFavorite: favoriteIds.has(ch.id),
-    })),
-    [channels, favoriteIds]
-  );
+  // Memoize filtered channels by content type — single filter pass, stable reference
+  const filteredChannels = useMemo(() => {
+    const typeMap: Record<string, string> = { channels: 'livetv', movies: 'movies', series: 'series' };
+    const type = typeMap[currentView];
+    if (!type) return channels;
+    return channels.filter(ch => ch.contentType === type);
+  }, [channels, currentView]);
 
   const renderView = () => {
     switch (currentView) {
@@ -79,17 +76,17 @@ function AppContent() {
         return <Home />;
       case 'channels':
         if (selectedGroup) {
-          return <ChannelList channels={channelsWithFavorites.filter(ch => ch.contentType === 'livetv')} groupName={selectedGroup} />;
+          return <ChannelList channels={filteredChannels} groupName={selectedGroup} />;
         }
         return <GroupList contentType="livetv" />;
       case 'movies':
         if (selectedGroup) {
-          return <ChannelList channels={channelsWithFavorites.filter(ch => ch.contentType === 'movies')} groupName={selectedGroup} />;
+          return <ChannelList channels={filteredChannels} groupName={selectedGroup} />;
         }
         return <GroupList contentType="movies" />;
       case 'series':
         if (selectedGroup) {
-          return <ChannelList channels={channelsWithFavorites.filter(ch => ch.contentType === 'series')} groupName={selectedGroup} />;
+          return <ChannelList channels={filteredChannels} groupName={selectedGroup} />;
         }
         return <GroupList contentType="series" />;
       case 'player':
