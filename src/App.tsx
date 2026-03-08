@@ -11,7 +11,6 @@ import Toast from './components/Toast';
 import ExitDialog from './components/ExitDialog';
 import Player from './components/Player';
 import ChannelList from './components/ChannelList';
-import EPGGrid from './components/EPGGrid';
 import Home from './pages/Home';
 import Settings from './pages/Settings';
 
@@ -56,7 +55,6 @@ function AppContent() {
   }, []);
 
   // When the view changes, push focus into the new content area
-  // so the new FocusZone (or EPGGrid) receives focus and activates
   useEffect(() => {
     if (currentView === 'player') return;
     // Give React a frame to render the new view
@@ -101,8 +99,6 @@ function AppContent() {
         return <ChannelList channels={channelsWithFavorites.filter(ch => ch.contentType === 'movies')} />;
       case 'series':
         return <ChannelList channels={channelsWithFavorites.filter(ch => ch.contentType === 'series')} />;
-      case 'guide':
-        return <EPGGrid />;
       case 'player':
         return <Player />;
       case 'settings':

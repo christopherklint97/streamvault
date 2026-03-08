@@ -18,6 +18,7 @@ export default function Home() {
   const channels = useChannelStore((s) => s.channels);
   const programs = useChannelStore((s) => s.programs);
   const groups = useChannelStore((s) => s.groups);
+  const contentTypeCounts = useChannelStore((s) => s.contentTypeCounts);
   const favoriteIds = useFavoritesStore((s) => s.favoriteIds);
   const setChannel = usePlayerStore((s) => s.setChannel);
   const navigate = useAppStore((s) => s.navigate);
@@ -65,11 +66,12 @@ export default function Home() {
     ? getCurrentProgram(programs, lastWatchedChannel.id)
     : null;
 
-  const contentTypeCounts = useMemo(() => ({
-    livetv: channels.filter((ch) => ch.contentType === 'livetv').length,
-    movies: channels.filter((ch) => ch.contentType === 'movies').length,
-    series: channels.filter((ch) => ch.contentType === 'series').length,
-  }), [channels]);
+  // Content type counts come from server categories (not loaded channels)
+  const typeCounts = useMemo(() => ({
+    livetv: contentTypeCounts['livetv'] || 0,
+    movies: contentTypeCounts['movies'] || 0,
+    series: contentTypeCounts['series'] || 0,
+  }), [contentTypeCounts]);
 
   const handleContentTypeSelect = useCallback(
     (view: View) => {
@@ -80,7 +82,8 @@ export default function Home() {
 
   const displayGroups = groups.filter((g) => g !== 'All');
 
-  if (channels.length === 0) {
+  const hasContent = groups.length > 1 || channels.length > 0;
+  if (!hasContent) {
     return (
       <FocusZone className="home home--empty">
         <div className="home__welcome">
@@ -197,9 +200,9 @@ export default function Home() {
         <h2 className="home__section-title">Browse by Type</h2>
         <div className="home__categories">
           {([
-            { label: 'Live TV', view: 'channels' as View, count: contentTypeCounts.livetv },
-            { label: 'Movies', view: 'movies' as View, count: contentTypeCounts.movies },
-            { label: 'Series', view: 'series' as View, count: contentTypeCounts.series },
+            { label: 'Live TV', view: 'channels' as View, count: typeCounts.livetv },
+            { label: 'Movies', view: 'movies' as View, count: typeCounts.movies },
+            { label: 'Series', view: 'series' as View, count: typeCounts.series },
           ]).map((item) => (
             <button
               key={item.view}

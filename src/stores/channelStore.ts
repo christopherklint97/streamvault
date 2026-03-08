@@ -18,6 +18,7 @@ interface ChannelState {
   programsByChannel: Map<string, Program[]>;
   groups: string[];
   regions: string[];
+  contentTypeCounts: Record<string, number>;
   selectedGroup: string;
   selectedRegion: string;
   isLoading: boolean;
@@ -57,8 +58,9 @@ const DEFAULT_SERVER_URL: string = typeof __SERVER_URL__ !== 'undefined' ? __SER
 
 interface ChannelActions {
   setApiBaseUrl: (url: string) => void;
-  fetchChannels: () => Promise<void>;
+  fetchChannels: (group?: string) => Promise<void>;
   fetchPrograms: () => Promise<void>;
+  fetchEpgForStream: (streamId: number) => Promise<Program[]>;
   fetchConfig: () => Promise<void>;
   saveConfig: (config: Record<string, string>) => Promise<void>;
   triggerSync: () => Promise<void>;
@@ -93,6 +95,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
   programsByChannel: new Map(),
   groups: ['All'],
   regions: ['All'],
+  contentTypeCounts: {},
   selectedGroup: 'All',
   selectedRegion: 'All',
   isLoading: false,
@@ -114,16 +117,18 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     setItem(API_BASE_URL_KEY, url);
   },
 
-  fetchChannels: async () => {
+  fetchChannels: async (group?: string) => {
     const { apiBaseUrl } = get();
     if (!apiBaseUrl) return;
     try {
-      const data = await apiFetch(apiBaseUrl, '/api/channels');
+      const groupParam = group && group !== 'All' ? `?group=${encodeURIComponent(group)}` : '';
+      const data = await apiFetch(apiBaseUrl, `/api/channels${groupParam}`);
       const channels: Channel[] = data.channels;
       set({
         channels,
         groups: data.groups,
         regions: data.regions,
+        contentTypeCounts: data.contentTypeCounts || {},
         channelCount: channels.length,
       });
     } catch (err) {
@@ -154,6 +159,43 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to fetch programs';
       set({ error: msg });
+    }
+  },
+
+  fetchEpgForStream: async (streamId: number) => {
+    const { apiBaseUrl } = get();
+    if (!apiBaseUrl) return [];
+    try {
+      const data = await apiFetch(apiBaseUrl, `/api/epg/${streamId}`);
+      const programs: Program[] = data.programs.map((p: { channelId: string; title: string; description: string; start: string; stop: string; category: string }) => ({
+        channelId: p.channelId,
+        title: p.title,
+        description: p.description,
+        start: new Date(p.start),
+        stop: new Date(p.stop),
+        category: p.category,
+      }));
+      // Merge into existing programs index
+      const { programsByChannel } = get();
+      const newIndex = new Map(programsByChannel);
+      for (const p of programs) {
+        let list = newIndex.get(p.channelId);
+        if (!list) {
+          list = [];
+          newIndex.set(p.channelId, list);
+        }
+        // Avoid duplicates by checking start time
+        if (!list.some(existing => existing.start.getTime() === p.start.getTime())) {
+          list.push(p);
+        }
+      }
+      for (const list of newIndex.values()) {
+        list.sort((a, b) => a.start.getTime() - b.start.getTime());
+      }
+      set({ programsByChannel: newIndex });
+      return programs;
+    } catch {
+      return [];
     }
   },
 
@@ -257,7 +299,10 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     }
   },
 
-  setSelectedGroup: (group: string) => set({ selectedGroup: group }),
+  setSelectedGroup: (group: string) => {
+    set({ selectedGroup: group });
+    get().fetchChannels(group);
+  },
   setSelectedRegion: (region: string) => set({ selectedRegion: region }),
 
   hydrate: async () => {

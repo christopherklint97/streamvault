@@ -20,7 +20,7 @@ export interface Program {
   category: string;
 }
 
-export type View = 'home' | 'channels' | 'movies' | 'series' | 'guide' | 'player' | 'settings';
+export type View = 'home' | 'channels' | 'movies' | 'series' | 'player' | 'settings';
 
 export interface PlayerState {
   status: 'idle' | 'loading' | 'playing' | 'paused' | 'error';

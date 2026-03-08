@@ -14,7 +14,6 @@ const NAV_ITEMS: NavItem[] = [
   { icon: '\u25B8', label: 'Live TV', view: 'channels' },
   { icon: '\u25FB', label: 'Movies', view: 'movies' },
   { icon: '\u2261', label: 'Series', view: 'series' },
-  { icon: '\u25A6', label: 'Guide', view: 'guide' },
   { icon: '\u2736', label: 'Settings', view: 'settings' },
 ];
 
@@ -42,8 +41,7 @@ export default function Sidebar() {
         }
       } else if (e.keyCode === KEY_CODES.RIGHT) {
         e.preventDefault();
-        // Move focus to main content area — try container with tabIndex first (Settings, ChannelList),
-        // then fall back to first focusable element (Home, EPGGrid)
+        // Move focus to main content area
         const container = document.querySelector('.app__content > [tabindex]') as HTMLElement | null;
         const focusable = document.querySelector('.app__content [data-focusable]') as HTMLElement | null;
         (container ?? focusable)?.focus();

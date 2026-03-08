@@ -7,6 +7,8 @@ services:
       - "3002:3001"
     volumes:
       - streamvault_data:/app/data
+    environment:
+      - LOG_LEVEL=info
     restart: unless-stopped
 
 volumes:
