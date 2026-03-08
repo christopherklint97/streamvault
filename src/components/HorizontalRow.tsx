@@ -37,7 +37,7 @@ export default function HorizontalRow({ title, channels, onSelect }: HorizontalR
     const handleFocusIn = (e: FocusEvent) => {
       const target = e.target as HTMLElement;
       if (target.hasAttribute('data-focusable')) {
-        target.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+        target.scrollIntoView({ block: 'nearest', inline: 'center' });
       }
     };
 

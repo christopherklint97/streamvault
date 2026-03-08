@@ -13,7 +13,7 @@ export function useFocusNavigation(
     const el = elements[index] as HTMLElement | undefined;
     if (el) {
       el.focus({ preventScroll: true });
-      el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      el.scrollIntoView({ block: 'nearest' });
     }
   }, []);
 

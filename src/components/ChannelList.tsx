@@ -18,6 +18,7 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
   const setChannel = usePlayerStore((s) => s.setChannel);
   const navigate = useAppStore((s) => s.navigate);
   const gridContainerRef = useRef<HTMLDivElement>(null);
+  const hasFocusedFirstCard = useRef(false);
 
   // Client-side filter within the loaded group
   const displayChannels = useMemo(() => {
@@ -26,11 +27,10 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
     return channels.filter((ch) => ch.name.toLowerCase().includes(q));
   }, [channels, searchQuery]);
 
-  // Re-focus first card when channels change
-  const prevCountRef = useRef(channels.length);
+  // Auto-focus first channel card when channels load
   useEffect(() => {
-    if (channels.length !== prevCountRef.current) {
-      prevCountRef.current = channels.length;
+    if (channels.length > 0 && !hasFocusedFirstCard.current) {
+      hasFocusedFirstCard.current = true;
       requestAnimationFrame(() => {
         const container = gridContainerRef.current;
         if (!container) return;

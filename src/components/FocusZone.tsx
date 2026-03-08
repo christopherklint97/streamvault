@@ -188,7 +188,7 @@ export default function FocusZone({ children, className, onEnter }: FocusZonePro
         e.preventDefault();
         e.stopPropagation();
         next.focus({ preventScroll: true });
-        next.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+        next.scrollIntoView({ block: 'nearest', inline: 'nearest' });
       }
       // If no element found, don't preventDefault — let it bubble.
       // LEFT at left edge → bubbles to App.tsx → focuses sidebar.
