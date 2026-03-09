@@ -11,15 +11,16 @@ interface ChannelListProps {
 }
 
 const COLUMN_COUNT = 5;
-const BATCH_SIZE = 50;
+const ROW_HEIGHT = 200;
+const CONTAINER_HEIGHT = 800;
+const BUFFER = 2;
 
 export default function ChannelList({ channels, groupName }: ChannelListProps) {
   const [searchQuery, setSearchQuery] = useState('');
-  const [visibleCount, setVisibleCount] = useState(BATCH_SIZE);
   const [focusIndex, setFocusIndex] = useState(0);
+  const [scrollOffset, setScrollOffset] = useState(0);
   const setChannel = usePlayerStore((s) => s.setChannel);
   const navigate = useAppStore((s) => s.navigate);
-  const containerRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const focusOnSearch = useRef(false);
@@ -30,39 +31,22 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
     return channels.filter((ch) => ch.name.toLowerCase().includes(q));
   }, [channels, searchQuery]);
 
-  const displayed = displayChannels.slice(0, visibleCount);
-  const hasMore = displayChannels.length > visibleCount;
+  const totalRows = Math.ceil(displayChannels.length / COLUMN_COUNT);
 
-  // Focus first card when channels load
+  // Compute visible row range
+  const startRow = Math.max(0, Math.floor(scrollOffset / ROW_HEIGHT) - BUFFER);
+  const endRow = Math.min(totalRows - 1, Math.ceil((scrollOffset + CONTAINER_HEIGHT) / ROW_HEIGHT) + BUFFER);
+
+  // Focus the card at focusIndex after render
   useEffect(() => {
-    if (channels.length > 0 && !focusOnSearch.current) {
-      requestAnimationFrame(() => {
-        const grid = gridRef.current;
-        if (!grid) return;
-        const first = grid.querySelector('[data-focusable]') as HTMLElement | null;
-        first?.focus({ preventScroll: true });
-      });
-    }
-  }, [channels.length]);
-
-  const focusCard = useCallback((index: number) => {
-    const grid = gridRef.current;
-    if (!grid) return;
-    const cards = grid.querySelectorAll('[data-focusable]') as NodeListOf<HTMLElement>;
-    if (index >= 0 && index < cards.length) {
-      cards[index].focus({ preventScroll: true });
-      // Manual scroll
-      const card = cards[index];
-      const parent = grid;
-      const cardTop = card.offsetTop;
-      const cardBottom = cardTop + card.offsetHeight;
-      if (cardTop < parent.scrollTop) {
-        parent.scrollTop = cardTop - 8;
-      } else if (cardBottom > parent.scrollTop + parent.clientHeight) {
-        parent.scrollTop = cardBottom - parent.clientHeight + 8;
-      }
-    }
-  }, []);
+    if (focusOnSearch.current) return;
+    requestAnimationFrame(() => {
+      const grid = gridRef.current;
+      if (!grid) return;
+      const el = grid.querySelector(`[data-vindex="${focusIndex}"]`) as HTMLElement | null;
+      el?.focus({ preventScroll: true });
+    });
+  }, [focusIndex, startRow, endRow, channels.length]);
 
   const handleSelect = useCallback(
     (channel: Channel) => {
@@ -73,9 +57,8 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
   );
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    const active = document.activeElement as HTMLElement;
-    const isOnSearch = active === searchRef.current;
-    const count = displayed.length;
+    const isOnSearch = document.activeElement === searchRef.current;
+    const count = displayChannels.length;
 
     if (e.keyCode === KEY_CODES.DOWN) {
       e.preventDefault();
@@ -83,14 +66,15 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
         if (count > 0) {
           focusOnSearch.current = false;
           setFocusIndex(0);
-          focusCard(0);
+          setScrollOffset(0);
         }
       } else if (focusIndex + COLUMN_COUNT < count) {
         const next = focusIndex + COLUMN_COUNT;
         setFocusIndex(next);
-        focusCard(next);
-      } else if (hasMore) {
-        setVisibleCount((prev) => prev + BATCH_SIZE);
+        const nextBottom = (Math.floor(next / COLUMN_COUNT) + 1) * ROW_HEIGHT;
+        if (nextBottom > scrollOffset + CONTAINER_HEIGHT) {
+          setScrollOffset(nextBottom - CONTAINER_HEIGHT);
+        }
       }
     } else if (e.keyCode === KEY_CODES.UP) {
       e.preventDefault();
@@ -98,48 +82,85 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
       if (focusIndex - COLUMN_COUNT >= 0) {
         const prev = focusIndex - COLUMN_COUNT;
         setFocusIndex(prev);
-        focusCard(prev);
+        const prevTop = Math.floor(prev / COLUMN_COUNT) * ROW_HEIGHT;
+        if (prevTop < scrollOffset) {
+          setScrollOffset(prevTop);
+        }
       } else {
-        // Move to search
         focusOnSearch.current = true;
         setFocusIndex(0);
         searchRef.current?.focus({ preventScroll: true });
       }
     } else if (e.keyCode === KEY_CODES.RIGHT) {
-      if (isOnSearch) return; // cursor movement
+      if (isOnSearch) return;
       e.preventDefault();
       if (focusIndex % COLUMN_COUNT < COLUMN_COUNT - 1 && focusIndex + 1 < count) {
-        const next = focusIndex + 1;
-        setFocusIndex(next);
-        focusCard(next);
+        setFocusIndex(focusIndex + 1);
       }
     } else if (e.keyCode === KEY_CODES.LEFT) {
-      if (isOnSearch) return; // cursor movement
+      if (isOnSearch) return;
       if (focusIndex % COLUMN_COUNT > 0) {
         e.preventDefault();
-        const prev = focusIndex - 1;
-        setFocusIndex(prev);
-        focusCard(prev);
+        setFocusIndex(focusIndex - 1);
       }
-      // else: let it bubble to App.tsx → sidebar
+      // else: let it bubble to App.tsx -> sidebar
     } else if (e.keyCode === KEY_CODES.ENTER) {
       if (isOnSearch) return;
       e.preventDefault();
       if (focusIndex >= 0 && focusIndex < count) {
-        handleSelect(displayed[focusIndex]);
+        handleSelect(displayChannels[focusIndex]);
       }
     }
-  }, [focusIndex, displayed, hasMore, focusCard, handleSelect]);
+  }, [focusIndex, displayChannels, scrollOffset, handleSelect]);
 
   const handleSearchChange = useCallback((value: string) => {
     setSearchQuery(value);
-    setVisibleCount(BATCH_SIZE);
     setFocusIndex(0);
+    setScrollOffset(0);
     focusOnSearch.current = true;
   }, []);
 
+  // Build only the visible rows
+  const rows = [];
+  for (let row = startRow; row <= endRow; row++) {
+    const items = [];
+    for (let col = 0; col < COLUMN_COUNT; col++) {
+      const idx = row * COLUMN_COUNT + col;
+      if (idx < displayChannels.length) {
+        items.push(
+          <ChannelCard
+            key={displayChannels[idx].id}
+            channel={displayChannels[idx]}
+            onSelect={handleSelect}
+            vindex={idx}
+          />
+        );
+      }
+    }
+    rows.push(
+      <div
+        key={row}
+        className="channel-list__row"
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          transform: `translateY(${row * ROW_HEIGHT}px)`,
+          height: ROW_HEIGHT,
+          display: 'grid',
+          gridTemplateColumns: 'repeat(5, 1fr)',
+          gap: '16px',
+          alignContent: 'start',
+        }}
+      >
+        {items}
+      </div>
+    );
+  }
+
   return (
-    <div className="channel-list" ref={containerRef} onKeyDown={handleKeyDown}>
+    <div className="channel-list" onKeyDown={handleKeyDown}>
       <h1 className="channel-list__title">{groupName}</h1>
       <div className="channel-list__search">
         <input
@@ -164,28 +185,18 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
       <div className="channel-list__count">
         {displayChannels.length} item{displayChannels.length !== 1 ? 's' : ''}
       </div>
-      <div className="channel-list__grid" ref={gridRef}>
-        {displayed.length === 0 ? (
+      <div
+        className="channel-list__grid"
+        ref={gridRef}
+      >
+        {displayChannels.length === 0 ? (
           <div className="channel-list__empty">
             {searchQuery ? 'No matches found.' : 'Loading...'}
           </div>
         ) : (
-          displayed.map((channel) => (
-            <ChannelCard
-              key={channel.id}
-              channel={channel}
-              onSelect={handleSelect}
-            />
-          ))
-        )}
-        {hasMore && (
-          <button
-            className="channel-list__load-more"
-            tabIndex={-1}
-            onClick={() => setVisibleCount((prev) => prev + BATCH_SIZE)}
-          >
-            Load more ({displayChannels.length - visibleCount} remaining)
-          </button>
+          <div style={{ height: totalRows * ROW_HEIGHT, position: 'relative' }}>
+            {rows}
+          </div>
         )}
       </div>
     </div>

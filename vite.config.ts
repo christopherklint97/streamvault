@@ -10,6 +10,13 @@ export default defineConfig({
   define: {
     __SERVER_URL__: JSON.stringify(`http://${lanIp}:3002`),
   },
+  resolve: {
+    alias: {
+      'react': 'preact/compat',
+      'react-dom': 'preact/compat',
+      'react/jsx-runtime': 'preact/jsx-runtime',
+    },
+  },
   build: {
     target: 'es2017',
     outDir: 'dist',
