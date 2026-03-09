@@ -4,6 +4,7 @@ import { useChannelStore } from './stores/channelStore';
 import { useRemoteKeys } from './hooks/useRemoteKeys';
 import { useNetworkStatus } from './hooks/useNetworkStatus';
 import { KEY_CODES } from './utils/keys';
+import { markTTI, startFPSMonitor, stopFPSMonitor } from './utils/perf-monitor';
 import ErrorBoundary from './components/ErrorBoundary';
 import Sidebar from './components/Sidebar';
 import Toast from './components/Toast';
@@ -28,7 +29,7 @@ function AppContent() {
 
   useRemoteKeys();
 
-  // Register Tizen remote keys and set initial focus
+  // Register Tizen remote keys, set initial focus, and start perf monitoring
   useEffect(() => {
     if (typeof tizen !== 'undefined' && tizen.tvinputdevice) {
       const keysToRegister = [
@@ -44,7 +45,15 @@ function AppContent() {
     requestAnimationFrame(() => {
       const firstItem = document.querySelector('.sidebar-item') as HTMLElement | null;
       firstItem?.focus();
+      // Mark Time To Interactive after first focus
+      markTTI();
     });
+
+    // Start FPS monitoring in dev mode
+    if (import.meta.env.DEV) {
+      startFPSMonitor();
+      return () => stopFPSMonitor();
+    }
   }, []);
 
   // Hydrate from server on startup

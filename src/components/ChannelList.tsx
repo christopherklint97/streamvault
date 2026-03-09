@@ -3,6 +3,8 @@ import type { Channel } from '../types';
 import { usePlayerStore } from '../stores/playerStore';
 import { useAppStore } from '../stores/appStore';
 import { KEY_CODES } from '../utils/keys';
+import { prefetchImages } from '../utils/image-pool';
+import { markKeyDown, markKeyRendered } from '../utils/perf-monitor';
 import ChannelCard from './ChannelCard';
 
 interface ChannelListProps {
@@ -14,6 +16,8 @@ const COLUMN_COUNT = 5;
 const ROW_HEIGHT = 160;
 const CONTAINER_HEIGHT = 800;
 const BUFFER = 2;
+/** How many rows ahead to prefetch images for */
+const PREFETCH_ROWS = 3;
 
 export default function ChannelList({ channels, groupName }: ChannelListProps) {
   const [searchQuery, setSearchQuery] = useState('');
@@ -37,6 +41,26 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
   const startRow = Math.max(0, Math.floor(scrollOffset / ROW_HEIGHT) - BUFFER);
   const endRow = Math.min(totalRows - 1, Math.ceil((scrollOffset + CONTAINER_HEIGHT) / ROW_HEIGHT) + BUFFER);
 
+  // Prefetch images for rows about to come into view
+  useEffect(() => {
+    const prefetchStart = endRow + 1;
+    const prefetchEnd = Math.min(totalRows - 1, endRow + PREFETCH_ROWS);
+    if (prefetchStart > prefetchEnd) return;
+
+    const urls: string[] = [];
+    for (let row = prefetchStart; row <= prefetchEnd; row++) {
+      for (let col = 0; col < COLUMN_COUNT; col++) {
+        const idx = row * COLUMN_COUNT + col;
+        if (idx < displayChannels.length && displayChannels[idx].logo) {
+          urls.push(displayChannels[idx].logo);
+        }
+      }
+    }
+    if (urls.length > 0) {
+      prefetchImages(urls);
+    }
+  }, [endRow, totalRows, displayChannels]);
+
   // Focus the card at focusIndex after render
   useEffect(() => {
     if (focusOnSearch.current) return;
@@ -45,6 +69,8 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
       if (!grid) return;
       const el = grid.querySelector(`[data-vindex="${focusIndex}"]`) as HTMLElement | null;
       el?.focus({ preventScroll: true });
+      // Mark key response complete after focus
+      markKeyRendered();
     });
   }, [focusIndex, startRow, endRow, channels.length]);
 
@@ -59,6 +85,9 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     const isOnSearch = document.activeElement === searchRef.current;
     const count = displayChannels.length;
+
+    // Track key input responsiveness
+    markKeyDown();
 
     if (e.keyCode === KEY_CODES.DOWN) {
       e.preventDefault();
@@ -120,7 +149,7 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
     focusOnSearch.current = true;
   }, []);
 
-  // Build only the visible rows
+  // Build only the visible rows - inline styles kept static where possible
   const rows = [];
   for (let row = startRow; row <= endRow; row++) {
     const items = [];
@@ -152,6 +181,7 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
           gridTemplateColumns: 'repeat(5, 1fr)',
           gap: '16px',
           alignContent: 'start',
+          contain: 'strict',
         }}
       >
         {items}
