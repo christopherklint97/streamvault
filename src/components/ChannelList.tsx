@@ -11,7 +11,7 @@ interface ChannelListProps {
 }
 
 const COLUMN_COUNT = 5;
-const ROW_HEIGHT = 200;
+const ROW_HEIGHT = 160;
 const CONTAINER_HEIGHT = 800;
 const BUFFER = 2;
 

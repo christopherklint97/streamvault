@@ -50,7 +50,7 @@ export default function VirtualGrid({
     };
   }, []);
 
-  // Auto-scroll to keep focused item visible
+  // Auto-scroll to keep focused item visible — no getBoundingClientRect
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -58,20 +58,12 @@ export default function VirtualGrid({
     const handleFocusIn = (e: FocusEvent) => {
       const target = e.target as HTMLElement;
       if (!target.hasAttribute('data-focusable')) return;
-
-      const targetRect = target.getBoundingClientRect();
-      const containerRect = container.getBoundingClientRect();
-
-      if (targetRect.top < containerRect.top) {
-        container.scrollTop -= containerRect.top - targetRect.top + rowHeight;
-      } else if (targetRect.bottom > containerRect.bottom) {
-        container.scrollTop += targetRect.bottom - containerRect.bottom + rowHeight;
-      }
+      target.scrollIntoView({ block: 'nearest' });
     };
 
     container.addEventListener('focusin', handleFocusIn);
     return () => container.removeEventListener('focusin', handleFocusIn);
-  }, [rowHeight]);
+  }, []);
 
   const rows: ReactNode[] = [];
   for (let row = startRow; row <= endRow; row++) {

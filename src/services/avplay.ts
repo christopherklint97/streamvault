@@ -31,6 +31,7 @@ export class TizenPlayer implements PlayerBackend {
   private prepared: boolean = false;
   private subtitleTracks: SubtitleTrack[] = [];
   private subtitlesSuppressed: boolean = false;
+  private static displayRectSet: boolean = false;
   onSubtitleText?: (text: string) => void;
 
   open(url: string): void {
@@ -39,12 +40,15 @@ export class TizenPlayer implements PlayerBackend {
     try {
       webapis.avplay.open(url);
 
-      // Set display to full screen
-      const screenWidth =
-        window.innerWidth || document.documentElement.clientWidth;
-      const screenHeight =
-        window.innerHeight || document.documentElement.clientHeight;
-      webapis.avplay.setDisplayRect(0, 0, screenWidth, screenHeight);
+      // Set display to full screen — only once, rect never changes
+      if (!TizenPlayer.displayRectSet) {
+        const screenWidth =
+          window.innerWidth || document.documentElement.clientWidth;
+        const screenHeight =
+          window.innerHeight || document.documentElement.clientHeight;
+        webapis.avplay.setDisplayRect(0, 0, screenWidth, screenHeight);
+        TizenPlayer.displayRectSet = true;
+      }
 
       // Set up event listeners
       webapis.avplay.setListener({

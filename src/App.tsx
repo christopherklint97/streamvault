@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useMemo } from 'react';
+import { useEffect, useCallback, useMemo, lazy, Suspense } from 'react';
 import { useAppStore } from './stores/appStore';
 import { useChannelStore } from './stores/channelStore';
 import { useRemoteKeys } from './hooks/useRemoteKeys';
@@ -12,7 +12,8 @@ import Player from './components/Player';
 import GroupList from './components/GroupList';
 import ChannelList from './components/ChannelList';
 import Home from './pages/Home';
-import Settings from './pages/Settings';
+
+const Settings = lazy(() => import('./pages/Settings'));
 
 function AppContent() {
   const currentView = useAppStore((s) => s.currentView);
@@ -92,7 +93,7 @@ function AppContent() {
       case 'player':
         return <Player />;
       case 'settings':
-        return <Settings />;
+        return <Suspense fallback={null}><Settings /></Suspense>;
       default:
         return <Home />;
     }

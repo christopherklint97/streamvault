@@ -165,7 +165,7 @@ export default function Home() {
                 >
                   <div className="home__cw-logo">
                     {ch.logo ? (
-                      <img src={ch.logo} alt={ch.name} />
+                      <img src={ch.logo} alt={ch.name} width={64} height={48} loading="lazy" decoding="async" />
                     ) : (
                       <div className="home__cw-letter">
                         {ch.name.charAt(0).toUpperCase()}
@@ -198,7 +198,7 @@ export default function Home() {
           >
             <div className="home__hero-logo">
               {lastWatchedChannel.logo ? (
-                <img src={lastWatchedChannel.logo} alt={lastWatchedChannel.name} />
+                <img src={lastWatchedChannel.logo} alt={lastWatchedChannel.name} width={56} height={48} loading="lazy" decoding="async" />
               ) : (
                 <div className="home__hero-letter">
                   {lastWatchedChannel.name.charAt(0).toUpperCase()}

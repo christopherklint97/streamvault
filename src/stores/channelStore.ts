@@ -83,11 +83,12 @@ async function apiFetch(baseUrl: string, path: string, options?: RequestInit) {
   return response.json();
 }
 
-let pollInterval: ReturnType<typeof setInterval> | null = null;
+let pollInterval: ReturnType<typeof setTimeout> | null = null;
+let fetchAbortController: AbortController | null = null;
 
 function stopPolling() {
   if (pollInterval) {
-    clearInterval(pollInterval);
+    clearTimeout(pollInterval);
     pollInterval = null;
   }
 }
@@ -136,9 +137,14 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
   fetchChannels: async (group?: string) => {
     const { apiBaseUrl } = get();
     if (!apiBaseUrl) return;
+    // Abort any in-flight channel fetch
+    if (fetchAbortController) fetchAbortController.abort();
+    fetchAbortController = new AbortController();
+    const signal = fetchAbortController.signal;
     try {
       const groupParam = group && group !== 'All' ? `?group=${encodeURIComponent(group)}` : '';
-      const data = await apiFetch(apiBaseUrl, `/api/channels${groupParam}`);
+      const data = await apiFetch(apiBaseUrl, `/api/channels${groupParam}`, { signal });
+      if (signal.aborted) return;
       const channels: Channel[] = data.channels;
       set({
         channels,
@@ -148,6 +154,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
         channelCount: channels.length,
       });
     } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
       const msg = err instanceof Error ? err.message : 'Failed to fetch channels';
       set({ error: msg });
     }
@@ -158,8 +165,8 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     if (!apiBaseUrl) return;
     try {
       const now = Date.now();
-      const to = now + 24 * 60 * 60 * 1000;
-      const data = await apiFetch(apiBaseUrl, `/api/programs?from=${now - 6 * 60 * 60 * 1000}&to=${to}`);
+      const to = now + 6 * 60 * 60 * 1000;
+      const data = await apiFetch(apiBaseUrl, `/api/programs?from=${now - 2 * 60 * 60 * 1000}&to=${to}`);
       const programs: Program[] = data.programs.map((p: { channelId: string; title: string; description: string; start: string; stop: string; category: string }) => ({
         channelId: p.channelId,
         title: p.title,
@@ -285,9 +292,20 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     set({ isLoading: true, error: null, loadingPhase: 'fetching-playlist', loadingMessage: 'Starting sync...' });
     try {
       await apiFetch(apiBaseUrl, '/api/sync', { method: 'POST' });
-      // Start polling for status
+      // Start polling for status with exponential backoff
       get().pollStatus();
-      pollInterval = setInterval(() => { get().pollStatus(); }, 2000);
+      let pollDelay = 2000;
+      const schedulePoll = () => {
+        pollInterval = setTimeout(() => {
+          get().pollStatus().then(() => {
+            if (get().isLoading) {
+              pollDelay = Math.min(pollDelay * 1.5, 10000);
+              schedulePoll();
+            }
+          });
+        }, pollDelay);
+      };
+      schedulePoll();
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to start sync';
       set({ isLoading: false, error: msg, loadingPhase: 'idle', loadingMessage: '' });
@@ -353,7 +371,18 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
       const status = await apiFetch(apiBaseUrl, '/api/status');
       if (status.isSyncing) {
         set({ isLoading: true, loadingPhase: status.phase, loadingMessage: status.message });
-        pollInterval = setInterval(() => { get().pollStatus(); }, 2000);
+        let pollDelay = 2000;
+        const schedulePoll = () => {
+          pollInterval = setTimeout(() => {
+            get().pollStatus().then(() => {
+              if (get().isLoading) {
+                pollDelay = Math.min(pollDelay * 1.5, 10000);
+                schedulePoll();
+              }
+            });
+          }, pollDelay);
+        };
+        schedulePoll();
       }
       set({ lastSyncTime: status.lastSyncTime, _hydrated: true });
     } catch (err) {

@@ -45,6 +45,8 @@ function ChannelLogoInner({ src, name }: ChannelLogoProps) {
         className="channel-logo__img"
         src={src}
         alt=""
+        width={64}
+        height={48}
         loading="lazy"
         decoding="async"
         onError={handleError}
