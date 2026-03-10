@@ -332,22 +332,29 @@ app.get('/api/stream/:channelId', async (req, res) => {
   const streamUrl = channel.url;
   logger.info(`Stream proxy: ${channelId} "${channel.name}" type=${channel.content_type} → ${streamUrl.substring(0, 80)}...`);
 
+  const isLive = channel.content_type === 'livetv';
+
   try {
     // Use VLC User-Agent to get past Cloudflare and get proper redirects
     const upstreamHeaders: Record<string, string> = {
       'User-Agent': 'VLC/3.0.20 LibVLC/3.0.20',
     };
-    if (req.headers.range) {
+    // Forward Range header for VOD (seeking), skip for live streams
+    if (req.headers.range && !isLive) {
       upstreamHeaders['Range'] = req.headers.range;
       logger.info(`Stream proxy: forwarding Range header: ${req.headers.range}`);
     }
 
     // Follow redirects (Xtream servers often redirect to CDN with token)
-    const upstream = await fetch(streamUrl, {
-      signal: AbortSignal.timeout(30_000),
+    // No timeout for live streams (they run indefinitely)
+    const fetchOptions: RequestInit = {
       headers: upstreamHeaders,
       redirect: 'follow',
-    });
+    };
+    if (!isLive) {
+      fetchOptions.signal = AbortSignal.timeout(30_000);
+    }
+    const upstream = await fetch(streamUrl, fetchOptions);
 
     logger.info(`Stream proxy: final URL=${upstream.url.substring(0, 80)}...`);
 

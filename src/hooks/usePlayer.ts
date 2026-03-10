@@ -236,18 +236,18 @@ export function usePlayer(): {
             isLive: true,
             url: playUrl,
           }, {
-            enableWorker: true,
+            enableWorker: false,
+            enableStashBuffer: true,
+            stashInitialSize: 128 * 1024,
             liveBufferLatencyChasing: true,
             liveBufferLatencyMaxLatency: 5,
             liveBufferLatencyMinRemain: 1,
           });
           mpegtsRef.current = player;
-          player.attachMediaElement(video);
-          player.load();
-          log.info('HTML5: mpegts.js player attached and loading');
 
-          player.on(mpegts.Events.ERROR, (type: string, detail: string) => {
-            log.error(`mpegts error: type=${type} detail=${detail}`);
+          // Register all event handlers BEFORE attaching/loading
+          player.on(mpegts.Events.ERROR, (type: string, detail: string, info: unknown) => {
+            log.error(`mpegts ERROR: type=${type} detail=${detail}`, info);
             setError(`Live stream error: ${detail}`);
           });
           player.on(mpegts.Events.LOADING_COMPLETE, () => {
@@ -256,6 +256,21 @@ export function usePlayer(): {
           player.on(mpegts.Events.MEDIA_INFO, (info: unknown) => {
             log.info('mpegts: media info received', info);
           });
+          player.on(mpegts.Events.STATISTICS_INFO, (info: unknown) => {
+            log.debug('mpegts: stats', info);
+          });
+
+          try {
+            player.attachMediaElement(video);
+            log.info('HTML5: mpegts.js attached to video element');
+            player.load();
+            log.info('HTML5: mpegts.js load() called');
+            player.play();
+            log.info('HTML5: mpegts.js play() called');
+          } catch (e) {
+            log.error('HTML5: mpegts.js attach/load/play threw', e);
+            setError('Failed to start live stream');
+          }
         }).catch((e) => { log.error('HTML5: failed to import mpegts.js', e); setError('Failed to load live TV player'); });
       } else {
         // VOD (MP4, etc) — direct playback via proxy, canplay event triggers play()
