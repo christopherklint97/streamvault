@@ -127,24 +127,27 @@ export default function Settings() {
   }, [showToastMessage]);
 
   const handleForceUpdate = useCallback(async () => {
-    if (!('serviceWorker' in navigator)) {
-      showToastMessage('No service worker found');
-      return;
+    // Try to update service worker if available
+    try {
+      const registration = await navigator.serviceWorker?.getRegistration();
+      if (registration) {
+        await registration.update();
+        if (registration.waiting) {
+          registration.waiting.postMessage({ type: 'SKIP_WAITING' });
+        }
+      }
+    } catch {
+      // Service worker not available (e.g. no HTTPS) — that's fine
     }
-    const registration = await navigator.serviceWorker.getRegistration();
-    if (!registration) {
-      showToastMessage('No service worker registered');
-      return;
+    // Clear any caches
+    try {
+      const cacheNames = await caches.keys();
+      await Promise.all(cacheNames.map(name => caches.delete(name)));
+    } catch {
+      // Cache API may not be available
     }
-    await registration.update();
-    if (registration.waiting) {
-      registration.waiting.postMessage({ type: 'SKIP_WAITING' });
-    }
-    // Clear all caches
-    const cacheNames = await caches.keys();
-    await Promise.all(cacheNames.map(name => caches.delete(name)));
-    showToastMessage('Updated — reloading...');
-    setTimeout(() => window.location.reload(), 500);
+    showToastMessage('Reloading...');
+    setTimeout(() => window.location.reload(), 300);
   }, [showToastMessage]);
 
   const handleSyncCycle = useCallback(async () => {
