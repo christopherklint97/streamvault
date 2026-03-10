@@ -329,27 +329,27 @@ app.get('/api/stream/:channelId', async (req, res) => {
     return;
   }
 
-  // For live TV, append .m3u8 to get HLS format (browser-compatible)
-  let streamUrl = channel.url;
-  const isLiveTs = channel.content_type === 'livetv' && !streamUrl.match(/\.\w{2,4}($|\?)/);
-  if (isLiveTs) {
-    streamUrl += '.m3u8';
-  }
-
+  const streamUrl = channel.url;
   logger.info(`Stream proxy: ${channelId} "${channel.name}" type=${channel.content_type} → ${streamUrl.substring(0, 80)}...`);
 
   try {
-    // Forward range header from browser for video seeking support
-    const upstreamHeaders: Record<string, string> = { 'User-Agent': 'StreamVault/1.0' };
+    // Use VLC User-Agent to get past Cloudflare and get proper redirects
+    const upstreamHeaders: Record<string, string> = {
+      'User-Agent': 'VLC/3.0.20 LibVLC/3.0.20',
+    };
     if (req.headers.range) {
       upstreamHeaders['Range'] = req.headers.range;
       logger.info(`Stream proxy: forwarding Range header: ${req.headers.range}`);
     }
 
+    // Follow redirects (Xtream servers often redirect to CDN with token)
     const upstream = await fetch(streamUrl, {
       signal: AbortSignal.timeout(30_000),
       headers: upstreamHeaders,
+      redirect: 'follow',
     });
+
+    logger.info(`Stream proxy: final URL=${upstream.url.substring(0, 80)}...`);
 
     logger.info(`Stream proxy: upstream responded ${upstream.status} ${upstream.statusText}, content-type=${upstream.headers.get('content-type')}, content-length=${upstream.headers.get('content-length')}`);
 

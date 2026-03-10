@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import type HlsType from 'hls.js';
+import type MpegtsType from 'mpegts.js';
 import { usePlayerStore } from '../stores/playerStore';
 import { useChannelStore } from '../stores/channelStore';
 import type { PlayerState } from '../types';
@@ -27,7 +27,7 @@ export function usePlayer(): {
   cycleSubtitles: () => void;
 } {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const hlsRef = useRef<HlsType | null>(null);
+  const mpegtsRef = useRef<MpegtsType.Player | null>(null);
   const store = usePlayerStore();
   const [subtitleTracks, setSubtitleTracks] = useState<SubtitleTrack[]>([]);
   const [currentSubtitleIndex, setCurrentSubtitleIndex] = useState(-1);
@@ -161,11 +161,11 @@ export function usePlayer(): {
       log.info(`HTML5: found video element, readyState=${video.readyState}, networkState=${video.networkState}`);
       videoRef.current = video;
 
-      // Clean up any previous HLS instance
-      if (hlsRef.current) {
-        log.info('HTML5: destroying previous HLS instance');
-        hlsRef.current.destroy();
-        hlsRef.current = null;
+      // Clean up any previous mpegts instance
+      if (mpegtsRef.current) {
+        log.info('HTML5: destroying previous mpegts.js instance');
+        mpegtsRef.current.destroy();
+        mpegtsRef.current = null;
       }
 
       const setupEvents = () => {
@@ -214,69 +214,52 @@ export function usePlayer(): {
         });
       };
 
-      // Use the server proxy for stream playback (handles CORS + HLS conversion)
+      // Use the server proxy for stream playback (handles redirects + auth)
       const playUrl = getStreamUrl(channel.id);
-      log.info(`HTML5: playUrl=${playUrl}`);
+      log.info(`HTML5: playUrl=${playUrl}, contentType=${channel.contentType}`);
 
-      // Live TV streams are served as HLS (.m3u8) through the proxy
-      const isHls = channel.contentType === 'livetv';
-      log.info(`HTML5: isHls=${isHls}, contentType=${channel.contentType}`);
+      const isLiveTs = channel.contentType === 'livetv';
 
-      if (isHls && video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Safari native HLS — set src, canplay event will trigger play()
-        log.info('HTML5: using Safari native HLS');
+      if (isLiveTs) {
+        // Live TV: MPEG-TS stream — use mpegts.js to demux in browser
+        log.info('HTML5: loading mpegts.js for live MPEG-TS playback...');
         setupEvents();
-        video.src = playUrl;
-        video.load();
-      } else if (isHls) {
-        // Use HLS.js (dynamically loaded) for Chrome/Firefox/etc
-        log.info('HTML5: loading HLS.js dynamically...');
-        setupEvents();
-        import('hls.js').then(({ default: Hls }) => {
-          log.info(`HTML5: HLS.js loaded, isSupported=${Hls.isSupported()}`);
-          if (!Hls.isSupported()) {
-            log.error('HTML5: HLS.js not supported on this browser');
-            setError('HLS playback not supported on this browser');
+        import('mpegts.js').then(({ default: mpegts }) => {
+          log.info(`HTML5: mpegts.js loaded, isSupported=${mpegts.isSupported()}`);
+          if (!mpegts.isSupported()) {
+            log.error('HTML5: mpegts.js not supported');
+            setError('Live TV playback not supported on this browser');
             return;
           }
-          const hls = new Hls({
+          const player = mpegts.createPlayer({
+            type: 'mpegts',
+            isLive: true,
+            url: playUrl,
+          }, {
             enableWorker: true,
-            lowLatencyMode: true,
-            maxBufferLength: 10,
-            maxMaxBufferLength: 30,
+            liveBufferLatencyChasing: true,
+            liveBufferLatencyMaxLatency: 5,
+            liveBufferLatencyMinRemain: 1,
           });
-          hlsRef.current = hls;
-          hls.loadSource(playUrl);
-          hls.attachMedia(video);
-          log.info(`HTML5: HLS.js attached, loading source ${playUrl}`);
+          mpegtsRef.current = player;
+          player.attachMediaElement(video);
+          player.load();
+          log.info('HTML5: mpegts.js player attached and loading');
 
-          hls.on(Hls.Events.MANIFEST_PARSED, (_event, data) => {
-            log.info(`HTML5: HLS manifest parsed, levels=${data.levels.length}`);
-            video.play().catch((e) => { log.error('HTML5: play() rejected (HLS.js)', e); setError('Playback blocked'); });
+          player.on(mpegts.Events.ERROR, (type: string, detail: string) => {
+            log.error(`mpegts error: type=${type} detail=${detail}`);
+            setError(`Live stream error: ${detail}`);
           });
-          hls.on(Hls.Events.MANIFEST_LOADING, () => log.debug('HLS: manifest loading...'));
-          hls.on(Hls.Events.MANIFEST_LOADED, () => log.info('HLS: manifest loaded'));
-          hls.on(Hls.Events.LEVEL_LOADED, (_event, data) => log.debug(`HLS: level loaded, duration=${data.details.totalduration?.toFixed(1)}s`));
-          hls.on(Hls.Events.FRAG_LOADED, () => log.debug('HLS: fragment loaded'));
-          hls.on(Hls.Events.ERROR, (_event, data) => {
-            log.error(`HLS error: type=${data.type} details=${data.details} fatal=${data.fatal} url=${data.url || '?'}`);
-            if (data.fatal) {
-              if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-                log.warn('HLS: fatal network error, attempting recovery...');
-                hls.startLoad();
-              } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-                log.warn('HLS: fatal media error, attempting recovery...');
-                hls.recoverMediaError();
-              } else {
-                log.error('HLS: unrecoverable fatal error');
-                setError('Stream playback failed');
-              }
-            }
+          player.on(mpegts.Events.LOADING_COMPLETE, () => {
+            log.info('mpegts: loading complete');
           });
-        }).catch((e) => { log.error('HTML5: failed to import hls.js', e); setError('Failed to load HLS player'); });
+          player.on(mpegts.Events.MEDIA_INFO, (info: unknown) => {
+            log.info('mpegts: media info received', info);
+          });
+        }).catch((e) => { log.error('HTML5: failed to import mpegts.js', e); setError('Failed to load live TV player'); });
       } else {
-        // Direct playback (MP4, etc) — set src, canplay event will trigger play()
-        log.info(`HTML5: direct video playback (non-HLS), setting src=${playUrl}`);
+        // VOD (MP4, etc) — direct playback via proxy, canplay event triggers play()
+        log.info(`HTML5: direct video playback, setting src=${playUrl}`);
         setupEvents();
         video.src = playUrl;
         video.load();
@@ -290,10 +273,10 @@ export function usePlayer(): {
 
     stopProgressTracking();
 
-    if (hlsRef.current) {
-      log.info('Destroying HLS instance');
-      hlsRef.current.destroy();
-      hlsRef.current = null;
+    if (mpegtsRef.current) {
+      log.info('Destroying mpegts.js player');
+      mpegtsRef.current.destroy();
+      mpegtsRef.current = null;
     }
 
     if (typeof webapis !== 'undefined' && webapis.avplay) {
