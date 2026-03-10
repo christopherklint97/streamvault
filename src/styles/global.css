@@ -1,4 +1,4 @@
-/* StreamVault - Netflix-smooth TV UI (Tizen 6.5 / Chromium 85) */
+/* StreamVault - Netflix-smooth TV UI (Tizen 6.5 / Chromium 85) + Mobile PWA */
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -1042,4 +1042,175 @@ img { display: block; }
 .error-boundary__btn:focus {
   border-color: #00d4ff;
   transform: scale(1.03);
+}
+
+/* ============================
+   Mobile PWA Responsive Styles
+   ============================ */
+@media (max-width: 1024px) {
+  html, body {
+    width: 100%;
+    height: 100%;
+    font-size: 16px;
+    overflow: auto;
+    /* Safe area for notch/gesture bar */
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+
+  #root {
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+  }
+
+  /* App layout: column with bottom nav */
+  .app {
+    flex-direction: column-reverse;
+    width: 100%;
+    height: 100dvh;
+  }
+
+  .app__content {
+    padding: 16px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .app__content--fullscreen {
+    width: 100%;
+    height: 100dvh;
+    padding: 0;
+  }
+
+  .app__offline-banner {
+    font-size: 14px;
+    padding: 8px;
+  }
+
+  .app__loading-banner {
+    left: 0;
+    padding: 8px 16px;
+    font-size: 14px;
+  }
+
+  /* --- Sidebar as bottom nav --- */
+  .sidebar--mobile {
+    width: 100%;
+    height: 56px;
+    flex-direction: row;
+    justify-content: space-around;
+    align-items: center;
+    padding: 0;
+    border-right: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .sidebar--mobile .sidebar-nav {
+    flex-direction: row;
+    gap: 0;
+    width: 100%;
+    justify-content: space-around;
+  }
+
+  .sidebar--mobile .sidebar-item {
+    flex-direction: column;
+    padding: 8px 0;
+    gap: 2px;
+    border-left: none;
+    font-size: 11px;
+  }
+
+  .sidebar--mobile .sidebar-item:focus,
+  .sidebar--mobile .sidebar-item--active {
+    border-left: none;
+    background: none;
+    color: #00d4ff;
+  }
+
+  .sidebar--mobile .sidebar-icon { font-size: 20px; }
+  .sidebar--mobile .sidebar-label { display: block; font-size: 10px; }
+
+  /* --- Group List --- */
+  .group-list__title { font-size: 22px; }
+  .group-list__items { max-height: none; }
+  .group-list__item { padding: 14px 16px; }
+  .group-list__item-name { font-size: 16px; }
+  .group-list__item:focus { transform: none; }
+
+  /* --- Channel List --- */
+  .channel-list__title { font-size: 22px; }
+  .channel-list__search-input { font-size: 16px; padding: 10px 14px; }
+  .channel-list__grid {
+    height: auto;
+    max-height: calc(100dvh - 200px);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* --- Channel Card --- */
+  .channel-card { border-radius: 8px; }
+  .channel-card:focus,
+  .channel-card--focused { transform: none; }
+  .channel-card:active { transform: scale(0.97); }
+  .channel-card__logo-container { height: 64px; }
+  .channel-card__name { font-size: 13px; padding: 6px 8px; }
+
+  /* --- Horizontal Row --- */
+  .horizontal-row__scroll { gap: 12px; }
+  .horizontal-row__scroll .channel-card { width: 150px; }
+
+  /* --- Home --- */
+  .home { gap: 20px; }
+  .home__welcome h1 { font-size: 24px; }
+  .home__welcome p { font-size: 15px; }
+  .home__section-title { font-size: 18px; }
+
+  .home__hero-card { padding: 14px; gap: 14px; }
+  .home__hero-card:focus { transform: none; }
+  .home__hero-card:active { transform: scale(0.98); }
+  .home__hero-logo { width: 56px; height: 56px; }
+  .home__hero-info h3 { font-size: 18px; }
+  .home__hero-info p { font-size: 14px; }
+
+  .home__cw-card { width: 160px; }
+  .home__cw-card:focus { transform: none; }
+  .home__cw-card:active { transform: scale(0.97); }
+  .home__cw-logo { height: 64px; }
+  .home__cw-name { font-size: 13px; }
+
+  .home__category-tile {
+    padding: 16px 20px;
+    font-size: 15px;
+    flex: 1;
+    text-align: center;
+    min-width: 100px;
+  }
+  .home__category-tile:focus { transform: none; }
+  .home__category-tile:active { transform: scale(0.97); }
+
+  /* --- Settings --- */
+  .settings { max-width: 100%; gap: 20px; }
+  .settings__section-title { font-size: 17px; }
+  .settings__input { font-size: 16px; padding: 10px 14px; }
+  .settings__btn { font-size: 15px; padding: 10px 20px; }
+  .settings__mode-btn { font-size: 15px; padding: 8px 18px; }
+  .settings__btn-row { flex-wrap: wrap; }
+
+  /* --- Player (mobile) --- */
+  .player { width: 100%; height: 100dvh; }
+  .player__osd { padding: 20px 16px 16px; }
+  .player__osd-channel-name { font-size: 20px; }
+  .player__osd-program { font-size: 14px; }
+
+  /* --- Exit Dialog --- */
+  .exit-dialog { min-width: auto; width: calc(100% - 32px); padding: 24px; }
+  .exit-dialog__title { font-size: 20px; }
+  .exit-dialog__text { font-size: 15px; }
+  .exit-dialog__btn { padding: 10px 24px; font-size: 15px; }
+
+  /* --- Toast --- */
+  .toast { font-size: 14px; padding: 10px 20px; bottom: 72px; }
 }

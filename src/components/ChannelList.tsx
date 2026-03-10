@@ -5,6 +5,7 @@ import { useAppStore } from '../stores/appStore';
 import { KEY_CODES } from '../utils/keys';
 import { prefetchImages } from '../utils/image-pool';
 import { markKeyDown, markKeyRendered } from '../utils/perf-monitor';
+import { isMobile, openInNativePlayer } from '../utils/platform';
 import ChannelCard from './ChannelCard';
 
 interface ChannelListProps {
@@ -12,9 +13,10 @@ interface ChannelListProps {
   groupName: string;
 }
 
-const COLUMN_COUNT = 5;
-const ROW_HEIGHT = 160;
-const CONTAINER_HEIGHT = 800;
+const MOBILE = isMobile();
+const COLUMN_COUNT = MOBILE ? 2 : 5;
+const ROW_HEIGHT = MOBILE ? 140 : 160;
+const CONTAINER_HEIGHT = MOBILE ? window.innerHeight - 180 : 800;
 const BUFFER = 2;
 /** How many rows ahead to prefetch images for */
 const PREFETCH_ROWS = 3;
@@ -76,6 +78,10 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
 
   const handleSelect = useCallback(
     (channel: Channel) => {
+      if (MOBILE) {
+        openInNativePlayer(channel.url);
+        return;
+      }
       setChannel(channel);
       navigate('player');
     },
@@ -178,7 +184,7 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
           transform: `translateY(${row * ROW_HEIGHT}px)`,
           height: ROW_HEIGHT,
           display: 'grid',
-          gridTemplateColumns: 'repeat(5, 1fr)',
+          gridTemplateColumns: `repeat(${COLUMN_COUNT}, 1fr)`,
           gap: '16px',
           alignContent: 'start',
           contain: 'strict',

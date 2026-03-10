@@ -2,6 +2,7 @@ import { useRef, useCallback } from 'react';
 import { useAppStore } from '../stores/appStore';
 import type { View } from '../types';
 import { KEY_CODES } from '../utils/keys';
+import { isMobile } from '../utils/platform';
 
 interface NavItem {
   icon: string;
@@ -51,8 +52,8 @@ export default function Sidebar() {
   );
 
   return (
-    <nav className="sidebar" ref={sidebarRef}>
-      <div className="sidebar-logo">SV</div>
+    <nav className={`sidebar${isMobile() ? ' sidebar--mobile' : ''}`} ref={sidebarRef}>
+      {!isMobile() && <div className="sidebar-logo">SV</div>}
       <ul className="sidebar-nav">
         {NAV_ITEMS.map((item, index) => (
           <li key={item.view}>

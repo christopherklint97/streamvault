@@ -1,5 +1,7 @@
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import {
   getChannels, getChannelsByGroup, getGroups, getRegions,
   getPrograms, getConfig, setConfig,
@@ -306,6 +308,27 @@ app.post('/api/sync', (_req, res) => {
 app.post('/api/sync/cancel', (_req, res) => {
   cancelSync();
   res.json({ ok: true, message: 'Sync cancelled' });
+});
+
+// ---------- Serve frontend (PWA) ----------
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const FRONTEND_DIR = path.resolve(__dirname, '..', 'public');
+
+// Serve static files with caching for immutable assets
+app.use(express.static(FRONTEND_DIR, {
+  maxAge: '1d',
+  setHeaders: (res, filePath) => {
+    // Fingerprinted assets get long cache
+    if (filePath.includes('/assets/')) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    }
+  },
+}));
+
+// SPA fallback: serve index.html for any non-API route
+app.get('*', (_req, res) => {
+  res.sendFile(path.join(FRONTEND_DIR, 'index.html'));
 });
 
 // ---------- Start ----------

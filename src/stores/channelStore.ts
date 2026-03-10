@@ -55,6 +55,7 @@ function buildProgramIndex(programs: Program[]): Map<string, Program[]> {
 
 declare const __SERVER_URL__: string;
 const API_BASE_URL_KEY = 'streamvault_api_url';
+// Use empty string (relative paths) when served from the same origin, otherwise fall back to build-time URL
 const DEFAULT_SERVER_URL: string = typeof __SERVER_URL__ !== 'undefined' ? __SERVER_URL__ : '';
 
 interface ChannelActions {
