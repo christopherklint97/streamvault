@@ -6,6 +6,7 @@ import type { PlayerState } from '../types';
 import type { SubtitleTrack } from '../services/avplay';
 import { TizenPlayer, HTML5Player } from '../services/avplay';
 import { saveWatchProgress, getWatchProgress } from '../services/channel-service';
+import { clientLogger as log } from '../utils/logger';
 
 const PROGRESS_SAVE_INTERVAL = 10_000; // Save progress every 10 seconds
 
@@ -77,21 +78,30 @@ export function usePlayer(): {
 
   const play = useCallback(() => {
     const channel = usePlayerStore.getState().currentChannel;
-    if (!channel) return;
+    if (!channel) {
+      log.warn('play() called but no currentChannel set');
+      return;
+    }
 
     const setStatus = usePlayerStore.getState().setStatus;
     const setError = usePlayerStore.getState().setError;
+
+    log.info(`▶ play() channel="${channel.name}" id=${channel.id} type=${channel.contentType} url=${channel.url ? channel.url.substring(0, 60) + '...' : '(empty)'}`);
 
     // Check for saved progress to resume from
     const savedProgress = channel.contentType !== 'livetv'
       ? getWatchProgress(channel.id)
       : null;
     const resumePosition = savedProgress ? savedProgress.position : 0;
+    if (resumePosition > 0) {
+      log.info(`Resuming from position ${resumePosition.toFixed(1)}s`);
+    }
 
     setStatus('loading');
 
     // Try AVPlay first (Samsung Tizen), fallback to HTML5 video
     if (typeof webapis !== 'undefined' && webapis.avplay) {
+      log.info('Using Tizen AVPlay backend');
       try {
         const avplay = webapis.avplay;
         avplay.close();
@@ -105,15 +115,16 @@ export function usePlayer(): {
         playerRef.current = tizenPlayer;
 
         avplay.setListener({
-          onbufferingstart: () => setStatus('loading'),
-          onbufferingcomplete: () => setStatus('playing'),
+          onbufferingstart: () => { log.debug('AVPlay: buffering start'); setStatus('loading'); },
+          onbufferingcomplete: () => { log.debug('AVPlay: buffering complete'); setStatus('playing'); },
           oncurrentplaytime: () => {},
           onevent: () => {},
-          onerror: () => setError('Playback error'),
+          onerror: () => { log.error('AVPlay: playback error'); setError('Playback error'); },
           onsubtitlechange: (_duration: number, text: string) => {
             tizenPlayer.onSubtitleText?.(text);
           },
           onstreamcompleted: () => {
+            log.info('AVPlay: stream completed');
             saveCurrentProgress();
             setStatus('idle');
           },
@@ -121,6 +132,7 @@ export function usePlayer(): {
         });
         avplay.prepareAsync(
           () => {
+            log.info('AVPlay: prepared, starting playback');
             if (resumePosition > 0) {
               avplay.seekTo(resumePosition * 1000);
             }
@@ -129,106 +141,151 @@ export function usePlayer(): {
             setSubtitleTracks(tizenPlayer.getSubtitleTracks());
             startProgressTracking();
           },
-          () => setError('Failed to prepare stream')
+          () => { log.error('AVPlay: prepare failed'); setError('Failed to prepare stream'); }
         );
-      } catch {
+      } catch (e) {
+        log.error('AVPlay: init failed', e);
         setError('AVPlay initialization failed');
       }
     } else {
       // HTML5 video fallback (with HLS.js for stream support)
+      log.info('Using HTML5 video backend');
       const video = document.getElementById('av-player') as HTMLVideoElement | null;
-      if (video) {
-        videoRef.current = video;
 
-        const html5Player = new HTML5Player();
-        html5Player.onSubtitleText = (text: string) => {
-          setSubtitleText(text);
+      if (!video) {
+        log.error('HTML5: <video id="av-player"> element NOT found in DOM');
+        setError('Video element not found');
+        return;
+      }
+
+      log.info(`HTML5: found video element, readyState=${video.readyState}, networkState=${video.networkState}`);
+      videoRef.current = video;
+
+      const html5Player = new HTML5Player();
+      html5Player.onSubtitleText = (text: string) => {
+        setSubtitleText(text);
+      };
+      playerRef.current = html5Player;
+
+      // Clean up any previous HLS instance
+      if (hlsRef.current) {
+        log.info('HTML5: destroying previous HLS instance');
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+
+      const setupEvents = () => {
+        video.onloadstart = () => log.debug('HTML5 event: loadstart');
+        video.onloadedmetadata = () => log.info(`HTML5 event: loadedmetadata, duration=${video.duration}, videoWidth=${video.videoWidth}x${video.videoHeight}`);
+        video.onloadeddata = () => {
+          log.info(`HTML5 event: loadeddata, readyState=${video.readyState}`);
+          if (resumePosition > 0) {
+            video.currentTime = resumePosition;
+          }
+          setStatus('playing');
+          setSubtitleTracks(html5Player.getSubtitleTracks());
+          startProgressTracking();
         };
-        playerRef.current = html5Player;
+        video.oncanplay = () => log.info('HTML5 event: canplay');
+        video.onwaiting = () => { log.debug('HTML5 event: waiting'); setStatus('loading'); };
+        video.onplaying = () => { log.info('HTML5 event: playing'); setStatus('playing'); };
+        video.onstalled = () => log.warn('HTML5 event: stalled');
+        video.onsuspend = () => log.debug('HTML5 event: suspend');
+        video.onerror = () => {
+          const err = video.error;
+          const errMsg = err ? `code=${err.code} message="${err.message}"` : 'unknown';
+          log.error(`HTML5 event: error — ${errMsg}`);
+          setError(`Playback failed: ${errMsg}`);
+        };
+        video.onabort = () => log.warn('HTML5 event: abort');
+        video.onended = () => {
+          log.info('HTML5 event: ended');
+          saveCurrentProgress();
+          setStatus('idle');
+        };
+        video.textTracks.addEventListener('addtrack', () => {
+          setSubtitleTracks(html5Player.getSubtitleTracks());
+        });
+      };
 
-        // Clean up any previous HLS instance
-        if (hlsRef.current) {
-          hlsRef.current.destroy();
-          hlsRef.current = null;
-        }
+      // Use the server proxy for stream playback (handles CORS + HLS conversion)
+      const playUrl = getStreamUrl(channel.id);
+      log.info(`HTML5: playUrl=${playUrl}`);
 
-        const setupEvents = () => {
-          video.onloadeddata = () => {
-            if (resumePosition > 0) {
-              video.currentTime = resumePosition;
-            }
-            setStatus('playing');
-            setSubtitleTracks(html5Player.getSubtitleTracks());
-            startProgressTracking();
-          };
-          video.onwaiting = () => setStatus('loading');
-          video.onplaying = () => setStatus('playing');
-          video.onerror = () => setError('Failed to play stream');
-          video.onended = () => {
-            saveCurrentProgress();
-            setStatus('idle');
-          };
-          video.textTracks.addEventListener('addtrack', () => {
-            setSubtitleTracks(html5Player.getSubtitleTracks());
+      // Live TV streams are served as HLS (.m3u8) through the proxy
+      const isHls = channel.contentType === 'livetv';
+      log.info(`HTML5: isHls=${isHls}, contentType=${channel.contentType}`);
+
+      if (isHls && video.canPlayType('application/vnd.apple.mpegurl')) {
+        // Safari native HLS
+        log.info('HTML5: using Safari native HLS');
+        video.src = playUrl;
+        setupEvents();
+        video.play().catch((e) => { log.error('HTML5: play() rejected (Safari HLS)', e); setError('Playback blocked'); });
+      } else if (isHls) {
+        // Use HLS.js (dynamically loaded) for Chrome/Firefox/etc
+        log.info('HTML5: loading HLS.js dynamically...');
+        setupEvents();
+        import('hls.js').then(({ default: Hls }) => {
+          log.info(`HTML5: HLS.js loaded, isSupported=${Hls.isSupported()}`);
+          if (!Hls.isSupported()) {
+            log.error('HTML5: HLS.js not supported on this browser');
+            setError('HLS playback not supported on this browser');
+            return;
+          }
+          const hls = new Hls({
+            enableWorker: true,
+            lowLatencyMode: true,
+            maxBufferLength: 10,
+            maxMaxBufferLength: 30,
           });
-        };
+          hlsRef.current = hls;
+          hls.loadSource(playUrl);
+          hls.attachMedia(video);
+          log.info(`HTML5: HLS.js attached, loading source ${playUrl}`);
 
-        // Use the server proxy for stream playback (handles CORS + HLS conversion)
-        const playUrl = getStreamUrl(channel.id);
-        // Live TV streams are served as HLS (.m3u8) through the proxy
-        const isHls = channel.contentType === 'livetv';
-
-        if (isHls && video.canPlayType('application/vnd.apple.mpegurl')) {
-          // Safari native HLS
-          video.src = playUrl;
-          setupEvents();
-          video.play().catch(() => setError('Playback blocked'));
-        } else if (isHls) {
-          // Use HLS.js (dynamically loaded) for Chrome/Firefox/etc
-          setupEvents();
-          import('hls.js').then(({ default: Hls }) => {
-            if (!Hls.isSupported()) {
-              setError('HLS playback not supported on this browser');
-              return;
-            }
-            const hls = new Hls({
-              enableWorker: true,
-              lowLatencyMode: true,
-              maxBufferLength: 10,
-              maxMaxBufferLength: 30,
-            });
-            hlsRef.current = hls;
-            hls.loadSource(playUrl);
-            hls.attachMedia(video);
-            hls.on(Hls.Events.MANIFEST_PARSED, () => {
-              video.play().catch(() => setError('Playback blocked'));
-            });
-            hls.on(Hls.Events.ERROR, (_event, data) => {
-              if (data.fatal) {
-                if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-                  hls.startLoad();
-                } else {
-                  setError('Stream playback failed');
-                }
+          hls.on(Hls.Events.MANIFEST_PARSED, (_event, data) => {
+            log.info(`HTML5: HLS manifest parsed, levels=${data.levels.length}`);
+            video.play().catch((e) => { log.error('HTML5: play() rejected (HLS.js)', e); setError('Playback blocked'); });
+          });
+          hls.on(Hls.Events.MANIFEST_LOADING, () => log.debug('HLS: manifest loading...'));
+          hls.on(Hls.Events.MANIFEST_LOADED, () => log.info('HLS: manifest loaded'));
+          hls.on(Hls.Events.LEVEL_LOADED, (_event, data) => log.debug(`HLS: level loaded, duration=${data.details.totalduration?.toFixed(1)}s`));
+          hls.on(Hls.Events.FRAG_LOADED, () => log.debug('HLS: fragment loaded'));
+          hls.on(Hls.Events.ERROR, (_event, data) => {
+            log.error(`HLS error: type=${data.type} details=${data.details} fatal=${data.fatal} url=${data.url || '?'}`);
+            if (data.fatal) {
+              if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                log.warn('HLS: fatal network error, attempting recovery...');
+                hls.startLoad();
+              } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+                log.warn('HLS: fatal media error, attempting recovery...');
+                hls.recoverMediaError();
+              } else {
+                log.error('HLS: unrecoverable fatal error');
+                setError('Stream playback failed');
               }
-            });
-          }).catch(() => setError('Failed to load HLS player'));
-        } else {
-          // Direct playback (MP4, etc)
-          video.src = playUrl;
-          setupEvents();
-          video.play().catch(() => setError('Playback blocked'));
-        }
+            }
+          });
+        }).catch((e) => { log.error('HTML5: failed to import hls.js', e); setError('Failed to load HLS player'); });
+      } else {
+        // Direct playback (MP4, etc)
+        log.info(`HTML5: direct video playback (non-HLS), setting src=${playUrl}`);
+        video.src = playUrl;
+        setupEvents();
+        video.play().catch((e) => { log.error('HTML5: play() rejected (direct)', e); setError('Playback blocked'); });
       }
     }
   }, [saveCurrentProgress, startProgressTracking]);
 
   const stop = useCallback(() => {
+    log.info('⏹ stop() called');
     const setStatus = usePlayerStore.getState().setStatus;
 
     stopProgressTracking();
 
     if (hlsRef.current) {
+      log.info('Destroying HLS instance');
       hlsRef.current.destroy();
       hlsRef.current = null;
     }
@@ -254,6 +311,7 @@ export function usePlayer(): {
   }, [stopProgressTracking]);
 
   const retry = useCallback(() => {
+    log.info('🔄 retry() called');
     const clearError = usePlayerStore.getState().clearError;
     clearError();
     play();

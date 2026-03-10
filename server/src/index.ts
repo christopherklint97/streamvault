@@ -293,13 +293,38 @@ app.get('/api/epg/:streamId', async (req, res) => {
   }
 });
 
+// ---------- Client Logs ----------
+// Receives logs from the frontend and outputs them to server stdout (→ Dozzle)
+
+app.post('/api/client-logs', (req, res) => {
+  const { logs } = req.body;
+  if (!Array.isArray(logs)) {
+    res.status(400).json({ error: 'logs array required' });
+    return;
+  }
+  for (const entry of logs) {
+    const { level, message, ts } = entry;
+    const prefix = `${ts || new Date().toISOString()} [CLIENT:${(level || 'info').toUpperCase()}]`;
+    if (level === 'error') {
+      console.error(prefix, message);
+    } else if (level === 'warn') {
+      console.warn(prefix, message);
+    } else {
+      console.log(prefix, message);
+    }
+  }
+  res.json({ ok: true });
+});
+
 // ---------- Stream Proxy ----------
 // Proxies stream URLs through the server so mobile clients don't need
 // direct access to the Xtream server (avoids CORS and network issues).
 
 app.get('/api/stream/:channelId', async (req, res) => {
-  const channel = getChannelById(req.params.channelId);
+  const channelId = req.params.channelId;
+  const channel = getChannelById(channelId);
   if (!channel || !channel.url) {
+    logger.warn(`Stream proxy: channel ${channelId} not found or has no URL`);
     res.status(404).json({ error: 'Channel not found' });
     return;
   }
@@ -311,13 +336,18 @@ app.get('/api/stream/:channelId', async (req, res) => {
     streamUrl += '.m3u8';
   }
 
+  logger.info(`Stream proxy: ${channelId} "${channel.name}" type=${channel.content_type} → ${streamUrl.substring(0, 80)}...`);
+
   try {
     const upstream = await fetch(streamUrl, {
       signal: AbortSignal.timeout(15_000),
       headers: { 'User-Agent': 'StreamVault/1.0' },
     });
 
+    logger.info(`Stream proxy: upstream responded ${upstream.status} ${upstream.statusText}, content-type=${upstream.headers.get('content-type')}`);
+
     if (!upstream.ok) {
+      logger.error(`Stream proxy: upstream error ${upstream.status} for ${channelId}`);
       res.status(upstream.status).json({ error: `Upstream error: ${upstream.status}` });
       return;
     }
@@ -333,6 +363,8 @@ app.get('/api/stream/:channelId', async (req, res) => {
     if (isM3u8) {
       // Rewrite HLS playlist: make segment URLs absolute through our proxy
       const body = await upstream.text();
+      logger.info(`Stream proxy: HLS playlist received (${body.length} bytes), rewriting URLs`);
+      logger.debug(`Stream proxy: playlist first 500 chars:\n${body.substring(0, 500)}`);
       const baseUrl = streamUrl.substring(0, streamUrl.lastIndexOf('/') + 1);
       const rewritten = body.replace(/^(?!#)(\S+)/gm, (line: string) => {
         if (line.startsWith('http://') || line.startsWith('https://')) {
@@ -344,19 +376,22 @@ app.get('/api/stream/:channelId', async (req, res) => {
       res.send(rewritten);
     } else {
       // Binary stream — pipe directly
+      logger.info(`Stream proxy: piping binary stream for ${channelId} (content-type: ${contentType})`);
       if (!upstream.body) {
+        logger.error(`Stream proxy: no response body for ${channelId}`);
         res.status(502).json({ error: 'No response body' });
         return;
       }
       const nodeStream = Readable.fromWeb(upstream.body as import('node:stream/web').ReadableStream);
       nodeStream.pipe(res);
       req.on('close', () => {
+        logger.info(`Stream proxy: client disconnected from ${channelId}`);
         nodeStream.destroy();
       });
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Stream proxy error';
-    logger.error(`Stream proxy failed for ${req.params.channelId}: ${msg}`);
+    logger.error(`Stream proxy failed for ${channelId}: ${msg}`);
     if (!res.headersSent) {
       res.status(502).json({ error: msg });
     }
