@@ -49,7 +49,8 @@ app.get('/api/categories', (req, res) => {
 app.get('/api/channels', async (req, res) => {
   const group = req.query.group as string | undefined;
   const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
-  const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
+  const cursorSort = req.query.cursorSort ? parseInt(req.query.cursorSort as string, 10) : undefined;
+  const cursorName = req.query.cursorName as string | undefined;
   const inputMode = getConfig('input_mode', 'manual');
 
   // If a specific group is requested and we're in xtream mode, try on-demand fetch
@@ -87,7 +88,7 @@ app.get('/api/channels', async (req, res) => {
   let dbChannels;
   let total: number;
   if (group && group !== 'All') {
-    dbChannels = getChannelsByGroup(group, limit, offset);
+    dbChannels = getChannelsByGroup(group, limit, cursorSort, cursorName);
     total = limit ? getChannelCountByGroup(group) : dbChannels.length;
   } else {
     dbChannels = getChannels();
@@ -120,7 +121,12 @@ app.get('/api/channels', async (req, res) => {
   }
 
   const regions = ['All', ...getRegions()];
-  res.json({ channels, total, groups, regions, contentTypeCounts });
+  // Include cursor for next page (last item's sort_order + name)
+  const lastChannel = dbChannels[dbChannels.length - 1];
+  const nextCursor = lastChannel && limit && dbChannels.length === limit
+    ? { sort: lastChannel.sort_order ?? 0, name: lastChannel.name }
+    : null;
+  res.json({ channels, total, groups, regions, contentTypeCounts, nextCursor });
 });
 
 // ---------- Search ----------

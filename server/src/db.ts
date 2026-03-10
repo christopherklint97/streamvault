@@ -199,9 +199,16 @@ export function getChannels(): DBChannel[] {
   return db.prepare('SELECT * FROM channels ORDER BY sort_order, name').all() as DBChannel[];
 }
 
-export function getChannelsByGroup(group: string, limit?: number, offset?: number): DBChannel[] {
+export function getChannelsByGroup(group: string, limit?: number, cursorSort?: number, cursorName?: string): DBChannel[] {
+  if (limit !== undefined && cursorSort !== undefined && cursorName !== undefined) {
+    // Cursor pagination: fetch rows after the cursor (sort_order, name)
+    return db.prepare(
+      `SELECT * FROM channels WHERE grp = ? AND (sort_order > ? OR (sort_order = ? AND name > ?)) ORDER BY sort_order, name LIMIT ?`
+    ).all(group, cursorSort, cursorSort, cursorName, limit) as DBChannel[];
+  }
   if (limit !== undefined) {
-    return db.prepare('SELECT * FROM channels WHERE grp = ? ORDER BY sort_order, name LIMIT ? OFFSET ?').all(group, limit, offset || 0) as DBChannel[];
+    // First page: no cursor
+    return db.prepare('SELECT * FROM channels WHERE grp = ? ORDER BY sort_order, name LIMIT ?').all(group, limit) as DBChannel[];
   }
   return db.prepare('SELECT * FROM channels WHERE grp = ? ORDER BY sort_order, name').all(group) as DBChannel[];
 }

@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import type HlsType from 'hls.js';
 import { usePlayerStore } from '../stores/playerStore';
 import type { PlayerState } from '../types';
 import type { SubtitleTrack } from '../services/avplay';
@@ -18,6 +19,7 @@ export function usePlayer(): {
   cycleSubtitles: () => void;
 } {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const hlsRef = useRef<HlsType | null>(null);
   const store = usePlayerStore();
   const [subtitleTracks, setSubtitleTracks] = useState<SubtitleTrack[]>([]);
   const [currentSubtitleIndex, setCurrentSubtitleIndex] = useState(-1);
@@ -126,7 +128,7 @@ export function usePlayer(): {
         setError('AVPlay initialization failed');
       }
     } else {
-      // HTML5 video fallback
+      // HTML5 video fallback (with HLS.js for stream support)
       const video = document.getElementById('av-player') as HTMLVideoElement | null;
       if (video) {
         videoRef.current = video;
@@ -137,28 +139,82 @@ export function usePlayer(): {
         };
         playerRef.current = html5Player;
 
-        video.src = channel.url;
-        video.onloadeddata = () => {
-          if (resumePosition > 0) {
-            video.currentTime = resumePosition;
-          }
-          setStatus('playing');
-          setSubtitleTracks(html5Player.getSubtitleTracks());
-          startProgressTracking();
-        };
-        video.onwaiting = () => setStatus('loading');
-        video.onplaying = () => setStatus('playing');
-        video.onerror = () => setError('Failed to play stream');
-        video.onended = () => {
-          saveCurrentProgress();
-          setStatus('idle');
-        };
-        video.play().catch(() => setError('Playback blocked'));
+        // Clean up any previous HLS instance
+        if (hlsRef.current) {
+          hlsRef.current.destroy();
+          hlsRef.current = null;
+        }
 
-        // Listen for text tracks being added
-        video.textTracks.addEventListener('addtrack', () => {
-          setSubtitleTracks(html5Player.getSubtitleTracks());
-        });
+        const setupEvents = () => {
+          video.onloadeddata = () => {
+            if (resumePosition > 0) {
+              video.currentTime = resumePosition;
+            }
+            setStatus('playing');
+            setSubtitleTracks(html5Player.getSubtitleTracks());
+            startProgressTracking();
+          };
+          video.onwaiting = () => setStatus('loading');
+          video.onplaying = () => setStatus('playing');
+          video.onerror = () => setError('Failed to play stream');
+          video.onended = () => {
+            saveCurrentProgress();
+            setStatus('idle');
+          };
+          video.textTracks.addEventListener('addtrack', () => {
+            setSubtitleTracks(html5Player.getSubtitleTracks());
+          });
+        };
+
+        // Determine the playback URL — live streams need .m3u8 for HLS
+        let playUrl = channel.url;
+        const isLikelyTs = channel.contentType === 'livetv' && !playUrl.match(/\.\w{2,4}($|\?)/);
+        if (isLikelyTs) {
+          playUrl = playUrl + '.m3u8';
+        }
+        const isHls = playUrl.includes('.m3u8') || playUrl.includes('m3u8');
+
+        if (isHls && video.canPlayType('application/vnd.apple.mpegurl')) {
+          // Safari native HLS
+          video.src = playUrl;
+          setupEvents();
+          video.play().catch(() => setError('Playback blocked'));
+        } else if (isHls) {
+          // Use HLS.js (dynamically loaded) for Chrome/Firefox/etc
+          setupEvents();
+          import('hls.js').then(({ default: Hls }) => {
+            if (!Hls.isSupported()) {
+              setError('HLS playback not supported on this browser');
+              return;
+            }
+            const hls = new Hls({
+              enableWorker: true,
+              lowLatencyMode: true,
+              maxBufferLength: 10,
+              maxMaxBufferLength: 30,
+            });
+            hlsRef.current = hls;
+            hls.loadSource(playUrl);
+            hls.attachMedia(video);
+            hls.on(Hls.Events.MANIFEST_PARSED, () => {
+              video.play().catch(() => setError('Playback blocked'));
+            });
+            hls.on(Hls.Events.ERROR, (_event, data) => {
+              if (data.fatal) {
+                if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                  hls.startLoad();
+                } else {
+                  setError('Stream playback failed');
+                }
+              }
+            });
+          }).catch(() => setError('Failed to load HLS player'));
+        } else {
+          // Direct playback (MP4, etc)
+          video.src = playUrl;
+          setupEvents();
+          video.play().catch(() => setError('Playback blocked'));
+        }
       }
     }
   }, [saveCurrentProgress, startProgressTracking]);
@@ -167,6 +223,11 @@ export function usePlayer(): {
     const setStatus = usePlayerStore.getState().setStatus;
 
     stopProgressTracking();
+
+    if (hlsRef.current) {
+      hlsRef.current.destroy();
+      hlsRef.current = null;
+    }
 
     if (typeof webapis !== 'undefined' && webapis.avplay) {
       try {

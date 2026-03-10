@@ -35,6 +35,7 @@ interface ChannelState {
   channelCount: number;
   channelTotal: number;
   hasMore: boolean;
+  nextCursor: { sort: number; name: string } | null;
   syncInterval: SyncInterval;
   lastSyncTime: number;
   apiBaseUrl: string;
@@ -125,6 +126,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
   channelCount: 0,
   channelTotal: 0,
   hasMore: false,
+  nextCursor: null,
   syncInterval: '24h',
   lastSyncTime: 0,
   apiBaseUrl: SAME_ORIGIN ? '' : getItem<string>(API_BASE_URL_KEY, DEFAULT_SERVER_URL),
@@ -159,7 +161,6 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
       if (group && group !== 'All') {
         params.set('group', group);
         params.set('limit', String(PAGE_SIZE));
-        params.set('offset', '0');
       }
       const qs = params.toString();
       const data = await apiFetch(apiBaseUrl, `/api/channels${qs ? '?' + qs : ''}`, { signal });
@@ -174,6 +175,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
         channelCount: channels.length,
         channelTotal: total,
         hasMore: channels.length < total,
+        nextCursor: data.nextCursor || null,
       });
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
@@ -183,14 +185,15 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
   },
 
   fetchMoreChannels: async () => {
-    const { apiBaseUrl, channels, channelTotal, hasMore, selectedGroup } = get();
-    if (!hasApi(apiBaseUrl) || !hasMore) return;
+    const { apiBaseUrl, channels, channelTotal, hasMore, selectedGroup, nextCursor } = get();
+    if (!hasApi(apiBaseUrl) || !hasMore || !nextCursor) return;
     if (!selectedGroup || selectedGroup === 'All') return;
     try {
       const params = new URLSearchParams({
         group: selectedGroup,
         limit: String(PAGE_SIZE),
-        offset: String(channels.length),
+        cursorSort: String(nextCursor.sort),
+        cursorName: nextCursor.name,
       });
       const data = await apiFetch(apiBaseUrl, `/api/channels?${params}`);
       const newChannels: Channel[] = data.channels;
@@ -201,6 +204,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
         channelCount: merged.length,
         channelTotal: total,
         hasMore: merged.length < total,
+        nextCursor: data.nextCursor || null,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to load more';
