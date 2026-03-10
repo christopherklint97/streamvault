@@ -126,6 +126,27 @@ export default function Settings() {
     showToastMessage('Recently watched cleared');
   }, [showToastMessage]);
 
+  const handleForceUpdate = useCallback(async () => {
+    if (!('serviceWorker' in navigator)) {
+      showToastMessage('No service worker found');
+      return;
+    }
+    const registration = await navigator.serviceWorker.getRegistration();
+    if (!registration) {
+      showToastMessage('No service worker registered');
+      return;
+    }
+    await registration.update();
+    if (registration.waiting) {
+      registration.waiting.postMessage({ type: 'SKIP_WAITING' });
+    }
+    // Clear all caches
+    const cacheNames = await caches.keys();
+    await Promise.all(cacheNames.map(name => caches.delete(name)));
+    showToastMessage('Updated — reloading...');
+    setTimeout(() => window.location.reload(), 500);
+  }, [showToastMessage]);
+
   const handleSyncCycle = useCallback(async () => {
     const currentIndex = SYNC_OPTIONS.findIndex((o) => o.value === syncInterval);
     const nextIndex = (currentIndex + 1) % SYNC_OPTIONS.length;
@@ -353,6 +374,14 @@ export default function Settings() {
                 Clear Recently Watched
               </button>
             </div>
+          </div>
+
+          {/* App Update */}
+          <div className="settings__section">
+            <h2 className="settings__section-title">App</h2>
+            <button className="settings__btn" data-focusable tabIndex={0} onClick={handleForceUpdate}>
+              Check for Update
+            </button>
           </div>
         </>
       )}
