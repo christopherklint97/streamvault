@@ -182,11 +182,19 @@ export function usePlayer(): {
           if (resumePosition > 0) {
             video.currentTime = resumePosition;
           }
-          setStatus('playing');
           setSubtitleTracks(html5Player.getSubtitleTracks());
           startProgressTracking();
         };
-        video.oncanplay = () => log.info('HTML5 event: canplay');
+        video.oncanplay = () => {
+          log.info('HTML5 event: canplay — attempting play()');
+          video.play().then(() => {
+            log.info('HTML5: play() succeeded');
+            setStatus('playing');
+          }).catch((e) => {
+            log.error('HTML5: play() rejected on canplay', e);
+            setError('Playback blocked — tap to retry');
+          });
+        };
         video.onwaiting = () => { log.debug('HTML5 event: waiting'); setStatus('loading'); };
         video.onplaying = () => { log.info('HTML5 event: playing'); setStatus('playing'); };
         video.onstalled = () => log.warn('HTML5 event: stalled');
@@ -217,11 +225,11 @@ export function usePlayer(): {
       log.info(`HTML5: isHls=${isHls}, contentType=${channel.contentType}`);
 
       if (isHls && video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Safari native HLS
+        // Safari native HLS — set src, canplay event will trigger play()
         log.info('HTML5: using Safari native HLS');
-        video.src = playUrl;
         setupEvents();
-        video.play().catch((e) => { log.error('HTML5: play() rejected (Safari HLS)', e); setError('Playback blocked'); });
+        video.src = playUrl;
+        video.load();
       } else if (isHls) {
         // Use HLS.js (dynamically loaded) for Chrome/Firefox/etc
         log.info('HTML5: loading HLS.js dynamically...');
@@ -269,11 +277,11 @@ export function usePlayer(): {
           });
         }).catch((e) => { log.error('HTML5: failed to import hls.js', e); setError('Failed to load HLS player'); });
       } else {
-        // Direct playback (MP4, etc)
+        // Direct playback (MP4, etc) — set src, canplay event will trigger play()
         log.info(`HTML5: direct video playback (non-HLS), setting src=${playUrl}`);
-        video.src = playUrl;
         setupEvents();
-        video.play().catch((e) => { log.error('HTML5: play() rejected (direct)', e); setError('Playback blocked'); });
+        video.src = playUrl;
+        video.load();
       }
     }
   }, [saveCurrentProgress, startProgressTracking]);

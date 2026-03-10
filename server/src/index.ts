@@ -339,26 +339,50 @@ app.get('/api/stream/:channelId', async (req, res) => {
   logger.info(`Stream proxy: ${channelId} "${channel.name}" type=${channel.content_type} → ${streamUrl.substring(0, 80)}...`);
 
   try {
+    // Forward range header from browser for video seeking support
+    const upstreamHeaders: Record<string, string> = { 'User-Agent': 'StreamVault/1.0' };
+    if (req.headers.range) {
+      upstreamHeaders['Range'] = req.headers.range;
+      logger.info(`Stream proxy: forwarding Range header: ${req.headers.range}`);
+    }
+
     const upstream = await fetch(streamUrl, {
-      signal: AbortSignal.timeout(15_000),
-      headers: { 'User-Agent': 'StreamVault/1.0' },
+      signal: AbortSignal.timeout(30_000),
+      headers: upstreamHeaders,
     });
 
-    logger.info(`Stream proxy: upstream responded ${upstream.status} ${upstream.statusText}, content-type=${upstream.headers.get('content-type')}`);
+    logger.info(`Stream proxy: upstream responded ${upstream.status} ${upstream.statusText}, content-type=${upstream.headers.get('content-type')}, content-length=${upstream.headers.get('content-length')}`);
 
-    if (!upstream.ok) {
+    if (!upstream.ok && upstream.status !== 206) {
       logger.error(`Stream proxy: upstream error ${upstream.status} for ${channelId}`);
       res.status(upstream.status).json({ error: `Upstream error: ${upstream.status}` });
       return;
     }
 
-    // Forward content type
+    // Forward all relevant headers for video playback
     const ct = upstream.headers.get('content-type');
     if (ct) res.setHeader('Content-Type', ct);
     res.setHeader('Access-Control-Allow-Origin', '*');
 
+    const contentLength = upstream.headers.get('content-length');
+    if (contentLength) res.setHeader('Content-Length', contentLength);
+
+    const contentRange = upstream.headers.get('content-range');
+    if (contentRange) res.setHeader('Content-Range', contentRange);
+
+    const acceptRanges = upstream.headers.get('accept-ranges');
+    if (acceptRanges) {
+      res.setHeader('Accept-Ranges', acceptRanges);
+    } else {
+      // Advertise range support so the browser knows it can seek
+      res.setHeader('Accept-Ranges', 'bytes');
+    }
+
     const contentType = ct || '';
     const isM3u8 = contentType.includes('mpegurl') || contentType.includes('m3u') || streamUrl.endsWith('.m3u8');
+
+    // Set correct status code (206 for partial content)
+    res.status(upstream.status);
 
     if (isM3u8) {
       // Rewrite HLS playlist: make segment URLs absolute through our proxy
@@ -376,7 +400,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
       res.send(rewritten);
     } else {
       // Binary stream — pipe directly
-      logger.info(`Stream proxy: piping binary stream for ${channelId} (content-type: ${contentType})`);
+      logger.info(`Stream proxy: piping binary stream for ${channelId} (content-type: ${contentType}, content-length: ${contentLength || 'unknown'})`);
       if (!upstream.body) {
         logger.error(`Stream proxy: no response body for ${channelId}`);
         res.status(502).json({ error: 'No response body' });
@@ -398,7 +422,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
   }
 });
 
-// Generic URL proxy for HLS segments
+// Generic URL proxy for HLS segments and video chunks
 app.get('/api/proxy', async (req, res) => {
   const url = req.query.url as string;
   if (!url) {
@@ -407,12 +431,15 @@ app.get('/api/proxy', async (req, res) => {
   }
 
   try {
+    const upstreamHeaders: Record<string, string> = { 'User-Agent': 'StreamVault/1.0' };
+    if (req.headers.range) upstreamHeaders['Range'] = req.headers.range;
+
     const upstream = await fetch(url, {
-      signal: AbortSignal.timeout(15_000),
-      headers: { 'User-Agent': 'StreamVault/1.0' },
+      signal: AbortSignal.timeout(30_000),
+      headers: upstreamHeaders,
     });
 
-    if (!upstream.ok) {
+    if (!upstream.ok && upstream.status !== 206) {
       res.status(upstream.status).json({ error: `Upstream error: ${upstream.status}` });
       return;
     }
@@ -420,6 +447,12 @@ app.get('/api/proxy', async (req, res) => {
     const ct = upstream.headers.get('content-type');
     if (ct) res.setHeader('Content-Type', ct);
     res.setHeader('Access-Control-Allow-Origin', '*');
+    const cl = upstream.headers.get('content-length');
+    if (cl) res.setHeader('Content-Length', cl);
+    const cr = upstream.headers.get('content-range');
+    if (cr) res.setHeader('Content-Range', cr);
+    res.setHeader('Accept-Ranges', upstream.headers.get('accept-ranges') || 'bytes');
+    res.status(upstream.status);
 
     if (!upstream.body) {
       res.status(502).json({ error: 'No response body' });
