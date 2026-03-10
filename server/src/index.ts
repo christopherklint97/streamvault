@@ -3,7 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {
-  getChannels, getChannelsByGroup, getGroups, getRegions,
+  getChannels, getChannelsByGroup, getChannelCountByGroup, getGroups, getRegions,
   getPrograms, getConfig, setConfig,
   getCategories, getCategoryByName, getContentTypeCounts,
   saveChannelsForCategory, markCategoryFetched,
@@ -48,10 +48,12 @@ app.get('/api/categories', (req, res) => {
 
 app.get('/api/channels', async (req, res) => {
   const group = req.query.group as string | undefined;
+  const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
+  const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
   const inputMode = getConfig('input_mode', 'manual');
 
   // If a specific group is requested and we're in xtream mode, try on-demand fetch
-  const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+  const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
   if (group && group !== 'All' && inputMode === 'xtream') {
     const category = getCategoryByName(group);
     if (category) {
@@ -81,10 +83,16 @@ app.get('/api/channels', async (req, res) => {
     }
   }
 
-  // Return channels from DB
-  const dbChannels = group && group !== 'All'
-    ? getChannelsByGroup(group)
-    : getChannels();
+  // Return channels from DB (with optional pagination)
+  let dbChannels;
+  let total: number;
+  if (group && group !== 'All') {
+    dbChannels = getChannelsByGroup(group, limit, offset);
+    total = limit ? getChannelCountByGroup(group) : dbChannels.length;
+  } else {
+    dbChannels = getChannels();
+    total = dbChannels.length;
+  }
 
   const channels = dbChannels.map(ch => ({
     id: ch.id,
@@ -112,7 +120,7 @@ app.get('/api/channels', async (req, res) => {
   }
 
   const regions = ['All', ...getRegions()];
-  res.json({ channels, groups, regions, contentTypeCounts });
+  res.json({ channels, total, groups, regions, contentTypeCounts });
 });
 
 // ---------- Search ----------

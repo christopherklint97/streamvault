@@ -12,6 +12,8 @@ export interface XtreamCredentials {
   password: string;
 }
 
+const PAGE_SIZE = 20;
+
 interface ChannelState {
   channels: Channel[];
   programs: Program[];
@@ -31,6 +33,8 @@ interface ChannelState {
   loadingPhase: LoadingPhase;
   loadingMessage: string;
   channelCount: number;
+  channelTotal: number;
+  hasMore: boolean;
   syncInterval: SyncInterval;
   lastSyncTime: number;
   apiBaseUrl: string;
@@ -67,6 +71,7 @@ interface ChannelActions {
   setApiBaseUrl: (url: string) => void;
   fetchCategories: (contentType: string) => Promise<void>;
   fetchChannels: (group?: string) => Promise<void>;
+  fetchMoreChannels: () => Promise<void>;
   fetchPrograms: () => Promise<void>;
   fetchEpgForStream: (streamId: number) => Promise<Program[]>;
   searchChannels: (query: string, contentType?: string) => Promise<Channel[]>;
@@ -118,6 +123,8 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
   loadingPhase: 'idle',
   loadingMessage: '',
   channelCount: 0,
+  channelTotal: 0,
+  hasMore: false,
   syncInterval: '24h',
   lastSyncTime: 0,
   apiBaseUrl: SAME_ORIGIN ? '' : getItem<string>(API_BASE_URL_KEY, DEFAULT_SERVER_URL),
@@ -148,20 +155,55 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     fetchAbortController = new AbortController();
     const signal = fetchAbortController.signal;
     try {
-      const groupParam = group && group !== 'All' ? `?group=${encodeURIComponent(group)}` : '';
-      const data = await apiFetch(apiBaseUrl, `/api/channels${groupParam}`, { signal });
+      const params = new URLSearchParams();
+      if (group && group !== 'All') {
+        params.set('group', group);
+        params.set('limit', String(PAGE_SIZE));
+        params.set('offset', '0');
+      }
+      const qs = params.toString();
+      const data = await apiFetch(apiBaseUrl, `/api/channels${qs ? '?' + qs : ''}`, { signal });
       if (signal.aborted) return;
       const channels: Channel[] = data.channels;
+      const total: number = data.total ?? channels.length;
       set({
         channels,
         groups: data.groups,
         regions: data.regions,
         contentTypeCounts: data.contentTypeCounts || {},
         channelCount: channels.length,
+        channelTotal: total,
+        hasMore: channels.length < total,
       });
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
       const msg = err instanceof Error ? err.message : 'Failed to fetch channels';
+      set({ error: msg });
+    }
+  },
+
+  fetchMoreChannels: async () => {
+    const { apiBaseUrl, channels, channelTotal, hasMore, selectedGroup } = get();
+    if (!hasApi(apiBaseUrl) || !hasMore) return;
+    if (!selectedGroup || selectedGroup === 'All') return;
+    try {
+      const params = new URLSearchParams({
+        group: selectedGroup,
+        limit: String(PAGE_SIZE),
+        offset: String(channels.length),
+      });
+      const data = await apiFetch(apiBaseUrl, `/api/channels?${params}`);
+      const newChannels: Channel[] = data.channels;
+      const merged = [...channels, ...newChannels];
+      const total: number = data.total ?? channelTotal;
+      set({
+        channels: merged,
+        channelCount: merged.length,
+        channelTotal: total,
+        hasMore: merged.length < total,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to load more';
       set({ error: msg });
     }
   },

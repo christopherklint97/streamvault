@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import type { Channel } from '../types';
 import { usePlayerStore } from '../stores/playerStore';
+import { useChannelStore } from '../stores/channelStore';
 import { useAppStore } from '../stores/appStore';
 import { KEY_CODES } from '../utils/keys';
 import { prefetchImages } from '../utils/image-pool';
@@ -26,7 +27,11 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
   const [focusIndex, setFocusIndex] = useState(0);
   const [scrollOffset, setScrollOffset] = useState(0);
   const setChannel = usePlayerStore((s) => s.setChannel);
+  const hasMore = useChannelStore((s) => s.hasMore);
+  const channelTotal = useChannelStore((s) => s.channelTotal);
+  const fetchMoreChannels = useChannelStore((s) => s.fetchMoreChannels);
   const navigate = useAppStore((s) => s.navigate);
+  const [loadingMore, setLoadingMore] = useState(false);
   const gridRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const focusOnSearch = useRef(false);
@@ -84,6 +89,12 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
     },
     [setChannel, navigate]
   );
+
+  const handleLoadMore = useCallback(async () => {
+    setLoadingMore(true);
+    await fetchMoreChannels();
+    setLoadingMore(false);
+  }, [fetchMoreChannels]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (MOBILE) return; // Mobile uses touch, not key navigation
@@ -172,7 +183,7 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
           )}
         </div>
         <div className="channel-list__count">
-          {displayChannels.length} item{displayChannels.length !== 1 ? 's' : ''}
+          {displayChannels.length}{channelTotal > displayChannels.length ? ` of ${channelTotal}` : ''} item{displayChannels.length !== 1 ? 's' : ''}
         </div>
         <div className="channel-list__grid channel-list__grid--mobile" ref={gridRef}>
           {displayChannels.length === 0 ? (
@@ -190,6 +201,11 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
             ))
           )}
         </div>
+        {hasMore && !searchQuery && (
+          <button className="channel-list__load-more" onClick={handleLoadMore} disabled={loadingMore}>
+            {loadingMore ? 'Loading...' : `Load more (${channelTotal - displayChannels.length} remaining)`}
+          </button>
+        )}
       </div>
     );
   }
@@ -258,7 +274,7 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
         )}
       </div>
       <div className="channel-list__count">
-        {displayChannels.length} item{displayChannels.length !== 1 ? 's' : ''}
+        {displayChannels.length}{channelTotal > displayChannels.length ? ` of ${channelTotal}` : ''} item{displayChannels.length !== 1 ? 's' : ''}
       </div>
       <div
         className="channel-list__grid"
@@ -274,6 +290,11 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
           </div>
         )}
       </div>
+      {hasMore && !searchQuery && (
+        <button className="channel-list__load-more" onClick={handleLoadMore} disabled={loadingMore}>
+          {loadingMore ? 'Loading...' : `Load more (${channelTotal - displayChannels.length} remaining)`}
+        </button>
+      )}
     </div>
   );
 }

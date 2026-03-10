@@ -199,8 +199,16 @@ export function getChannels(): DBChannel[] {
   return db.prepare('SELECT * FROM channels ORDER BY sort_order, name').all() as DBChannel[];
 }
 
-export function getChannelsByGroup(group: string): DBChannel[] {
+export function getChannelsByGroup(group: string, limit?: number, offset?: number): DBChannel[] {
+  if (limit !== undefined) {
+    return db.prepare('SELECT * FROM channels WHERE grp = ? ORDER BY sort_order, name LIMIT ? OFFSET ?').all(group, limit, offset || 0) as DBChannel[];
+  }
   return db.prepare('SELECT * FROM channels WHERE grp = ? ORDER BY sort_order, name').all(group) as DBChannel[];
+}
+
+export function getChannelCountByGroup(group: string): number {
+  const row = db.prepare('SELECT COUNT(*) as count FROM channels WHERE grp = ?').get(group) as { count: number };
+  return row.count;
 }
 
 export function getChannelsByContentType(contentType: string): DBChannel[] {
