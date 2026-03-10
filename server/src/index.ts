@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { Readable } from 'node:stream';
 import {
   getChannels, getChannelById, getChannelsByGroup, getChannelCountByGroup, getGroups, getRegions,
   getPrograms, getConfig, setConfig,
@@ -347,11 +348,10 @@ app.get('/api/stream/:channelId', async (req, res) => {
         res.status(502).json({ error: 'No response body' });
         return;
       }
-      // @ts-expect-error Node fetch body is a ReadableStream
-      upstream.body.pipe(res);
+      const nodeStream = Readable.fromWeb(upstream.body as import('node:stream/web').ReadableStream);
+      nodeStream.pipe(res);
       req.on('close', () => {
-        // Client disconnected — abort upstream
-        upstream.body?.cancel?.();
+        nodeStream.destroy();
       });
     }
   } catch (err) {
