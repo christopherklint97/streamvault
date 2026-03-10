@@ -51,7 +51,7 @@ export default defineConfig({
             },
           },
           {
-            urlPattern: /\/api\//,
+            urlPattern: /\/api\/(?!stream|proxy)/,
             handler: 'NetworkFirst',
             options: {
               cacheName: 'api-cache',

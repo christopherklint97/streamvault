@@ -195,6 +195,10 @@ export function saveChannelsForCategory(categoryId: string, channels: DBChannel[
   insertChannelsForCategory(categoryId, channels);
 }
 
+export function getChannelById(id: string): DBChannel | undefined {
+  return db.prepare('SELECT * FROM channels WHERE id = ?').get(id) as DBChannel | undefined;
+}
+
 export function getChannels(): DBChannel[] {
   return db.prepare('SELECT * FROM channels ORDER BY sort_order, name').all() as DBChannel[];
 }

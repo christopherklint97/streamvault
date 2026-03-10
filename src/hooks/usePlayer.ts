@@ -1,12 +1,19 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import type HlsType from 'hls.js';
 import { usePlayerStore } from '../stores/playerStore';
+import { useChannelStore } from '../stores/channelStore';
 import type { PlayerState } from '../types';
 import type { SubtitleTrack } from '../services/avplay';
 import { TizenPlayer, HTML5Player } from '../services/avplay';
 import { saveWatchProgress, getWatchProgress } from '../services/channel-service';
 
 const PROGRESS_SAVE_INTERVAL = 10_000; // Save progress every 10 seconds
+
+/** Build a proxied stream URL that goes through our server */
+function getStreamUrl(channelId: string): string {
+  const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
+  return `${apiBaseUrl}/api/stream/${encodeURIComponent(channelId)}`;
+}
 
 export function usePlayer(): {
   play: () => void;
@@ -166,13 +173,10 @@ export function usePlayer(): {
           });
         };
 
-        // Determine the playback URL — live streams need .m3u8 for HLS
-        let playUrl = channel.url;
-        const isLikelyTs = channel.contentType === 'livetv' && !playUrl.match(/\.\w{2,4}($|\?)/);
-        if (isLikelyTs) {
-          playUrl = playUrl + '.m3u8';
-        }
-        const isHls = playUrl.includes('.m3u8') || playUrl.includes('m3u8');
+        // Use the server proxy for stream playback (handles CORS + HLS conversion)
+        const playUrl = getStreamUrl(channel.id);
+        // Live TV streams are served as HLS (.m3u8) through the proxy
+        const isHls = channel.contentType === 'livetv';
 
         if (isHls && video.canPlayType('application/vnd.apple.mpegurl')) {
           // Safari native HLS

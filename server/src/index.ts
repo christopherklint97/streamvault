@@ -3,7 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {
-  getChannels, getChannelsByGroup, getChannelCountByGroup, getGroups, getRegions,
+  getChannels, getChannelById, getChannelsByGroup, getChannelCountByGroup, getGroups, getRegions,
   getPrograms, getConfig, setConfig,
   getCategories, getCategoryByName, getContentTypeCounts,
   saveChannelsForCategory, markCategoryFetched,
@@ -62,19 +62,29 @@ app.get('/api/channels', async (req, res) => {
       if (isExpired) {
         const config = getXtreamConfig();
         if (config) {
-          try {
-            const reason = category.fetched_at ? 'cache expired' : 'not cached';
-            logger.info(`On-demand fetch for "${group}" (${category.id}) — ${reason}`);
-            const channels = await fetchXtreamStreamsByCategory(config, category.id, category.name);
-            saveChannelsForCategory(category.id, channels);
-            markCategoryFetched(category.id, channels.length);
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : 'Unknown error';
-            logger.error(`Failed to fetch streams for "${group}": ${msg}`);
-            // If we have stale cache, serve it rather than error
-            if (category.fetched_at) {
-              logger.warn(`Serving stale cache for "${group}"`);
-            } else {
+          const hasCachedData = !!category.fetched_at;
+          if (hasCachedData) {
+            // Serve stale cache immediately, refresh in background
+            const reason = 'cache expired';
+            logger.info(`Background refresh for "${group}" (${category.id}) — ${reason}`);
+            fetchXtreamStreamsByCategory(config, category.id, category.name).then(channels => {
+              saveChannelsForCategory(category.id, channels);
+              markCategoryFetched(category.id, channels.length);
+              logger.info(`Background refresh done for "${group}": ${channels.length} streams`);
+            }).catch(err => {
+              const msg = err instanceof Error ? err.message : 'Unknown error';
+              logger.error(`Background refresh failed for "${group}": ${msg}`);
+            });
+          } else {
+            // No cached data at all — must fetch synchronously
+            try {
+              logger.info(`On-demand fetch for "${group}" (${category.id}) — not cached`);
+              const channels = await fetchXtreamStreamsByCategory(config, category.id, category.name);
+              saveChannelsForCategory(category.id, channels);
+              markCategoryFetched(category.id, channels.length);
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : 'Unknown error';
+              logger.error(`Failed to fetch streams for "${group}": ${msg}`);
               res.status(502).json({ error: `Failed to fetch streams: ${msg}` });
               return;
             }
@@ -279,6 +289,117 @@ app.get('/api/epg/:streamId', async (req, res) => {
     const msg = err instanceof Error ? err.message : 'Unknown error';
     logger.error(`EPG fetch failed for stream ${streamId}: ${msg}`);
     res.json({ programs: [] });
+  }
+});
+
+// ---------- Stream Proxy ----------
+// Proxies stream URLs through the server so mobile clients don't need
+// direct access to the Xtream server (avoids CORS and network issues).
+
+app.get('/api/stream/:channelId', async (req, res) => {
+  const channel = getChannelById(req.params.channelId);
+  if (!channel || !channel.url) {
+    res.status(404).json({ error: 'Channel not found' });
+    return;
+  }
+
+  // For live TV, append .m3u8 to get HLS format (browser-compatible)
+  let streamUrl = channel.url;
+  const isLiveTs = channel.content_type === 'livetv' && !streamUrl.match(/\.\w{2,4}($|\?)/);
+  if (isLiveTs) {
+    streamUrl += '.m3u8';
+  }
+
+  try {
+    const upstream = await fetch(streamUrl, {
+      signal: AbortSignal.timeout(15_000),
+      headers: { 'User-Agent': 'StreamVault/1.0' },
+    });
+
+    if (!upstream.ok) {
+      res.status(upstream.status).json({ error: `Upstream error: ${upstream.status}` });
+      return;
+    }
+
+    // Forward content type
+    const ct = upstream.headers.get('content-type');
+    if (ct) res.setHeader('Content-Type', ct);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    const contentType = ct || '';
+    const isM3u8 = contentType.includes('mpegurl') || contentType.includes('m3u') || streamUrl.endsWith('.m3u8');
+
+    if (isM3u8) {
+      // Rewrite HLS playlist: make segment URLs absolute through our proxy
+      const body = await upstream.text();
+      const baseUrl = streamUrl.substring(0, streamUrl.lastIndexOf('/') + 1);
+      const rewritten = body.replace(/^(?!#)(\S+)/gm, (line: string) => {
+        if (line.startsWith('http://') || line.startsWith('https://')) {
+          return `/api/proxy?url=${encodeURIComponent(line)}`;
+        }
+        // Relative URL — make it absolute through proxy
+        return `/api/proxy?url=${encodeURIComponent(baseUrl + line)}`;
+      });
+      res.send(rewritten);
+    } else {
+      // Binary stream — pipe directly
+      if (!upstream.body) {
+        res.status(502).json({ error: 'No response body' });
+        return;
+      }
+      // @ts-expect-error Node fetch body is a ReadableStream
+      upstream.body.pipe(res);
+      req.on('close', () => {
+        // Client disconnected — abort upstream
+        upstream.body?.cancel?.();
+      });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Stream proxy error';
+    logger.error(`Stream proxy failed for ${req.params.channelId}: ${msg}`);
+    if (!res.headersSent) {
+      res.status(502).json({ error: msg });
+    }
+  }
+});
+
+// Generic URL proxy for HLS segments
+app.get('/api/proxy', async (req, res) => {
+  const url = req.query.url as string;
+  if (!url) {
+    res.status(400).json({ error: 'url parameter required' });
+    return;
+  }
+
+  try {
+    const upstream = await fetch(url, {
+      signal: AbortSignal.timeout(15_000),
+      headers: { 'User-Agent': 'StreamVault/1.0' },
+    });
+
+    if (!upstream.ok) {
+      res.status(upstream.status).json({ error: `Upstream error: ${upstream.status}` });
+      return;
+    }
+
+    const ct = upstream.headers.get('content-type');
+    if (ct) res.setHeader('Content-Type', ct);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    if (!upstream.body) {
+      res.status(502).json({ error: 'No response body' });
+      return;
+    }
+    // @ts-expect-error Node fetch body is a ReadableStream
+    upstream.body.pipe(res);
+    req.on('close', () => {
+      upstream.body?.cancel?.();
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Proxy error';
+    if (!res.headersSent) {
+      res.status(502).json({ error: msg });
+    }
   }
 });
 
