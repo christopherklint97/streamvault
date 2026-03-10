@@ -15,8 +15,8 @@ interface ChannelListProps {
 
 const MOBILE = isMobile();
 const COLUMN_COUNT = MOBILE ? 2 : 5;
-const ROW_HEIGHT = MOBILE ? 140 : 160;
-const CONTAINER_HEIGHT = MOBILE ? window.innerHeight - 180 : 800;
+const ROW_HEIGHT = 160;
+const CONTAINER_HEIGHT = 800;
 const BUFFER = 2;
 /** How many rows ahead to prefetch images for */
 const PREFETCH_ROWS = 3;
@@ -39,12 +39,13 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
 
   const totalRows = Math.ceil(displayChannels.length / COLUMN_COUNT);
 
-  // Compute visible row range
-  const startRow = Math.max(0, Math.floor(scrollOffset / ROW_HEIGHT) - BUFFER);
-  const endRow = Math.min(totalRows - 1, Math.ceil((scrollOffset + CONTAINER_HEIGHT) / ROW_HEIGHT) + BUFFER);
+  // Compute visible row range (TV only — mobile renders all)
+  const startRow = MOBILE ? 0 : Math.max(0, Math.floor(scrollOffset / ROW_HEIGHT) - BUFFER);
+  const endRow = MOBILE ? totalRows - 1 : Math.min(totalRows - 1, Math.ceil((scrollOffset + CONTAINER_HEIGHT) / ROW_HEIGHT) + BUFFER);
 
   // Prefetch images for rows about to come into view
   useEffect(() => {
+    if (MOBILE) return; // mobile renders all, no prefetch needed
     const prefetchStart = endRow + 1;
     const prefetchEnd = Math.min(totalRows - 1, endRow + PREFETCH_ROWS);
     if (prefetchStart > prefetchEnd) return;
@@ -63,15 +64,15 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
     }
   }, [endRow, totalRows, displayChannels]);
 
-  // Focus the card at focusIndex after render
+  // Focus the card at focusIndex after render (TV remote navigation)
   useEffect(() => {
+    if (MOBILE) return;
     if (focusOnSearch.current) return;
     requestAnimationFrame(() => {
       const grid = gridRef.current;
       if (!grid) return;
       const el = grid.querySelector(`[data-vindex="${focusIndex}"]`) as HTMLElement | null;
       el?.focus({ preventScroll: true });
-      // Mark key response complete after focus
       markKeyRendered();
     });
   }, [focusIndex, startRow, endRow, channels.length]);
@@ -89,10 +90,10 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
   );
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (MOBILE) return; // Mobile uses touch, not key navigation
     const isOnSearch = document.activeElement === searchRef.current;
     const count = displayChannels.length;
 
-    // Track key input responsiveness
     markKeyDown();
 
     if (e.keyCode === KEY_CODES.DOWN) {
@@ -138,7 +139,6 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
         e.preventDefault();
         setFocusIndex(focusIndex - 1);
       }
-      // else: let it bubble to App.tsx -> sidebar
     } else if (e.keyCode === KEY_CODES.ENTER) {
       if (isOnSearch) return;
       e.preventDefault();
@@ -155,7 +155,50 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
     focusOnSearch.current = true;
   }, []);
 
-  // Build only the visible rows - inline styles kept static where possible
+  // Mobile: simple CSS grid, no virtualization
+  if (MOBILE) {
+    return (
+      <div className="channel-list">
+        <h1 className="channel-list__title">{groupName}</h1>
+        <div className="channel-list__search">
+          <input
+            ref={searchRef}
+            className="channel-list__search-input"
+            type="text"
+            placeholder={`Search in ${groupName}...`}
+            value={searchQuery}
+            onChange={(e) => handleSearchChange(e.target.value)}
+          />
+          {searchQuery && (
+            <button className="channel-list__search-clear" onClick={() => handleSearchChange('')}>
+              X
+            </button>
+          )}
+        </div>
+        <div className="channel-list__count">
+          {displayChannels.length} item{displayChannels.length !== 1 ? 's' : ''}
+        </div>
+        <div className="channel-list__grid channel-list__grid--mobile" ref={gridRef}>
+          {displayChannels.length === 0 ? (
+            <div className="channel-list__empty">
+              {searchQuery ? 'No matches found.' : 'Loading...'}
+            </div>
+          ) : (
+            displayChannels.map((ch, idx) => (
+              <ChannelCard
+                key={ch.id}
+                channel={ch}
+                onSelect={handleSelect}
+                vindex={idx}
+              />
+            ))
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // TV: virtualized grid with absolute positioning
   const rows = [];
   for (let row = startRow; row <= endRow; row++) {
     const items = [];
