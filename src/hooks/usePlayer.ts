@@ -4,7 +4,7 @@ import { usePlayerStore } from '../stores/playerStore';
 import { useChannelStore } from '../stores/channelStore';
 import type { PlayerState } from '../types';
 import type { SubtitleTrack } from '../services/avplay';
-import { TizenPlayer, HTML5Player } from '../services/avplay';
+import { TizenPlayer } from '../services/avplay';
 import { saveWatchProgress, getWatchProgress } from '../services/channel-service';
 import { clientLogger as log } from '../utils/logger';
 
@@ -32,7 +32,7 @@ export function usePlayer(): {
   const [subtitleTracks, setSubtitleTracks] = useState<SubtitleTrack[]>([]);
   const [currentSubtitleIndex, setCurrentSubtitleIndex] = useState(-1);
   const [subtitleText, setSubtitleText] = useState('');
-  const playerRef = useRef<TizenPlayer | HTML5Player | null>(null);
+  const playerRef = useRef<TizenPlayer | null>(null);
   const progressIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const saveCurrentProgress = useCallback(() => {
@@ -161,12 +161,6 @@ export function usePlayer(): {
       log.info(`HTML5: found video element, readyState=${video.readyState}, networkState=${video.networkState}`);
       videoRef.current = video;
 
-      const html5Player = new HTML5Player();
-      html5Player.onSubtitleText = (text: string) => {
-        setSubtitleText(text);
-      };
-      playerRef.current = html5Player;
-
       // Clean up any previous HLS instance
       if (hlsRef.current) {
         log.info('HTML5: destroying previous HLS instance');
@@ -182,7 +176,6 @@ export function usePlayer(): {
           if (resumePosition > 0) {
             video.currentTime = resumePosition;
           }
-          setSubtitleTracks(html5Player.getSubtitleTracks());
           startProgressTracking();
         };
         video.oncanplay = () => {
@@ -212,7 +205,12 @@ export function usePlayer(): {
           setStatus('idle');
         };
         video.textTracks.addEventListener('addtrack', () => {
-          setSubtitleTracks(html5Player.getSubtitleTracks());
+          const tracks: SubtitleTrack[] = [];
+          for (let i = 0; i < video.textTracks.length; i++) {
+            const t = video.textTracks[i];
+            tracks.push({ index: i, language: t.language || 'unknown', label: t.label || `Track ${i + 1}` });
+          }
+          setSubtitleTracks(tracks);
         });
       };
 
