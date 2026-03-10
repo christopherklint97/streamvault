@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { useChannelStore } from '../stores/channelStore';
+import { useChannelStore, SAME_ORIGIN } from '../stores/channelStore';
 import type { InputMode, SyncInterval } from '../stores/channelStore';
 import { useFavoritesStore } from '../stores/favoritesStore';
 import { useAppStore } from '../stores/appStore';
@@ -135,7 +135,7 @@ export default function Settings() {
   }, [syncInterval, saveConfig, showToastMessage]);
 
   const syncLabel = SYNC_OPTIONS.find((o) => o.value === syncInterval)?.label ?? 'Every 24 hours';
-  const isConnected = !!apiBaseUrl;
+  const isConnected = SAME_ORIGIN || !!apiBaseUrl;
 
   return (
     <FocusZone className="settings">
@@ -183,26 +183,28 @@ export default function Settings() {
         <div className="settings__success">{loadingMessage}</div>
       )}
 
-      {/* Server Connection */}
-      <div className="settings__section">
-        <h2 className="settings__section-title">Server</h2>
-        <div className="settings__field">
-          <label className="settings__label">StreamVault Server URL</label>
-          <input
-            className="settings__input"
-            type="text"
-            data-focusable
-            tabIndex={0}
-            value={localApiUrl}
-            onChange={(e) => setLocalApiUrl(e.target.value)}
-            placeholder="http://192.168.0.100:3001"
-          />
+      {/* Server Connection — hidden when PWA is served from same origin */}
+      {!SAME_ORIGIN && (
+        <div className="settings__section">
+          <h2 className="settings__section-title">Server</h2>
+          <div className="settings__field">
+            <label className="settings__label">StreamVault Server URL</label>
+            <input
+              className="settings__input"
+              type="text"
+              data-focusable
+              tabIndex={0}
+              value={localApiUrl}
+              onChange={(e) => setLocalApiUrl(e.target.value)}
+              placeholder="http://192.168.0.100:3001"
+            />
+          </div>
+          {fieldError && !isConnected && <span className="settings__field-error">{fieldError}</span>}
+          <button className="settings__btn" data-focusable tabIndex={0} onClick={handleConnectServer}>
+            {isConnected ? 'Reconnect' : 'Connect'}
+          </button>
         </div>
-        {fieldError && !isConnected && <span className="settings__field-error">{fieldError}</span>}
-        <button className="settings__btn" data-focusable tabIndex={0} onClick={handleConnectServer}>
-          {isConnected ? 'Reconnect' : 'Connect'}
-        </button>
-      </div>
+      )}
 
       {isConnected && (
         <>

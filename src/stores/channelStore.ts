@@ -55,8 +55,13 @@ function buildProgramIndex(programs: Program[]): Map<string, Program[]> {
 
 declare const __SERVER_URL__: string;
 const API_BASE_URL_KEY = 'streamvault_api_url';
-// Use empty string (relative paths) when served from the same origin, otherwise fall back to build-time URL
 const DEFAULT_SERVER_URL: string = typeof __SERVER_URL__ !== 'undefined' ? __SERVER_URL__ : '';
+// When served from the same origin (PWA), API is always available via relative paths
+export const SAME_ORIGIN = !DEFAULT_SERVER_URL;
+/** Check if API is reachable — same-origin always works, remote needs a URL */
+function hasApi(apiBaseUrl: string): boolean {
+  return SAME_ORIGIN || !!apiBaseUrl;
+}
 
 interface ChannelActions {
   setApiBaseUrl: (url: string) => void;
@@ -115,7 +120,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
   channelCount: 0,
   syncInterval: '24h',
   lastSyncTime: 0,
-  apiBaseUrl: getItem<string>(API_BASE_URL_KEY, DEFAULT_SERVER_URL),
+  apiBaseUrl: SAME_ORIGIN ? '' : getItem<string>(API_BASE_URL_KEY, DEFAULT_SERVER_URL),
   _hydrated: false,
 
   setApiBaseUrl: (url: string) => {
@@ -125,7 +130,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
 
   fetchCategories: async (contentType: string) => {
     const { apiBaseUrl } = get();
-    if (!apiBaseUrl) return;
+    if (!hasApi(apiBaseUrl)) return;
     try {
       const data = await apiFetch(apiBaseUrl, `/api/categories?type=${encodeURIComponent(contentType)}`);
       set({ categories: data.categories || [] });
@@ -137,7 +142,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
 
   fetchChannels: async (group?: string) => {
     const { apiBaseUrl } = get();
-    if (!apiBaseUrl) return;
+    if (!hasApi(apiBaseUrl)) return;
     // Abort any in-flight channel fetch
     if (fetchAbortController) fetchAbortController.abort();
     fetchAbortController = new AbortController();
@@ -163,7 +168,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
 
   fetchPrograms: async () => {
     const { apiBaseUrl } = get();
-    if (!apiBaseUrl) return;
+    if (!hasApi(apiBaseUrl)) return;
     try {
       const now = Date.now();
       const to = now + 6 * 60 * 60 * 1000;
@@ -188,7 +193,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
 
   fetchEpgForStream: async (streamId: number) => {
     const { apiBaseUrl } = get();
-    if (!apiBaseUrl) return [];
+    if (!hasApi(apiBaseUrl)) return [];
     try {
       const data = await apiFetch(apiBaseUrl, `/api/epg/${streamId}`);
       const programs: Program[] = data.programs.map((p: { channelId: string; title: string; description: string; start: string; stop: string; category: string }) => ({
@@ -238,7 +243,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
 
   fetchConfig: async () => {
     const { apiBaseUrl } = get();
-    if (!apiBaseUrl) return;
+    if (!hasApi(apiBaseUrl)) return;
     try {
       const data = await apiFetch(apiBaseUrl, '/api/config');
       set({
@@ -259,7 +264,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
 
   saveConfig: async (config: Record<string, string>) => {
     const { apiBaseUrl } = get();
-    if (!apiBaseUrl) return;
+    if (!hasApi(apiBaseUrl)) return;
     try {
       await apiFetch(apiBaseUrl, '/api/config', {
         method: 'PUT',
@@ -289,7 +294,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
 
   triggerSync: async () => {
     const { apiBaseUrl } = get();
-    if (!apiBaseUrl) return;
+    if (!hasApi(apiBaseUrl)) return;
     set({ isLoading: true, error: null, loadingPhase: 'fetching-playlist', loadingMessage: 'Starting sync...' });
     try {
       await apiFetch(apiBaseUrl, '/api/sync', { method: 'POST' });
@@ -315,7 +320,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
 
   cancelSync: () => {
     const { apiBaseUrl } = get();
-    if (!apiBaseUrl) return;
+    if (!hasApi(apiBaseUrl)) return;
     stopPolling();
     apiFetch(apiBaseUrl, '/api/sync/cancel', { method: 'POST' }).catch(() => {});
     set({ isLoading: false, loadingPhase: 'idle', loadingMessage: 'Sync cancelled' });
@@ -323,7 +328,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
 
   pollStatus: async () => {
     const { apiBaseUrl } = get();
-    if (!apiBaseUrl) return;
+    if (!hasApi(apiBaseUrl)) return;
     try {
       const status = await apiFetch(apiBaseUrl, '/api/status');
       set({
@@ -356,7 +361,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
   hydrate: async () => {
     if (get()._hydrated) return;
     const { apiBaseUrl } = get();
-    if (!apiBaseUrl) {
+    if (!SAME_ORIGIN && !apiBaseUrl) {
       set({ _hydrated: true });
       return;
     }
