@@ -2,15 +2,19 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { usePlayer } from '../hooks/usePlayer';
 import { usePlayerStore } from '../stores/playerStore';
 import { useChannelStore } from '../stores/channelStore';
+import { useAppStore } from '../stores/appStore';
 import { getCurrentProgram } from '../services/epg-service';
 import { KEY_CODES } from '../utils/keys';
+import { isMobile } from '../utils/platform';
 
 const OSD_TIMEOUT = 5000;
+const MOBILE = isMobile();
 
 export default function Player() {
   const { play, stop, retry, playerState, subtitleTracks, currentSubtitleIndex, subtitleText, cycleSubtitles } = usePlayer();
   const currentChannel = usePlayerStore((s) => s.currentChannel);
   const programs = useChannelStore((s) => s.programs);
+  const navigate = useAppStore((s) => s.navigate);
   const [showOSD, setShowOSD] = useState(true);
   const osdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -63,7 +67,22 @@ export default function Player() {
     };
   }, [resetOSDTimer]);
 
-  // Show OSD on any key press
+  const handleBack = useCallback(() => {
+    stop();
+    navigate('channels');
+  }, [stop, navigate]);
+
+  // Touch: tap to toggle OSD
+  const handleTap = useCallback(() => {
+    if (showOSD) {
+      setShowOSD(false);
+      if (osdTimerRef.current) clearTimeout(osdTimerRef.current);
+    } else {
+      resetOSDTimer();
+    }
+  }, [showOSD, resetOSDTimer]);
+
+  // Show OSD on any key press (TV remote)
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       resetOSDTimer();
@@ -90,7 +109,12 @@ export default function Player() {
   );
 
   return (
-    <div className="player" tabIndex={0} onKeyDown={handleKeyDown}>
+    <div
+      className="player"
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
+      onClick={MOBILE ? handleTap : undefined}
+    >
       {/* Video container */}
       <div className="player__video-container">
         {typeof webapis !== 'undefined' && webapis.avplay ? (
@@ -114,7 +138,11 @@ export default function Player() {
           <div className="player__error-icon">{'\u26A0'}</div>
           <h2>Playback Error</h2>
           <p>{playerState.errorMessage}</p>
-          <p className="player__error-hint">Press ENTER to retry</p>
+          {MOBILE ? (
+            <button className="player__error-btn" onClick={retry}>Retry</button>
+          ) : (
+            <p className="player__error-hint">Press ENTER to retry</p>
+          )}
         </div>
       )}
 
@@ -125,17 +153,25 @@ export default function Player() {
         </div>
       )}
 
-      {/* OSD bar - always rendered, fades in/out */}
+      {/* OSD bar */}
       {currentChannel && playerState.status !== 'error' && (
         <div className={`player__osd${showOSD ? ' player__osd--visible' : ''}`}>
+          {/* Back button on mobile */}
+          {MOBILE && (
+            <button className="player__back-btn" onClick={(e) => { e.stopPropagation(); handleBack(); }}>
+              {'\u2190'} Back
+            </button>
+          )}
           <div className="player__osd-info">
             <span className="player__osd-channel-name">{currentChannel.name}</span>
             {currentProgram && (
               <span className="player__osd-program">{currentProgram.title}</span>
             )}
-            <span className="player__osd-subtitle-indicator">
-              {currentSubtitleIndex === -1 ? 'Subs: Off' : `Subs: ${subtitleTracks[currentSubtitleIndex]?.label || 'On'}`}
-            </span>
+            {!MOBILE && (
+              <span className="player__osd-subtitle-indicator">
+                {currentSubtitleIndex === -1 ? 'Subs: Off' : `Subs: ${subtitleTracks[currentSubtitleIndex]?.label || 'On'}`}
+              </span>
+            )}
           </div>
           {currentProgram && (
             <div className="player__osd-progress">

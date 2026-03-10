@@ -12,7 +12,6 @@ import {
 } from '../services/channel-service';
 import { getCurrentProgram } from '../services/epg-service';
 import { KEY_CODES } from '../utils/keys';
-import { isMobile, openInNativePlayer } from '../utils/platform';
 import HorizontalRow from '../components/HorizontalRow';
 
 export default function Home() {
@@ -49,10 +48,6 @@ export default function Home() {
 
   const handleSelectChannel = useCallback(
     (channel: Channel) => {
-      if (isMobile()) {
-        openInNativePlayer(channel.url);
-        return;
-      }
       setChannel(channel);
       navigate('player');
     },

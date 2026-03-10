@@ -5,7 +5,7 @@ import { useAppStore } from '../stores/appStore';
 import { KEY_CODES } from '../utils/keys';
 import { prefetchImages } from '../utils/image-pool';
 import { markKeyDown, markKeyRendered } from '../utils/perf-monitor';
-import { isMobile, openInNativePlayer } from '../utils/platform';
+import { isMobile } from '../utils/platform';
 import ChannelCard from './ChannelCard';
 
 interface ChannelListProps {
@@ -79,10 +79,6 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
 
   const handleSelect = useCallback(
     (channel: Channel) => {
-      if (MOBILE) {
-        openInNativePlayer(channel.url);
-        return;
-      }
       setChannel(channel);
       navigate('player');
     },
