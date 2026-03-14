@@ -144,19 +144,30 @@ export default function Player() {
     };
   }, []);
 
-  // Auto-PIP when leaving the app (visibility change)
+  // Auto-PIP when leaving the app
+  // Chrome: use autoPictureInPicture attribute (requestPictureInPicture blocked without gesture)
+  // Safari: use visibilitychange + requestPictureInPicture (Safari allows it without gesture)
   useEffect(() => {
-    if (!MOBILE || !('pictureInPictureEnabled' in document)) return;
+    if (!MOBILE || !document.pictureInPictureEnabled) return;
+    const video = getVideoElement();
+    if (!video) return;
 
-    const handleVisibilityChange = () => {
-      if (document.hidden && playerState.status === 'playing') {
-        const video = getVideoElement();
-        if (video && !document.pictureInPictureElement) {
-          video.requestPictureInPicture().catch(() => {});
+    // Chrome/Android: native auto-PiP attribute
+    if ('autoPictureInPicture' in video) {
+      (video as HTMLVideoElement & { autoPictureInPicture: boolean }).autoPictureInPicture = true;
+      return () => {
+        if (video && 'autoPictureInPicture' in video) {
+          (video as HTMLVideoElement & { autoPictureInPicture: boolean }).autoPictureInPicture = false;
         }
+      };
+    }
+
+    // Safari fallback: requestPictureInPicture from visibilitychange works
+    const handleVisibilityChange = () => {
+      if (document.hidden && playerState.status === 'playing' && !document.pictureInPictureElement) {
+        video.requestPictureInPicture().catch(() => {});
       }
     };
-
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, [getVideoElement, playerState.status]);
@@ -338,7 +349,7 @@ export default function Player() {
   );
 
   const seekDisplay = isSeeking ? seekValue : currentTime;
-  const pipSupported = typeof document !== 'undefined' && 'pictureInPictureEnabled' in document;
+  const pipSupported = typeof document !== 'undefined' && document.pictureInPictureEnabled === true;
 
   return (
     <div
