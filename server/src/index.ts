@@ -708,7 +708,7 @@ app.use(express.static(FRONTEND_DIR, {
 }));
 
 // SPA fallback: serve index.html with no-cache so deploys are picked up immediately
-app.get('*', (_req, res) => {
+app.get('/{*path}', (_req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.sendFile(path.join(FRONTEND_DIR, 'index.html'));
 });
