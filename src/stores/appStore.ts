@@ -1,15 +1,23 @@
 import { create } from 'zustand';
 import type { View, Channel } from '../types';
 
+/** Persisted search/filter state for each content-type browse view */
+export interface BrowseState {
+  searchQuery: string;
+  selectedGroup: string | null;
+}
+
 interface AppState {
   currentView: View;
-  previousView: View | null;
+  viewStack: View[];
   selectedGroup: string | null;
   selectedSeries: Channel | null;
   selectedMovie: Channel | null;
   showExitDialog: boolean;
   showToast: boolean;
   toastMessage: string;
+  /** Search/filter state keyed by view name (channels, movies, series) */
+  browseStates: Record<string, BrowseState>;
 }
 
 interface AppActions {
@@ -22,6 +30,7 @@ interface AppActions {
   showExitConfirm: () => void;
   hideExitConfirm: () => void;
   showToastMessage: (msg: string) => void;
+  setBrowseState: (view: string, state: Partial<BrowseState>) => void;
 }
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -33,19 +42,20 @@ function pushState(view: View, group?: string | null) {
 
 export const useAppStore = create<AppState & AppActions>()((set, get) => ({
   currentView: 'home',
-  previousView: null,
+  viewStack: [],
   selectedGroup: null,
   selectedSeries: null,
   selectedMovie: null,
   showExitDialog: false,
   showToast: false,
   toastMessage: '',
+  browseStates: {},
 
   navigate: (view: View) => {
-    const { currentView } = get();
+    const { currentView, viewStack } = get();
     pushState(view);
     set({
-      previousView: currentView,
+      viewStack: [...viewStack, currentView],
       currentView: view,
       selectedGroup: null,
       showExitDialog: false,
@@ -53,10 +63,10 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
   },
 
   navigateToSeries: (series: Channel) => {
-    const { currentView } = get();
+    const { currentView, viewStack } = get();
     pushState('seriesDetail');
     set({
-      previousView: currentView,
+      viewStack: [...viewStack, currentView],
       currentView: 'seriesDetail',
       selectedSeries: series,
       showExitDialog: false,
@@ -64,10 +74,10 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
   },
 
   navigateToMovie: (movie: Channel) => {
-    const { currentView } = get();
+    const { currentView, viewStack } = get();
     pushState('movieDetail');
     set({
-      previousView: currentView,
+      viewStack: [...viewStack, currentView],
       currentView: 'movieDetail',
       selectedMovie: movie,
       showExitDialog: false,
@@ -84,13 +94,15 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
   },
 
   goBack: () => {
-    const { currentView, previousView, selectedGroup } = get();
+    const { currentView, viewStack, selectedGroup } = get();
 
-    // From player, seriesDetail, or movieDetail, go back to previous view
-    if ((currentView === 'player' || currentView === 'seriesDetail' || currentView === 'movieDetail') && previousView) {
+    // If we have a view stack, pop from it
+    if (viewStack.length > 0) {
+      const newStack = [...viewStack];
+      const prevView = newStack.pop()!;
       set({
-        currentView: previousView,
-        previousView: null,
+        viewStack: newStack,
+        currentView: prevView,
         selectedSeries: currentView === 'seriesDetail' ? null : get().selectedSeries,
         selectedMovie: currentView === 'movieDetail' ? null : get().selectedMovie,
         showExitDialog: false,
@@ -108,7 +120,7 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
     if (currentView !== 'home') {
       set({
         currentView: 'home',
-        previousView: null,
+        viewStack: [],
         selectedGroup: null,
         showExitDialog: false,
       });
@@ -138,5 +150,16 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
       set({ showToast: false, toastMessage: '' });
       toastTimer = null;
     }, 3000);
+  },
+
+  setBrowseState: (view: string, partial: Partial<BrowseState>) => {
+    const { browseStates } = get();
+    const current = browseStates[view] || { searchQuery: '', selectedGroup: null };
+    set({
+      browseStates: {
+        ...browseStates,
+        [view]: { ...current, ...partial },
+      },
+    });
   },
 }));

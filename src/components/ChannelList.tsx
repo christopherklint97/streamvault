@@ -211,7 +211,6 @@ function LiveListItem({ channel, onSelect, vindex }: { channel: Channel; onSelec
     <div className="channel-list__live-item" data-vindex={vindex}>
       <button className="channel-list__live-main" onClick={() => onSelect(channel)}>
         <span className="channel-list__live-name">{channel.name}</span>
-        <span className="channel-list__live-group">{channel.group}</span>
       </button>
       <button
         className={`channel-list__live-fav${isFav ? ' channel-list__live-fav--active' : ''}`}
@@ -228,9 +227,13 @@ function LiveListItem({ channel, onSelect, vindex }: { channel: Channel; onSelec
 type FocusZone = 'search' | 'filter' | 'grid';
 
 export default function ChannelList({ contentType }: ChannelListProps) {
-  const [searchQuery, setSearchQuery] = useState('');
-  const [debouncedQuery, setDebouncedQuery] = useState('');
-  const [selectedGroup, setSelectedGroup] = useState<string | null>('All');
+  const viewName = contentType === 'livetv' ? 'channels' : contentType;
+  const savedBrowse = useAppStore((s) => s.browseStates[viewName]);
+  const setBrowseState = useAppStore((s) => s.setBrowseState);
+
+  const [searchQuery, setSearchQuery] = useState(savedBrowse?.searchQuery ?? '');
+  const [debouncedQuery, setDebouncedQuery] = useState(savedBrowse?.searchQuery ?? '');
+  const [selectedGroup, setSelectedGroup] = useState<string | null>(savedBrowse?.selectedGroup ?? 'All');
   const [isSearching, setIsSearching] = useState(false);
   const [focusZone, setFocusZone] = useState<FocusZone>('search');
   const [focusIndex, setFocusIndex] = useState(0);
@@ -381,7 +384,8 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     setSelectedGroup(groupName);
     setSearchQuery('');
     setDebouncedQuery('');
-  }, []);
+    setBrowseState(viewName, { searchQuery: '', selectedGroup: groupName });
+  }, [setBrowseState, viewName]);
 
   const handleSearchChange = useCallback((value: string) => {
     setSearchQuery(value);
@@ -390,7 +394,8 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     setFocusIndex(0);
     setScrollOffset(0);
     setFocusZone('search');
-  }, []);
+    setBrowseState(viewName, { searchQuery: value });
+  }, [setBrowseState, viewName]);
 
   // TV keyboard navigation across zones: search, filter button, grid
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {

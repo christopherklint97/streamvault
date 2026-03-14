@@ -4,7 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { Readable } from 'node:stream';
 import {
-  getChannels, getChannelById, getChannelsByGroup, getChannelCountByGroup, getGroups, getRegions,
+  getChannels, getChannelById, getChannelsByIds, getChannelsByGroup, getChannelCountByGroup, getGroups, getRegions,
   getPrograms, getConfig, setConfig,
   getCategories, getCategoryByName, getContentTypeCounts,
   saveChannelsForCategory, markCategoryFetched,
@@ -117,6 +117,29 @@ app.get('/api/channels', async (req, res) => {
     ? { sort: lastChannel.sort_order ?? 0, name: lastChannel.name }
     : null;
   res.json({ channels, total, groups, regions, contentTypeCounts, nextCursor });
+});
+
+// ---------- Batch fetch channels by IDs ----------
+
+app.post('/api/channels/by-ids', (req, res) => {
+  const { ids } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    res.json({ channels: [] });
+    return;
+  }
+  // Cap at 200 to avoid huge queries
+  const capped = ids.slice(0, 200);
+  const dbChannels = getChannelsByIds(capped);
+  const channels = dbChannels.map(ch => ({
+    id: ch.id,
+    name: ch.name,
+    url: ch.url,
+    logo: ch.logo,
+    group: ch.grp,
+    region: ch.region,
+    contentType: ch.content_type,
+  }));
+  res.json({ channels });
 });
 
 // ---------- Browse (lightweight, paginated by content type) ----------

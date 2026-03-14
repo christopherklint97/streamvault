@@ -18,9 +18,9 @@ import { KEY_CODES } from '../utils/keys';
 import HorizontalRow from '../components/HorizontalRow';
 
 export default function Home() {
-  const channels = useChannelStore((s) => s.channels);
   const programs = useChannelStore((s) => s.programs);
   const contentTypeCounts = useChannelStore((s) => s.contentTypeCounts);
+  const fetchChannelsByIds = useChannelStore((s) => s.fetchChannelsByIds);
   const favoriteIds = useFavoritesStore((s) => s.favoriteIds);
   const lists = useFavoritesStore((s) => s.lists);
   const createList = useFavoritesStore((s) => s.createList);
@@ -34,28 +34,57 @@ export default function Home() {
   const [editingListName, setEditingListName] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const favoriteChannels = useMemo(
-    () => channels.filter((ch) => favoriteIds.has(ch.id)),
-    [channels, favoriteIds]
+  // Fetch all channels needed for home sections from the server
+  const [channelMap, setChannelMap] = useState<Map<string, Channel>>(new Map());
+
+  const recentIds = useMemo(() => getRecentChannelIds(), []);
+  const lastWatchedId = useMemo(() => getLastWatchedChannelId(), []);
+  const continueWatchingIds = useMemo(() => getContinueWatchingIds(), []);
+  const listChannelIds = useMemo(
+    () => lists.flatMap(l => l.channelIds),
+    [lists]
   );
 
-  const recentChannels = useMemo(() => {
-    const recentIds = getRecentChannelIds();
-    const channelMap = new Map(channels.map((ch) => [ch.id, ch]));
-    return recentIds.map((id) => channelMap.get(id)).filter(Boolean) as Channel[];
-  }, [channels]);
+  // Collect all IDs we need and batch-fetch from server
+  useEffect(() => {
+    const allIds = new Set<string>();
+    for (const id of favoriteIds) allIds.add(id);
+    for (const id of recentIds) allIds.add(id);
+    for (const id of continueWatchingIds) allIds.add(id);
+    for (const id of listChannelIds) allIds.add(id);
+    if (lastWatchedId) allIds.add(lastWatchedId);
 
-  const lastWatchedChannel = useMemo(() => {
-    const lastId = getLastWatchedChannelId();
-    if (!lastId) return null;
-    return channels.find((ch) => ch.id === lastId) || null;
-  }, [channels]);
+    if (allIds.size === 0) return;
 
-  const continueWatchingChannels = useMemo(() => {
-    const cwIds = getContinueWatchingIds();
-    const channelMap = new Map(channels.map((ch) => [ch.id, ch]));
-    return cwIds.map((id) => channelMap.get(id)).filter(Boolean) as Channel[];
-  }, [channels]);
+    let cancelled = false;
+    fetchChannelsByIds(Array.from(allIds)).then(channels => {
+      if (cancelled) return;
+      const map = new Map<string, Channel>();
+      for (const ch of channels) map.set(ch.id, ch);
+      setChannelMap(map);
+    });
+    return () => { cancelled = true; };
+  }, [favoriteIds, recentIds, lastWatchedId, continueWatchingIds, listChannelIds, fetchChannelsByIds]);
+
+  const favoriteChannels = useMemo(
+    () => Array.from(favoriteIds).map(id => channelMap.get(id)).filter(Boolean) as Channel[],
+    [channelMap, favoriteIds]
+  );
+
+  const recentChannels = useMemo(
+    () => recentIds.map(id => channelMap.get(id)).filter(Boolean) as Channel[],
+    [channelMap, recentIds]
+  );
+
+  const lastWatchedChannel = useMemo(
+    () => (lastWatchedId ? channelMap.get(lastWatchedId) ?? null : null),
+    [channelMap, lastWatchedId]
+  );
+
+  const continueWatchingChannels = useMemo(
+    () => continueWatchingIds.map(id => channelMap.get(id)).filter(Boolean) as Channel[],
+    [channelMap, continueWatchingIds]
+  );
 
   const navigateToSeries = useAppStore((s) => s.navigateToSeries);
   const navigateToMovie = useAppStore((s) => s.navigateToMovie);
@@ -147,7 +176,7 @@ export default function Home() {
     });
   }, []);
 
-  const hasContent = typeCounts.livetv > 0 || typeCounts.movies > 0 || typeCounts.series > 0 || channels.length > 0;
+  const hasContent = typeCounts.livetv > 0 || typeCounts.movies > 0 || typeCounts.series > 0 || channelMap.size > 0;
   if (!hasContent) {
     return (
       <div className="home home--empty" ref={containerRef} onKeyDown={handleKeyDown}>
@@ -251,7 +280,7 @@ export default function Home() {
 
       {/* Custom Lists */}
       {lists.map(list => {
-        const listChannels = channels.filter(ch => list.channelIds.includes(ch.id));
+        const listChannels = list.channelIds.map(id => channelMap.get(id)).filter(Boolean) as Channel[];
         if (listChannels.length === 0) return null;
         return (
           <div key={list.id} className="home__section">

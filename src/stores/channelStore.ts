@@ -75,6 +75,7 @@ interface ChannelActions {
   setApiBaseUrl: (url: string) => void;
   fetchCategories: (contentType: string) => Promise<void>;
   fetchChannels: (group?: string) => Promise<void>;
+  fetchChannelsByIds: (ids: string[]) => Promise<Channel[]>;
   fetchMoreChannels: () => Promise<void>;
   fetchPrograms: () => Promise<void>;
   fetchEpgForStream: (streamId: number) => Promise<Program[]>;
@@ -191,6 +192,21 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
       if (err instanceof DOMException && err.name === 'AbortError') return;
       const msg = err instanceof Error ? err.message : 'Failed to fetch channels';
       set({ error: msg });
+    }
+  },
+
+  fetchChannelsByIds: async (ids: string[]) => {
+    const { apiBaseUrl } = get();
+    if (!hasApi(apiBaseUrl) || ids.length === 0) return [];
+    try {
+      const data = await apiFetch(apiBaseUrl, '/api/channels/by-ids', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      });
+      return (data.channels ?? []) as Channel[];
+    } catch {
+      return [];
     }
   },
 

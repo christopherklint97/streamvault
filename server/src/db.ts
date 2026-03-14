@@ -210,6 +210,12 @@ export function getChannelById(id: string): DBChannel | undefined {
   return db.prepare('SELECT * FROM channels WHERE id = ?').get(id) as DBChannel | undefined;
 }
 
+export function getChannelsByIds(ids: string[]): DBChannel[] {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  return db.prepare(`SELECT * FROM channels WHERE id IN (${placeholders})`).all(...ids) as DBChannel[];
+}
+
 export function getChannels(): DBChannel[] {
   return db.prepare('SELECT * FROM channels ORDER BY sort_order, name').all() as DBChannel[];
 }
