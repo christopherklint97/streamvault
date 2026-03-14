@@ -1743,7 +1743,7 @@ img { display: block; }
     bottom: 0;
   }
   .player__video-container { width: 100%; height: 100%; }
-  .player__video { width: 100%; height: 100%; object-fit: contain; }
+  .player__video { width: 100%; height: 100%; object-fit: contain; object-position: center top; }
   .player__osd-top {
     padding: 12px 16px 32px;
     padding-top: calc(12px + env(safe-area-inset-top, 0px));
@@ -1797,13 +1797,22 @@ img { display: block; }
   .player__error h2 { font-size: 20px; }
   .player__error p { font-size: 15px; }
 
+  /* Portrait: constrain OSD to video area so controls sit near the video */
+  @media (orientation: portrait) {
+    .player__osd {
+      bottom: auto;
+      height: calc(100vw * 9 / 16);
+      min-height: 240px;
+    }
+  }
+
   /* Landscape: use full viewport, safe areas handle notch */
   @media (orientation: landscape) {
     .player {
       width: 100% !important;
       height: 100dvh !important;
     }
-    .player__video { object-fit: contain; }
+    .player__video { object-fit: contain; object-position: center; }
     .player__subtitles { bottom: 60px; font-size: 20px; }
   }
 
