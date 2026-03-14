@@ -1459,7 +1459,7 @@ img { display: block; }
 
   .sidebar-item {
     flex-direction: column;
-    padding: 10px 0 6px;
+    padding: 6px 0 2px;
     gap: 2px;
     border-left: none !important;
     font-size: 10px;
