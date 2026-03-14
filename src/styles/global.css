@@ -1383,6 +1383,176 @@ img { display: block; }
 }
 
 /* ============================
+   EPG Guide
+   ============================ */
+
+.epg-guide {
+  padding: 20px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.epg-guide__loading {
+  color: #888;
+  text-align: center;
+  padding: 60px 0;
+}
+.epg-guide__header {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin-bottom: 16px;
+  flex-shrink: 0;
+}
+.epg-guide__title {
+  font-size: 28px;
+  font-weight: 700;
+}
+.epg-guide__nav {
+  display: flex;
+  gap: 6px;
+}
+.epg-guide__nav-btn {
+  padding: 6px 14px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 14px;
+  color: #aaa;
+  transition: background 0.15s;
+}
+.epg-guide__nav-btn:hover,
+.epg-guide__nav-btn:focus { background: rgba(255, 255, 255, 0.12); }
+.epg-guide__nav-btn--now {
+  background: rgba(124, 77, 255, 0.2);
+  color: #b388ff;
+}
+.epg-guide__nav-btn--now:hover,
+.epg-guide__nav-btn--now:focus { background: rgba(124, 77, 255, 0.35); }
+.epg-guide__date {
+  font-size: 14px;
+  color: #666;
+  margin-left: auto;
+}
+.epg-guide__grid-wrapper {
+  flex: 1;
+  overflow: auto;
+  position: relative;
+}
+.epg-guide__timeline {
+  display: flex;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #0a0a12;
+  height: 32px;
+}
+.epg-guide__hour {
+  position: absolute;
+  top: 0;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  padding-left: 8px;
+  font-size: 13px;
+  color: #666;
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+}
+.epg-guide__rows {
+  position: relative;
+}
+.epg-guide__row {
+  display: flex;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.epg-guide__channel-name {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #ccc;
+  background: #0d0d16;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+.epg-guide__channel-name:hover { background: #151520; }
+.epg-guide__programs {
+  position: relative;
+  flex-shrink: 0;
+}
+.epg-guide__program {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.epg-guide__program:hover { background: rgba(255, 255, 255, 0.12); }
+.epg-guide__program--live {
+  background: rgba(124, 77, 255, 0.15);
+  border-left: 3px solid #7c4dff;
+}
+.epg-guide__program--live:hover { background: rgba(124, 77, 255, 0.25); }
+.epg-guide__program--past { opacity: 0.5; }
+.epg-guide__program--selected {
+  background: rgba(124, 77, 255, 0.3) !important;
+  outline: 2px solid #7c4dff;
+}
+.epg-guide__program-title {
+  font-size: 12px;
+  color: #ddd;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.epg-guide__now-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #e50914;
+  z-index: 1;
+  pointer-events: none;
+}
+.epg-guide__detail {
+  flex-shrink: 0;
+  padding: 14px 16px;
+  margin-top: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+.epg-guide__detail-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.epg-guide__detail-time {
+  font-size: 13px;
+  color: #888;
+  margin-bottom: 6px;
+}
+.epg-guide__detail-desc {
+  font-size: 13px;
+  color: #aaa;
+  line-height: 1.4;
+}
+
+/* ============================
    Mobile PWA Responsive Styles
    ============================ */
 @media (max-width: 1024px) {
@@ -1901,6 +2071,51 @@ img { display: block; }
     -webkit-tap-highlight-color: transparent;
   }
   .channel-list__live-fav--active { color: #ffa726; }
+
+  /* --- EPG Progress Bar (under live list items) --- */
+  .channel-list__live-main {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+  .epg-bar {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    width: 100%;
+  }
+  .epg-bar__track {
+    height: 3px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .epg-bar__fill {
+    height: 100%;
+    background: #7c4dff;
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+  .epg-bar__info {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+  }
+  .epg-bar__title {
+    font-size: 12px;
+    color: #888;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .epg-bar__time {
+    font-size: 11px;
+    color: #555;
+    flex-shrink: 0;
+  }
 
   /* --- Channel Card favorite button (mobile) --- */
   .channel-card__star-btn {
@@ -2607,3 +2822,28 @@ img { display: block; }
   background: #e50914;
   border-radius: 2px;
 }
+
+  /* --- EPG Guide (mobile) --- */
+  .epg-guide { padding: 12px; }
+  .epg-guide__title { font-size: 20px; }
+  .epg-guide__header {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .epg-guide__nav { gap: 4px; }
+  .epg-guide__nav-btn {
+    padding: 8px 12px;
+    font-size: 13px;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .epg-guide__grid-wrapper {
+    -webkit-overflow-scrolling: touch;
+  }
+  .epg-guide__channel-name {
+    font-size: 12px;
+    padding: 0 8px;
+  }
+  .epg-guide__program-title { font-size: 11px; }
+  .epg-guide__detail {
+    max-height: 100px;
+  }

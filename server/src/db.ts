@@ -384,6 +384,25 @@ export function savePrograms(programs: DBProgram[]): void {
   insertProgramsBatch(programs);
 }
 
+/** Save programs for specific channels without clearing the entire table */
+const clearProgramsByChannel = db.prepare('DELETE FROM programs WHERE channel_id = ?');
+
+const saveProgramsForChannelsBatch = db.transaction((programs: DBProgram[]) => {
+  // Collect unique channel IDs and clear their existing programs
+  const channelIds = new Set(programs.map(p => p.channel_id));
+  for (const cid of channelIds) {
+    clearProgramsByChannel.run(cid);
+  }
+  for (const p of programs) {
+    insertProgram.run(p.channel_id, p.title, p.description, p.start_time, p.stop_time, p.category);
+  }
+});
+
+export function saveProgramsForChannels(programs: DBProgram[]): void {
+  if (programs.length === 0) return;
+  saveProgramsForChannelsBatch(programs);
+}
+
 export function getPrograms(from?: number, to?: number): DBProgram[] {
   if (from !== undefined && to !== undefined) {
     return db.prepare(
@@ -391,6 +410,32 @@ export function getPrograms(from?: number, to?: number): DBProgram[] {
     ).all(to, from) as DBProgram[];
   }
   return db.prepare('SELECT * FROM programs ORDER BY channel_id, start_time').all() as DBProgram[];
+}
+
+/** Get programs for specific channel IDs within a time range */
+export function getProgramsByChannelIds(channelIds: string[], from?: number, to?: number): DBProgram[] {
+  if (channelIds.length === 0) return [];
+  const placeholders = channelIds.map(() => '?').join(',');
+  if (from !== undefined && to !== undefined) {
+    return db.prepare(
+      `SELECT * FROM programs WHERE channel_id IN (${placeholders}) AND start_time < ? AND stop_time > ? ORDER BY channel_id, start_time`
+    ).all(...channelIds, to, from) as DBProgram[];
+  }
+  return db.prepare(
+    `SELECT * FROM programs WHERE channel_id IN (${placeholders}) ORDER BY channel_id, start_time`
+  ).all(...channelIds) as DBProgram[];
+}
+
+/** Get all programs for a single channel, ordered by start time */
+export function getProgramsByChannel(channelId: string, from?: number, to?: number): DBProgram[] {
+  if (from !== undefined && to !== undefined) {
+    return db.prepare(
+      'SELECT * FROM programs WHERE channel_id = ? AND start_time < ? AND stop_time > ? ORDER BY start_time'
+    ).all(channelId, to, from) as DBProgram[];
+  }
+  return db.prepare(
+    'SELECT * FROM programs WHERE channel_id = ? ORDER BY start_time'
+  ).all(channelId) as DBProgram[];
 }
 
 export function getProgramCount(): number {

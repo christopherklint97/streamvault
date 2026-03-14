@@ -494,6 +494,7 @@ export async function fetchXtreamVodInfo(
 export async function fetchXtreamShortEpg(
   config: XtreamConfig,
   streamIds: number[],
+  channelIdPrefix = '',
 ): Promise<DBProgram[]> {
   const programs: DBProgram[] = [];
   const BATCH = 10;
@@ -506,17 +507,20 @@ export async function fetchXtreamShortEpg(
           apiUrl(config, `get_short_epg&stream_id=${id}&limit=10`),
           AbortSignal.timeout(30_000),
           `epg ${id}`,
-        ).catch(() => ({ epg_listings: [] } as XtreamShortEpg))
+        ).then(data => ({ id, data }))
+          .catch(() => ({ id, data: { epg_listings: [] } as XtreamShortEpg }))
       )
     );
 
-    for (const result of results) {
+    for (const { id: streamId, data: result } of results) {
       for (const e of result.epg_listings) {
         const start = parseEpgTimestamp(e.start);
         const stop = parseEpgTimestamp(e.end);
         if (!start || !stop) continue;
+        // Use our channel ID format (live_12345) when prefix provided, otherwise use EPG's channel_id
+        const channelId = channelIdPrefix ? `${channelIdPrefix}${streamId}` : (e.channel_id || e.epg_id);
         programs.push({
-          channel_id: e.channel_id || e.epg_id,
+          channel_id: channelId,
           title: decodeBase64Maybe(e.title) || 'No Title',
           description: decodeBase64Maybe(e.description) || '',
           start_time: start,
@@ -528,6 +532,38 @@ export async function fetchXtreamShortEpg(
   }
 
   return programs;
+}
+
+/** Fetch EPG for many live streams with controlled concurrency */
+export async function fetchEpgForStreams(
+  config: XtreamConfig,
+  streamIds: number[],
+  onBatchDone: (programs: DBProgram[]) => void,
+  signal?: AbortSignal,
+): Promise<number> {
+  let totalPrograms = 0;
+  const BATCH = 10;
+
+  for (let i = 0; i < streamIds.length; i += BATCH) {
+    if (signal?.aborted) break;
+    const batch = streamIds.slice(i, i + BATCH);
+    try {
+      const programs = await fetchXtreamShortEpg(config, batch, 'live_');
+      if (programs.length > 0) {
+        onBatchDone(programs);
+        totalPrograms += programs.length;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      logger.warn(`EPG batch fetch failed for streams ${batch.join(',')}: ${msg}`);
+    }
+    // Small delay between batches to avoid overwhelming server
+    if (i + BATCH < streamIds.length) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+  }
+
+  return totalPrograms;
 }
 
 function parseEpgTimestamp(str: string): number | null {

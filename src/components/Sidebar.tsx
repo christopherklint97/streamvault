@@ -12,6 +12,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { icon: '🏠', label: 'Home', view: 'home' },
   { icon: '📺', label: 'Live TV', view: 'channels' },
+  { icon: '📋', label: 'Guide', view: 'guide' },
   { icon: '🎬', label: 'Movies', view: 'movies' },
   { icon: '📂', label: 'Series', view: 'series' },
   { icon: '⚙️', label: 'Settings', view: 'settings' },

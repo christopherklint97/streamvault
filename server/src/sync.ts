@@ -5,9 +5,11 @@ import {
   getConfig, setConfig,
   getChannelCount, getProgramCount, getCategoryCount,
   saveChannelsForCategory, markCategoryFetched,
+  saveProgramsForChannels,
 } from './db.js';
+import db from './db.js';
 import { logger } from './logger.js';
-import { fetchXtreamCategories, fetchAllCategoryStreams } from './xtream.js';
+import { fetchXtreamCategories, fetchAllCategoryStreams, fetchEpgForStreams } from './xtream.js';
 import type { XtreamConfig } from './xtream.js';
 
 export type SyncPhase = 'idle' | 'fetching-playlist' | 'parsing-playlist' | 'fetching-epg' | 'parsing-epg' | 'done' | 'error';
@@ -133,6 +135,34 @@ export async function startCrawl(): Promise<void> {
     );
 
     if (!signal.aborted) {
+      // Phase 2: Crawl EPG for live channels
+      state.crawlProgress = 'Crawling EPG data for live channels...';
+      logger.info('Starting EPG crawl for live channels...');
+      try {
+        const liveChannelRows = db.prepare(
+          "SELECT id FROM channels WHERE content_type = 'livetv'"
+        ).all() as Array<{ id: string }>;
+        // Extract numeric stream IDs from channel IDs (format: live_12345)
+        const liveStreamIds = liveChannelRows
+          .map(r => parseInt(r.id.replace('live_', ''), 10))
+          .filter(id => !isNaN(id));
+        logger.info(`EPG crawl: ${liveStreamIds.length} live channels to fetch EPG for`);
+
+        if (liveStreamIds.length > 0) {
+          const epgTotal = await fetchEpgForStreams(
+            config,
+            liveStreamIds,
+            (programs) => { saveProgramsForChannels(programs); },
+            signal,
+          );
+          state.programCount = getProgramCount();
+          logger.info(`EPG crawl complete: ${epgTotal} programs fetched`);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Unknown error';
+        logger.warn(`EPG crawl failed (non-fatal): ${msg}`);
+      }
+
       const now = Date.now();
       setConfig('last_crawl_time', String(now));
       state.lastCrawlTime = now;

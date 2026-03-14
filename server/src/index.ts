@@ -5,7 +5,8 @@ import { fileURLToPath } from 'url';
 import { Readable } from 'node:stream';
 import {
   getChannels, getChannelById, getChannelsByIds, getChannelsByGroup, getChannelCountByGroup, getGroups, getRegions,
-  getPrograms, getConfig, setConfig,
+  getPrograms, getProgramsByChannelIds, getProgramsByChannel, saveProgramsForChannels,
+  getConfig, setConfig,
   getCategories, getCategoryByName, getContentTypeCounts,
   saveChannelsForCategory, markCategoryFetched,
   searchChannelsByName, getChannelCountByContentType,
@@ -319,6 +320,52 @@ app.get('/api/programs', (req, res) => {
   res.json({ programs });
 });
 
+// ---------- Batch EPG (for channel list view) ----------
+
+app.get('/api/epg/batch', (req, res) => {
+  const idsParam = req.query.ids as string | undefined;
+  if (!idsParam) {
+    res.json({ programs: {} });
+    return;
+  }
+  const channelIds = idsParam.split(',').slice(0, 100); // cap at 100
+  const now = Date.now();
+  const from = now - 2 * 60 * 60 * 1000; // 2h ago
+  const to = now + 6 * 60 * 60 * 1000;   // 6h ahead
+  const dbPrograms = getProgramsByChannelIds(channelIds, from, to);
+
+  // Group by channel ID
+  const grouped: Record<string, Array<{ title: string; description: string; start: string; stop: string }>> = {};
+  for (const p of dbPrograms) {
+    if (!grouped[p.channel_id]) grouped[p.channel_id] = [];
+    grouped[p.channel_id].push({
+      title: p.title,
+      description: p.description,
+      start: new Date(p.start_time).toISOString(),
+      stop: new Date(p.stop_time).toISOString(),
+    });
+  }
+  res.json({ programs: grouped });
+});
+
+// ---------- EPG for single channel (full schedule) ----------
+
+app.get('/api/epg/channel/:channelId', (req, res) => {
+  const channelId = req.params.channelId;
+  const from = req.query.from ? Number(req.query.from) : undefined;
+  const to = req.query.to ? Number(req.query.to) : undefined;
+  const dbPrograms = getProgramsByChannel(channelId, from, to);
+  const programs = dbPrograms.map(p => ({
+    channelId: p.channel_id,
+    title: p.title,
+    description: p.description,
+    start: new Date(p.start_time).toISOString(),
+    stop: new Date(p.stop_time).toISOString(),
+    category: p.category,
+  }));
+  res.json({ programs });
+});
+
 // ---------- On-demand EPG (Xtream short EPG) ----------
 
 app.get('/api/epg/:streamId', async (req, res) => {
@@ -335,7 +382,11 @@ app.get('/api/epg/:streamId', async (req, res) => {
   }
 
   try {
-    const programs = await fetchXtreamShortEpg(config, [streamId]);
+    const programs = await fetchXtreamShortEpg(config, [streamId], 'live_');
+    // Also save to DB for future batch queries
+    if (programs.length > 0) {
+      saveProgramsForChannels(programs);
+    }
     res.json({
       programs: programs.map(p => ({
         channelId: p.channel_id,

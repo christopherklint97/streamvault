@@ -41,6 +41,64 @@ async function apiBrowse(contentType: string, group?: string, limit = PAGE_SIZE,
   return resp.json();
 }
 
+// ---------- Batch EPG helper ----------
+
+interface EpgProgram {
+  title: string;
+  description: string;
+  start: string;
+  stop: string;
+}
+
+type EpgMap = Record<string, EpgProgram[]>;
+
+async function fetchBatchEpg(channelIds: string[]): Promise<EpgMap> {
+  if (channelIds.length === 0) return {};
+  const base = getApiBase();
+  const resp = await fetch(`${base}/api/epg/batch?ids=${channelIds.join(',')}`);
+  if (!resp.ok) return {};
+  const data = await resp.json();
+  return data.programs || {};
+}
+
+function getCurrentEpg(programs: EpgProgram[] | undefined): { current: EpgProgram | null; progress: number } {
+  if (!programs || programs.length === 0) return { current: null, progress: 0 };
+  const now = Date.now();
+  for (const p of programs) {
+    const start = new Date(p.start).getTime();
+    const stop = new Date(p.stop).getTime();
+    if (start <= now && stop > now) {
+      const total = stop - start;
+      const elapsed = now - start;
+      return { current: p, progress: total > 0 ? elapsed / total : 0 };
+    }
+  }
+  return { current: null, progress: 0 };
+}
+
+// ---------- EPG Progress Bar ----------
+
+function EpgProgressBar({ programs }: { programs: EpgProgram[] | undefined }) {
+  const { current, progress } = useMemo(() => getCurrentEpg(programs), [programs]);
+  if (!current) return null;
+
+  const start = new Date(current.start);
+  const stop = new Date(current.stop);
+  const fmt = (d: Date) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  return (
+    <div className="epg-bar">
+      <div className="epg-bar__track">
+        <div className="epg-bar__fill" style={{ width: `${Math.min(progress * 100, 100)}%` }} />
+      </div>
+      <div className="epg-bar__info">
+        <span className="epg-bar__title">{current.title}</span>
+        <span className="epg-bar__time">{fmt(start)} – {fmt(stop)}</span>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Filter Dropdown ----------
 
 interface FilterDropdownProps {
@@ -204,13 +262,14 @@ function FilterDropdown({ categories, selectedGroup, onSelect }: FilterDropdownP
 
 // ---------- Live TV List Item (mobile) ----------
 
-function LiveListItem({ channel, onSelect, vindex }: { channel: Channel; onSelect: (ch: Channel) => void; vindex: number }) {
+function LiveListItem({ channel, onSelect, vindex, epgPrograms }: { channel: Channel; onSelect: (ch: Channel) => void; vindex: number; epgPrograms?: EpgProgram[] }) {
   const isFav = useFavoritesStore((s) => s.favoriteIds.has(channel.id));
   const toggle = useFavoritesStore((s) => s.toggleFavorite);
   return (
     <div className="channel-list__live-item" data-vindex={vindex}>
       <button className="channel-list__live-main" onClick={() => onSelect(channel)}>
         <span className="channel-list__live-name">{channel.name}</span>
+        <EpgProgressBar programs={epgPrograms} />
       </button>
       <button
         className={`channel-list__live-fav${isFav ? ' channel-list__live-fav--active' : ''}`}
@@ -245,6 +304,9 @@ export default function ChannelList({ contentType }: ChannelListProps) {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
+
+  // EPG data for live TV channels
+  const [epgMap, setEpgMap] = useState<EpgMap>({});
 
   const categories = useChannelStore((s) => s.categories);
   const fetchCategories = useChannelStore((s) => s.fetchCategories);
@@ -312,6 +374,20 @@ export default function ChannelList({ contentType }: ChannelListProps) {
       });
     return () => { cancelled = true; };
   }, [debouncedQuery, contentType, selectedGroup, searchChannelsFn]);
+
+  // Fetch EPG for visible live TV channels
+  useEffect(() => {
+    if (contentType !== 'livetv' || channels.length === 0) return;
+    let cancelled = false;
+    // Map channel IDs to the EPG channel_id format the backend uses
+    // The Xtream EPG uses epg_channel_id but our programs table uses the channel_id from the EPG response
+    // We'll query by channel IDs and also by the numeric stream IDs
+    const ids = channels.map(ch => ch.id);
+    fetchBatchEpg(ids).then(data => {
+      if (!cancelled) setEpgMap(prev => ({ ...prev, ...data }));
+    });
+    return () => { cancelled = true; };
+  }, [contentType, channels]);
 
   const totalRows = Math.ceil(channels.length / COLUMN_COUNT);
 
@@ -532,7 +608,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
               <div className="channel-list__empty">{emptyMessage}</div>
             ) : (
               channels.map((ch, idx) => (
-                <LiveListItem key={ch.id} channel={ch} onSelect={handleSelect} vindex={idx} />
+                <LiveListItem key={ch.id} channel={ch} onSelect={handleSelect} vindex={idx} epgPrograms={epgMap[ch.id]} />
               ))
             )}
           </div>

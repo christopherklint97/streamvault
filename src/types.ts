@@ -19,7 +19,7 @@ export interface Program {
   category: string;
 }
 
-export type View = 'home' | 'channels' | 'movies' | 'series' | 'player' | 'settings' | 'seriesDetail' | 'movieDetail';
+export type View = 'home' | 'channels' | 'movies' | 'series' | 'player' | 'settings' | 'seriesDetail' | 'movieDetail' | 'guide';
 
 export interface MovieInfo {
   name: string;
