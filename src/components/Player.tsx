@@ -3,6 +3,7 @@ import { usePlayer } from '../hooks/usePlayer';
 import { usePlayerStore } from '../stores/playerStore';
 import { useChannelStore } from '../stores/channelStore';
 import { useAppStore } from '../stores/appStore';
+import { useRecordingStore } from '../stores/recordingStore';
 import { getCurrentProgram } from '../services/epg-service';
 import { KEY_CODES } from '../utils/keys';
 import { isMobile } from '../utils/platform';
@@ -37,6 +38,9 @@ export default function Player() {
   const channelId = currentChannel?.id;
   const programs = useChannelStore((s) => s.programs);
   const goBack = useAppStore((s) => s.goBack);
+  const showToast = useAppStore((s) => s.showToastMessage);
+  const createRecording = useRecordingStore((s) => s.createRecording);
+  const [isRecording, setIsRecording] = useState(false);
   const [showOSD, setShowOSD] = useState(true);
   const osdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isPaused, setIsPaused] = useState(false);
@@ -221,6 +225,25 @@ export default function Player() {
       }
     } catch { /* PiP not supported */ }
   }, [getVideoElement]);
+
+  const handleRecord = useCallback(async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!currentChannel || isRecording) return;
+    const now = Date.now();
+    // If we have a current program, record until it ends; otherwise record for 2 hours
+    const endTime = currentProgram
+      ? currentProgram.stop.getTime()
+      : now + 2 * 60 * 60 * 1000;
+    const title = currentProgram?.title || currentChannel.name;
+    const rec = await createRecording(currentChannel.id, title, now, endTime);
+    if (rec) {
+      setIsRecording(true);
+      showToast(`Recording: ${title}`);
+    } else {
+      showToast('Failed to start recording');
+    }
+    resetOSDTimer();
+  }, [currentChannel, currentProgram, isRecording, createRecording, showToast, resetOSDTimer]);
 
   // Touch: tap to toggle OSD (single tap only, after ruling out swipe/double-tap)
   const handleSingleTap = useCallback(() => {
@@ -431,6 +454,15 @@ export default function Player() {
                 <span className="player__osd-program">{currentProgram.title}</span>
               )}
             </div>
+            {MOBILE && isLive && (
+              <button
+                className={`player__record-btn${isRecording ? ' player__record-btn--active' : ''}`}
+                onClick={handleRecord}
+                title={isRecording ? 'Recording...' : 'Record'}
+              >
+                ⏺
+              </button>
+            )}
             {MOBILE && pipSupported && (
               <button className="player__pip-btn" onClick={handlePiP} title="Picture-in-Picture">
                 {/* PiP icon */}

@@ -11,6 +11,7 @@ import db from './db.js';
 import { logger } from './logger.js';
 import { fetchXtreamCategories, fetchAllCategoryStreams, fetchEpgForStreams } from './xtream.js';
 import type { XtreamConfig } from './xtream.js';
+import { matchRules } from './recording-scheduler.js';
 
 export type SyncPhase = 'idle' | 'fetching-playlist' | 'parsing-playlist' | 'fetching-epg' | 'parsing-epg' | 'done' | 'error';
 
@@ -169,6 +170,15 @@ export async function startCrawl(): Promise<void> {
       state.crawlProgress = `Crawl complete: ${totalStreams.toLocaleString()} streams`;
       state.channelCount = getChannelCount();
       logger.info(`Full crawl complete: ${totalStreams} streams from ${allCats.length} categories`);
+
+      // Re-evaluate recording rules with new EPG data
+      try {
+        matchRules();
+        logger.info('Post-crawl recording rule matching complete');
+      } catch (err) {
+        const ruleMsg = err instanceof Error ? err.message : 'Unknown error';
+        logger.warn(`Post-crawl rule matching failed (non-fatal): ${ruleMsg}`);
+      }
     }
   } catch (err) {
     if (!signal.aborted) {

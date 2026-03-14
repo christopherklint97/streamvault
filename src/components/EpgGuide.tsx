@@ -3,6 +3,7 @@ import type { Channel } from '../types';
 import { useChannelStore, SAME_ORIGIN } from '../stores/channelStore';
 import { usePlayerStore } from '../stores/playerStore';
 import { useAppStore } from '../stores/appStore';
+import { useRecordingStore } from '../stores/recordingStore';
 
 interface EpgProgram {
   channelId: string;
@@ -61,6 +62,8 @@ export default function EpgGuide() {
   const fetchCategories = useChannelStore((s) => s.fetchCategories);
   const setChannel = usePlayerStore((s) => s.setChannel);
   const navigate = useAppStore((s) => s.navigate);
+  const showToast = useAppStore((s) => s.showToastMessage);
+  const createFromProgram = useRecordingStore((s) => s.createFromProgram);
   const gridRef = useRef<HTMLDivElement>(null);
 
   // The base time: current hour rounded down
@@ -116,6 +119,17 @@ export default function EpgGuide() {
     setChannel(channel);
     navigate('player');
   }, [setChannel, navigate]);
+
+  const handleRecord = useCallback(async (channelId: string, program: EpgProgram) => {
+    const start = new Date(program.start).getTime();
+    const stop = new Date(program.stop).getTime();
+    const rec = await createFromProgram(channelId, start, stop, program.title);
+    if (rec) {
+      showToast(`Recording scheduled: ${program.title}`);
+    } else {
+      showToast('Failed to schedule recording');
+    }
+  }, [createFromProgram, showToast]);
 
   const [now, setNow] = useState(() => Date.now());
   // Update "now" every 60 seconds for the now-line
@@ -221,6 +235,14 @@ export default function EpgGuide() {
           </div>
           {selectedProgram.description && (
             <div className="epg-guide__detail-desc">{selectedProgram.description}</div>
+          )}
+          {new Date(selectedProgram.stop).getTime() > now && (
+            <button
+              className="epg-guide__record-btn"
+              onClick={() => handleRecord(selectedProgram.channelId, selectedProgram)}
+            >
+              ⏺ Record
+            </button>
           )}
         </div>
       )}

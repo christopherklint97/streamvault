@@ -19,7 +19,7 @@ export interface Program {
   category: string;
 }
 
-export type View = 'home' | 'channels' | 'movies' | 'series' | 'player' | 'settings' | 'seriesDetail' | 'movieDetail' | 'guide';
+export type View = 'home' | 'channels' | 'movies' | 'series' | 'player' | 'settings' | 'seriesDetail' | 'movieDetail' | 'guide' | 'recordings';
 
 export interface MovieInfo {
   name: string;
@@ -85,6 +85,46 @@ export interface FavoriteList {
   id: string;
   name: string;
   channelIds: string[];
+}
+
+export type RecordingStatus = 'scheduled' | 'recording' | 'completed' | 'failed' | 'cancelled';
+
+export interface Recording {
+  id: string;
+  channel_id: string;
+  channel_name: string;
+  title: string;
+  status: RecordingStatus;
+  start_time: number;
+  end_time: number;
+  actual_start: number | null;
+  actual_end: number | null;
+  file_path: string | null;
+  file_size: number;
+  duration: number;
+  error: string | null;
+  rule_id: string | null;
+  program_title: string | null;
+  created_at: number;
+}
+
+export interface RecordingRule {
+  id: string;
+  channel_id: string;
+  channel_name: string;
+  match_title: string;
+  match_type: 'exact' | 'contains';
+  enabled: number;
+  padding_before: number;
+  padding_after: number;
+  max_recordings: number;
+  created_at: number;
+}
+
+export interface RecordingStatusInfo {
+  activeCount: number;
+  diskUsageBytes: number;
+  schedulerRunning: boolean;
 }
 
 export interface WatchProgress {

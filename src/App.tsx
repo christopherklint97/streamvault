@@ -15,6 +15,7 @@ import SeriesDetail from './components/SeriesDetail';
 import MovieDetail from './components/MovieDetail';
 import Home from './pages/Home';
 import EpgGuide from './components/EpgGuide';
+import Recordings from './pages/Recordings';
 
 const Settings = lazy(() => import('./pages/Settings'));
 
@@ -101,6 +102,8 @@ function AppContent() {
         return selectedMovie ? <MovieDetail movie={selectedMovie} /> : <ChannelList contentType="movies" />;
       case 'guide':
         return <EpgGuide />;
+      case 'recordings':
+        return <Recordings />;
       case 'player':
         return <Player />;
       case 'settings':

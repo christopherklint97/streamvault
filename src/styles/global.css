@@ -2847,3 +2847,194 @@ img { display: block; }
   .epg-guide__detail {
     max-height: 100px;
   }
+
+/* --- EPG Record Button --- */
+.epg-guide__record-btn {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 6px 18px;
+  background: #dc2626;
+  color: #fff;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.epg-guide__record-btn:hover,
+.epg-guide__record-btn:focus {
+  background: #b91c1c;
+}
+
+/* --- Player Record Button --- */
+.player__record-btn {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  color: #fff;
+  opacity: 0.8;
+  transition: opacity 0.15s;
+}
+.player__record-btn:hover { opacity: 1; }
+.player__record-btn--active {
+  color: #ef4444;
+  opacity: 1;
+  animation: pulse-record 1.5s ease-in-out infinite;
+}
+@keyframes pulse-record {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* --- Recordings Page --- */
+.recordings-page {
+  padding: 24px 32px;
+  height: 100%;
+  overflow-y: auto;
+}
+.recordings-page__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.recordings-page__title {
+  font-size: 28px;
+  font-weight: 700;
+}
+.recordings-page__status {
+  display: flex;
+  gap: 16px;
+  font-size: 14px;
+  color: #9ca3af;
+}
+.recordings-page__tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #333;
+}
+.recordings-page__tab {
+  padding: 8px 20px;
+  font-size: 15px;
+  color: #9ca3af;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+.recordings-page__tab--active {
+  color: #fff;
+  border-bottom-color: #3b82f6;
+}
+.recordings-page__tab:hover { color: #e5e7eb; }
+.recordings-page__content {
+  padding-bottom: 32px;
+}
+.recordings-page__section {
+  margin-bottom: 24px;
+}
+.recordings-page__section-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: #d1d5db;
+}
+.recordings-page__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+}
+.recordings-page__empty {
+  text-align: center;
+  color: #6b7280;
+  padding: 48px 0;
+  font-size: 16px;
+}
+
+/* --- Recording Card --- */
+.recording-card {
+  background: #1a1a2e;
+  border-radius: 10px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.recording-card__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.recording-card__status {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.recording-card__channel {
+  font-size: 13px;
+  color: #9ca3af;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recording-card__title {
+  font-size: 16px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recording-card__meta {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  color: #6b7280;
+}
+.recording-card__error {
+  font-size: 12px;
+  color: #f59e0b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recording-card__actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+.recording-card__btn {
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  background: #2a2a3e;
+  color: #d1d5db;
+  transition: background 0.15s;
+}
+.recording-card__btn:hover { background: #3a3a5e; }
+.recording-card__btn--play { background: #1d4ed8; color: #fff; }
+.recording-card__btn--play:hover { background: #2563eb; }
+.recording-card__btn--stop { background: #b45309; color: #fff; }
+.recording-card__btn--stop:hover { background: #d97706; }
+.recording-card__btn--cancel { background: #4b5563; color: #fff; }
+.recording-card__btn--cancel:hover { background: #6b7280; }
+.recording-card__btn--delete { color: #ef4444; }
+.recording-card__btn--delete:hover { background: #7f1d1d; color: #fca5a5; }
+
+/* --- Recordings Mobile --- */
+@media (max-width: 1024px) {
+  .recordings-page {
+    padding: 16px;
+    padding-bottom: 80px;
+  }
+  .recordings-page__title { font-size: 22px; }
+  .recordings-page__grid {
+    grid-template-columns: 1fr;
+  }
+}

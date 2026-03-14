@@ -84,6 +84,48 @@ try {
 
 db.exec('CREATE INDEX IF NOT EXISTS idx_channels_name ON channels(name COLLATE NOCASE)');
 
+// ---------- Recording tables ----------
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS recordings (
+    id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    channel_name TEXT NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'scheduled',
+    start_time INTEGER NOT NULL,
+    end_time INTEGER NOT NULL,
+    actual_start INTEGER,
+    actual_end INTEGER,
+    file_path TEXT,
+    file_size INTEGER DEFAULT 0,
+    duration INTEGER DEFAULT 0,
+    error TEXT,
+    rule_id TEXT,
+    program_title TEXT,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS recording_rules (
+    id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    channel_name TEXT NOT NULL,
+    match_title TEXT NOT NULL,
+    match_type TEXT NOT NULL DEFAULT 'contains',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    padding_before INTEGER NOT NULL DEFAULT 120000,
+    padding_after INTEGER NOT NULL DEFAULT 300000,
+    max_recordings INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_recordings_status ON recordings(status);
+  CREATE INDEX IF NOT EXISTS idx_recordings_start_time ON recordings(start_time);
+  CREATE INDEX IF NOT EXISTS idx_recordings_channel_id ON recordings(channel_id);
+  CREATE INDEX IF NOT EXISTS idx_recordings_rule_id ON recordings(rule_id);
+  CREATE INDEX IF NOT EXISTS idx_recording_rules_channel_id ON recording_rules(channel_id);
+`);
+
 // ---------- Config helpers ----------
 
 export function getConfig(key: string, fallback = ''): string {
@@ -441,6 +483,137 @@ export function getProgramsByChannel(channelId: string, from?: number, to?: numb
 export function getProgramCount(): number {
   const row = db.prepare('SELECT COUNT(*) as count FROM programs').get() as { count: number };
   return row.count;
+}
+
+// ---------- Recording helpers ----------
+
+export interface DBRecording {
+  id: string;
+  channel_id: string;
+  channel_name: string;
+  title: string;
+  status: string;
+  start_time: number;
+  end_time: number;
+  actual_start: number | null;
+  actual_end: number | null;
+  file_path: string | null;
+  file_size: number;
+  duration: number;
+  error: string | null;
+  rule_id: string | null;
+  program_title: string | null;
+  created_at: number;
+}
+
+export function insertRecording(rec: DBRecording): void {
+  db.prepare(`
+    INSERT INTO recordings (id, channel_id, channel_name, title, status, start_time, end_time, actual_start, actual_end, file_path, file_size, duration, error, rule_id, program_title, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(rec.id, rec.channel_id, rec.channel_name, rec.title, rec.status, rec.start_time, rec.end_time, rec.actual_start, rec.actual_end, rec.file_path, rec.file_size, rec.duration, rec.error, rec.rule_id, rec.program_title, rec.created_at);
+}
+
+export function updateRecording(id: string, updates: Partial<Omit<DBRecording, 'id'>>): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  for (const [key, val] of Object.entries(updates)) {
+    fields.push(`${key} = ?`);
+    values.push(val ?? null);
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE recordings SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+export function deleteRecording(id: string): void {
+  db.prepare('DELETE FROM recordings WHERE id = ?').run(id);
+}
+
+export function getRecording(id: string): DBRecording | undefined {
+  return db.prepare('SELECT * FROM recordings WHERE id = ?').get(id) as DBRecording | undefined;
+}
+
+export function getRecordings(filter?: { status?: string; limit?: number; offset?: number }): DBRecording[] {
+  let sql = 'SELECT * FROM recordings';
+  const params: unknown[] = [];
+  if (filter?.status) {
+    sql += ' WHERE status = ?';
+    params.push(filter.status);
+  }
+  sql += ' ORDER BY start_time DESC';
+  if (filter?.limit) {
+    sql += ' LIMIT ?';
+    params.push(filter.limit);
+  }
+  if (filter?.offset) {
+    sql += ' OFFSET ?';
+    params.push(filter.offset);
+  }
+  return db.prepare(sql).all(...params) as DBRecording[];
+}
+
+export function getRecordingsByStatus(status: string): DBRecording[] {
+  return db.prepare('SELECT * FROM recordings WHERE status = ? ORDER BY start_time').all(status) as DBRecording[];
+}
+
+export function getUpcomingRecordings(from: number, to: number): DBRecording[] {
+  return db.prepare(
+    'SELECT * FROM recordings WHERE status = \'scheduled\' AND start_time >= ? AND start_time <= ? ORDER BY start_time'
+  ).all(from, to) as DBRecording[];
+}
+
+export function getRecordingsByRuleId(ruleId: string): DBRecording[] {
+  return db.prepare('SELECT * FROM recordings WHERE rule_id = ? ORDER BY start_time DESC').all(ruleId) as DBRecording[];
+}
+
+// ---------- Recording Rule helpers ----------
+
+export interface DBRecordingRule {
+  id: string;
+  channel_id: string;
+  channel_name: string;
+  match_title: string;
+  match_type: string;
+  enabled: number;
+  padding_before: number;
+  padding_after: number;
+  max_recordings: number;
+  created_at: number;
+}
+
+export function insertRecordingRule(rule: DBRecordingRule): void {
+  db.prepare(`
+    INSERT INTO recording_rules (id, channel_id, channel_name, match_title, match_type, enabled, padding_before, padding_after, max_recordings, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(rule.id, rule.channel_id, rule.channel_name, rule.match_title, rule.match_type, rule.enabled, rule.padding_before, rule.padding_after, rule.max_recordings, rule.created_at);
+}
+
+export function updateRecordingRule(id: string, updates: Partial<Omit<DBRecordingRule, 'id'>>): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  for (const [key, val] of Object.entries(updates)) {
+    fields.push(`${key} = ?`);
+    values.push(val ?? null);
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE recording_rules SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+export function deleteRecordingRule(id: string): void {
+  db.prepare('DELETE FROM recording_rules WHERE id = ?').run(id);
+}
+
+export function getRecordingRule(id: string): DBRecordingRule | undefined {
+  return db.prepare('SELECT * FROM recording_rules WHERE id = ?').get(id) as DBRecordingRule | undefined;
+}
+
+export function getRecordingRules(): DBRecordingRule[] {
+  return db.prepare('SELECT * FROM recording_rules ORDER BY created_at DESC').all() as DBRecordingRule[];
+}
+
+export function getEnabledRecordingRules(): DBRecordingRule[] {
+  return db.prepare('SELECT * FROM recording_rules WHERE enabled = 1 ORDER BY created_at').all() as DBRecordingRule[];
 }
 
 export default db;

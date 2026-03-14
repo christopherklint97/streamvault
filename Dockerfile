@@ -26,6 +26,8 @@ RUN npm ci --omit=dev
 ## Stage 3: Runtime
 FROM node:24-slim
 
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY --from=server-build /app/node_modules node_modules/

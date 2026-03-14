@@ -1,8 +1,10 @@
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
+import fs from 'node:fs';
 import { fileURLToPath } from 'url';
 import { Readable } from 'node:stream';
+import { randomUUID } from 'node:crypto';
 import {
   getChannels, getChannelById, getChannelsByIds, getChannelsByGroup, getChannelCountByGroup, getGroups, getRegions,
   getPrograms, getProgramsByChannelIds, getProgramsByChannel, saveProgramsForChannels,
@@ -11,11 +13,18 @@ import {
   saveChannelsForCategory, markCategoryFetched,
   searchChannelsByName, getChannelCountByContentType,
   getChannelsByContentTypeCursor, getChannelsByGroupCursor,
+  insertRecording, updateRecording, deleteRecording, getRecording, getRecordings,
+  insertRecordingRule, updateRecordingRule, deleteRecordingRule, getRecordingRules, getRecordingRule,
 } from './db.js';
+import type { DBRecording } from './db.js';
 import { getStatus, sync, cancelSync, startupSync, startCrawl, cancelCrawl } from './sync.js';
 import { fetchXtreamStreamsByCategory, fetchXtreamShortEpg, fetchAllCategoryStreams, fetchXtreamSeriesInfo, fetchXtreamVodInfo } from './xtream.js';
 import type { XtreamConfig } from './xtream.js';
 import { logger } from './logger.js';
+import { fetchWithRedirects, VLC_HEADERS } from './stream-utils.js';
+import { startRecording, stopRecording, cancelRecording, deleteRecordingFile, getRecordingFilePath } from './recorder.js';
+import { startScheduler, getSchedulerStatus, matchRules } from './recording-scheduler.js';
+import { recoverRecordings } from './recorder.js';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001', 10);
@@ -481,35 +490,6 @@ app.post('/api/client-logs', (req, res) => {
 // Proxies stream URLs through the server so mobile clients don't need
 // direct access to the Xtream server (avoids CORS and network issues).
 
-/** Manually follow redirects while preserving headers (Node fetch strips them across origins) */
-async function fetchWithRedirects(url: string, headers: Record<string, string>, maxRedirects = 10, timeout?: number): Promise<Response> {
-  let currentUrl = url;
-  for (let i = 0; i < maxRedirects; i++) {
-    const opts: RequestInit = {
-      headers,
-      redirect: 'manual',
-    };
-    if (timeout) opts.signal = AbortSignal.timeout(timeout);
-    const resp = await fetch(currentUrl, opts);
-    if (resp.status >= 300 && resp.status < 400) {
-      const location = resp.headers.get('location');
-      if (!location) throw new Error(`Redirect ${resp.status} with no Location header`);
-      // Resolve relative redirects
-      currentUrl = new URL(location, currentUrl).href;
-      logger.info(`Stream proxy: redirect ${resp.status} → ${currentUrl.substring(0, 100)}...`);
-      // Detect Cloudflare abuse redirect
-      if (currentUrl.includes('cloudflare-terms-of-service-abuse') || currentUrl.includes('cloudflare.com/abuse')) {
-        throw new Error('Stream blocked by Cloudflare — provider CDN flagged for abuse');
-      }
-      // Consume body to free resources
-      await resp.text().catch(() => {});
-      continue;
-    }
-    return resp;
-  }
-  throw new Error('Too many redirects');
-}
-
 app.get('/api/stream/:channelId', async (req, res) => {
   const channelId = req.params.channelId;
   const channel = getChannelById(channelId);
@@ -535,13 +515,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
   const isLive = contentType === 'livetv';
 
   try {
-    // Full VLC-like headers to get past Cloudflare
-    const upstreamHeaders: Record<string, string> = {
-      'User-Agent': 'VLC/3.0.20 LibVLC/3.0.20',
-      'Accept': '*/*',
-      'Accept-Language': 'en-US,en;q=0.5',
-      'Connection': 'keep-alive',
-    };
+    const upstreamHeaders: Record<string, string> = { ...VLC_HEADERS };
     // Forward Range header for VOD (seeking), skip for live streams
     if (req.headers.range && !isLive) {
       upstreamHeaders['Range'] = req.headers.range;
@@ -687,6 +661,232 @@ app.get('/api/proxy', async (req, res) => {
   }
 });
 
+// ---------- Recordings ----------
+
+app.get('/api/recordings', (_req, res) => {
+  const status = _req.query.status as string | undefined;
+  const limit = _req.query.limit ? parseInt(_req.query.limit as string, 10) : undefined;
+  const offset = _req.query.offset ? parseInt(_req.query.offset as string, 10) : undefined;
+  const recordings = getRecordings({ status, limit, offset });
+  res.json({ recordings });
+});
+
+app.post('/api/recordings', (req, res) => {
+  const { channelId, title, startTime, endTime } = req.body;
+  if (!channelId || !startTime || !endTime) {
+    res.status(400).json({ error: 'channelId, startTime, and endTime required' });
+    return;
+  }
+  const channel = getChannelById(channelId);
+  const id = randomUUID();
+  const recording: DBRecording = {
+    id,
+    channel_id: channelId,
+    channel_name: channel?.name || channelId,
+    title: title || channel?.name || 'Recording',
+    status: 'scheduled',
+    start_time: startTime,
+    end_time: endTime,
+    actual_start: null,
+    actual_end: null,
+    file_path: null,
+    file_size: 0,
+    duration: 0,
+    error: null,
+    rule_id: null,
+    program_title: title || null,
+    created_at: Date.now(),
+  };
+  insertRecording(recording);
+
+  // If start time is in the past or now, start immediately
+  if (startTime <= Date.now()) {
+    startRecording(id).catch(err => {
+      logger.error(`Failed to start immediate recording: ${err}`);
+    });
+  }
+
+  res.json({ recording });
+});
+
+app.post('/api/recordings/from-program', (req, res) => {
+  const { channelId, programStart, programStop, title } = req.body;
+  if (!channelId || !programStart || !programStop) {
+    res.status(400).json({ error: 'channelId, programStart, and programStop required' });
+    return;
+  }
+  const channel = getChannelById(channelId);
+  const id = randomUUID();
+  const recording: DBRecording = {
+    id,
+    channel_id: channelId,
+    channel_name: channel?.name || channelId,
+    title: title || 'Recording',
+    status: 'scheduled',
+    start_time: programStart,
+    end_time: programStop,
+    actual_start: null,
+    actual_end: null,
+    file_path: null,
+    file_size: 0,
+    duration: 0,
+    error: null,
+    rule_id: null,
+    program_title: title || null,
+    created_at: Date.now(),
+  };
+  insertRecording(recording);
+
+  if (programStart <= Date.now()) {
+    startRecording(id).catch(err => {
+      logger.error(`Failed to start immediate recording: ${err}`);
+    });
+  }
+
+  res.json({ recording });
+});
+
+app.get('/api/recordings/:id', (req, res) => {
+  const recording = getRecording(req.params.id);
+  if (!recording) {
+    res.status(404).json({ error: 'Recording not found' });
+    return;
+  }
+  res.json({ recording });
+});
+
+app.delete('/api/recordings/:id', (req, res) => {
+  const recording = getRecording(req.params.id);
+  if (!recording) {
+    res.status(404).json({ error: 'Recording not found' });
+    return;
+  }
+  if (recording.status === 'recording') {
+    cancelRecording(req.params.id, true).catch(() => {});
+  } else {
+    deleteRecordingFile(req.params.id);
+  }
+  deleteRecording(req.params.id);
+  res.json({ ok: true });
+});
+
+app.post('/api/recordings/:id/cancel', (req, res) => {
+  const recording = getRecording(req.params.id);
+  if (!recording) {
+    res.status(404).json({ error: 'Recording not found' });
+    return;
+  }
+  if (recording.status === 'recording') {
+    cancelRecording(req.params.id).catch(() => {});
+  } else if (recording.status === 'scheduled') {
+    updateRecording(req.params.id, { status: 'cancelled' });
+  }
+  res.json({ ok: true });
+});
+
+app.post('/api/recordings/:id/stop', (req, res) => {
+  const recording = getRecording(req.params.id);
+  if (!recording) {
+    res.status(404).json({ error: 'Recording not found' });
+    return;
+  }
+  if (recording.status === 'recording') {
+    stopRecording(req.params.id).catch(() => {});
+  }
+  res.json({ ok: true });
+});
+
+app.get('/api/recordings/:id/stream', (req, res) => {
+  const filePath = getRecordingFilePath(req.params.id);
+  if (!filePath) {
+    res.status(404).json({ error: 'Recording file not found' });
+    return;
+  }
+
+  const stat = fs.statSync(filePath);
+  const fileSize = stat.size;
+  const range = req.headers.range;
+
+  if (range) {
+    const parts = range.replace(/bytes=/, '').split('-');
+    const start = parseInt(parts[0], 10);
+    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+    const chunkSize = end - start + 1;
+
+    res.writeHead(206, {
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': chunkSize,
+      'Content-Type': 'video/mp2t',
+    });
+    fs.createReadStream(filePath, { start, end }).pipe(res);
+  } else {
+    res.writeHead(200, {
+      'Content-Length': fileSize,
+      'Content-Type': 'video/mp2t',
+      'Accept-Ranges': 'bytes',
+    });
+    fs.createReadStream(filePath).pipe(res);
+  }
+});
+
+app.get('/api/recording-status', (_req, res) => {
+  res.json(getSchedulerStatus());
+});
+
+// ---------- Recording Rules ----------
+
+app.get('/api/recording-rules', (_req, res) => {
+  const rules = getRecordingRules();
+  res.json({ rules });
+});
+
+app.post('/api/recording-rules', (req, res) => {
+  const { channelId, channelName, matchTitle, matchType, paddingBefore, paddingAfter, maxRecordings } = req.body;
+  if (!channelId || !matchTitle) {
+    res.status(400).json({ error: 'channelId and matchTitle required' });
+    return;
+  }
+  const id = randomUUID();
+  insertRecordingRule({
+    id,
+    channel_id: channelId,
+    channel_name: channelName || channelId,
+    match_title: matchTitle,
+    match_type: matchType || 'contains',
+    enabled: 1,
+    padding_before: paddingBefore ?? 120_000,
+    padding_after: paddingAfter ?? 300_000,
+    max_recordings: maxRecordings ?? 0,
+    created_at: Date.now(),
+  });
+  // Immediately check for matches
+  matchRules();
+  res.json({ rule: getRecordingRule(id) });
+});
+
+app.put('/api/recording-rules/:id', (req, res) => {
+  const rule = getRecordingRule(req.params.id);
+  if (!rule) {
+    res.status(404).json({ error: 'Rule not found' });
+    return;
+  }
+  const updates: Record<string, unknown> = {};
+  if (req.body.matchTitle !== undefined) updates.match_title = req.body.matchTitle;
+  if (req.body.matchType !== undefined) updates.match_type = req.body.matchType;
+  if (req.body.enabled !== undefined) updates.enabled = req.body.enabled ? 1 : 0;
+  if (req.body.paddingBefore !== undefined) updates.padding_before = req.body.paddingBefore;
+  if (req.body.paddingAfter !== undefined) updates.padding_after = req.body.paddingAfter;
+  if (req.body.maxRecordings !== undefined) updates.max_recordings = req.body.maxRecordings;
+  updateRecordingRule(req.params.id, updates);
+  res.json({ rule: getRecordingRule(req.params.id) });
+});
+
+app.delete('/api/recording-rules/:id', (req, res) => {
+  deleteRecordingRule(req.params.id);
+  res.json({ ok: true });
+});
+
 // ---------- Config ----------
 
 app.get('/api/config', (_req, res) => {
@@ -769,4 +969,11 @@ app.get('/{*path}', (_req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   logger.info(`StreamVault server listening on http://0.0.0.0:${PORT}`);
   startupSync();
+  // Start recording scheduler and recover any interrupted recordings
+  recoverRecordings().then(() => {
+    startScheduler();
+  }).catch(err => {
+    logger.error(`Failed to recover recordings: ${err}`);
+    startScheduler();
+  });
 });

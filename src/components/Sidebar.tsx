@@ -15,6 +15,7 @@ const NAV_ITEMS: NavItem[] = [
   { icon: '📋', label: 'Guide', view: 'guide' },
   { icon: '🎬', label: 'Movies', view: 'movies' },
   { icon: '📂', label: 'Series', view: 'series' },
+  { icon: '⏺', label: 'DVR', view: 'recordings' },
   { icon: '⚙️', label: 'Settings', view: 'settings' },
 ];
 
