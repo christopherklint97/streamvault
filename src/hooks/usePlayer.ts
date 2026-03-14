@@ -255,13 +255,11 @@ export function usePlayer(): {
           }, {
             enableWorker: false,
             enableStashBuffer: true,
-            stashInitialSize: 512 * 1024,    // 512KB initial buffer for smooth start
+            stashInitialSize: 2 * 1024 * 1024,  // 2MB initial buffer — enough for first few seconds
             autoCleanupSourceBuffer: true,
-            autoCleanupMaxBackwardDuration: 30,
-            autoCleanupMinBackwardDuration: 15,
-            liveBufferLatencyChasing: true,
-            liveBufferLatencyMaxLatency: 10,  // Allow up to 10s behind live
-            liveBufferLatencyMinRemain: 2,    // Keep at least 2s buffered
+            autoCleanupMaxBackwardDuration: 60,
+            autoCleanupMinBackwardDuration: 30,
+            liveBufferLatencyChasing: false,     // Disable — hard seeks cause jumpy playback on start
           });
           mpegtsRef.current = player;
 
@@ -284,9 +282,7 @@ export function usePlayer(): {
             player.attachMediaElement(video);
             log.info('HTML5: mpegts.js attached to video element');
             player.load();
-            log.info('HTML5: mpegts.js load() called');
-            player.play();
-            log.info('HTML5: mpegts.js play() called');
+            log.info('HTML5: mpegts.js load() called — waiting for canplay to start playback');
           } catch (e) {
             log.error('HTML5: mpegts.js attach/load/play threw', e);
             setError('Failed to start live stream');
