@@ -46,12 +46,19 @@ export default function Home() {
     return cwIds.map((id) => channelMap.get(id)).filter(Boolean) as Channel[];
   }, [channels]);
 
+  const navigateToSeries = useAppStore((s) => s.navigateToSeries);
+
   const handleSelectChannel = useCallback(
     (channel: Channel) => {
+      // Series containers have no URL — open series detail instead
+      if (channel.contentType === 'series' && !channel.url) {
+        navigateToSeries(channel);
+        return;
+      }
       setChannel(channel);
       navigate('player');
     },
-    [setChannel, navigate]
+    [setChannel, navigate, navigateToSeries]
   );
 
   const lastWatchedProgram = lastWatchedChannel

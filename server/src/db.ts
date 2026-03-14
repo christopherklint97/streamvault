@@ -105,21 +105,32 @@ export interface DBCategory {
   fetched_at: number;
 }
 
-const insertCategory = db.prepare(
-  'INSERT OR REPLACE INTO categories (id, name, content_type, stream_count, fetched_at) VALUES (?, ?, ?, ?, ?)'
+// Upsert category: preserve fetched_at if the category already exists
+const upsertCategory = db.prepare(`
+  INSERT INTO categories (id, name, content_type, stream_count, fetched_at)
+  VALUES (?, ?, ?, ?, ?)
+  ON CONFLICT(id) DO UPDATE SET
+    name = excluded.name,
+    content_type = excluded.content_type,
+    stream_count = CASE WHEN excluded.stream_count > 0 THEN excluded.stream_count ELSE categories.stream_count END,
+    fetched_at = CASE WHEN categories.fetched_at > 0 THEN categories.fetched_at ELSE excluded.fetched_at END
+`);
+
+const deleteStaleCategories = db.prepare(
+  'DELETE FROM categories WHERE id NOT IN (SELECT value FROM json_each(?))'
 );
 
-const clearCategories = db.prepare('DELETE FROM categories');
-
-const insertCategoriesBatch = db.transaction((categories: DBCategory[]) => {
-  clearCategories.run();
+const saveCategoriesBatch = db.transaction((categories: DBCategory[]) => {
   for (const c of categories) {
-    insertCategory.run(c.id, c.name, c.content_type, c.stream_count, c.fetched_at);
+    upsertCategory.run(c.id, c.name, c.content_type, c.stream_count, c.fetched_at);
   }
+  // Remove categories that no longer exist upstream
+  const ids = JSON.stringify(categories.map(c => c.id));
+  deleteStaleCategories.run(ids);
 });
 
 export function saveCategories(categories: DBCategory[]): void {
-  insertCategoriesBatch(categories);
+  saveCategoriesBatch(categories);
 }
 
 const updateCategoryFetchedAt = db.prepare(
@@ -217,25 +228,94 @@ export function getChannelsByGroup(group: string, limit?: number, cursorSort?: n
   return db.prepare('SELECT * FROM channels WHERE grp = ? ORDER BY sort_order, name').all(group) as DBChannel[];
 }
 
+export function getChannelsByGroupCursor(group: string, limit: number, afterName?: string): DBChannel[] {
+  if (afterName) {
+    return db.prepare('SELECT * FROM channels WHERE grp = ? AND name > ? ORDER BY name LIMIT ?').all(group, afterName, limit) as DBChannel[];
+  }
+  return db.prepare('SELECT * FROM channels WHERE grp = ? ORDER BY name LIMIT ?').all(group, limit) as DBChannel[];
+}
+
 export function getChannelCountByGroup(group: string): number {
   const row = db.prepare('SELECT COUNT(*) as count FROM channels WHERE grp = ?').get(group) as { count: number };
   return row.count;
 }
 
-export function getChannelsByContentType(contentType: string): DBChannel[] {
-  return db.prepare('SELECT * FROM channels WHERE content_type = ? ORDER BY sort_order, name').all(contentType) as DBChannel[];
+export function getChannelsByContentTypeCursor(contentType: string, limit: number, afterName?: string): DBChannel[] {
+  if (afterName) {
+    return db.prepare('SELECT * FROM channels WHERE content_type = ? AND name > ? ORDER BY name LIMIT ?').all(contentType, afterName, limit) as DBChannel[];
+  }
+  return db.prepare('SELECT * FROM channels WHERE content_type = ? ORDER BY name LIMIT ?').all(contentType, limit) as DBChannel[];
 }
 
-export function searchChannelsByName(query: string, contentType?: string): DBChannel[] {
-  const pattern = `%${query}%`;
-  if (contentType) {
-    return db.prepare(
-      'SELECT * FROM channels WHERE name LIKE ? AND content_type = ? ORDER BY sort_order, name LIMIT 200'
-    ).all(pattern, contentType) as DBChannel[];
+// --- Trigram fuzzy search ---
+
+function trigrams(s: string): Set<string> {
+  const t = new Set<string>();
+  const low = s.toLowerCase();
+  for (let i = 0; i <= low.length - 3; i++) {
+    t.add(low.slice(i, i + 3));
   }
-  return db.prepare(
-    'SELECT * FROM channels WHERE name LIKE ? ORDER BY sort_order, name LIMIT 200'
-  ).all(pattern) as DBChannel[];
+  return t;
+}
+
+function trigramScore(query: string, target: string): number {
+  const qt = trigrams(query);
+  const tt = trigrams(target);
+  if (qt.size === 0) return 0;
+  let overlap = 0;
+  for (const t of qt) {
+    if (tt.has(t)) overlap++;
+  }
+  return overlap / qt.size;
+}
+
+export function searchChannelsByName(query: string, contentType?: string, group?: string): DBChannel[] {
+  // Phase 1: broad SQL candidate fetch using LIKE for each word
+  const words = query.trim().toLowerCase().split(/\s+/).filter(w => w.length > 0);
+  if (words.length === 0) return [];
+
+  // Build SQL: match using short prefixes (3+ chars) for broad candidate net
+  // This catches typos since we only need partial substring overlap
+  let sql = 'SELECT * FROM channels WHERE (';
+  const params: (string | number)[] = [];
+  const likeClauses: string[] = [];
+  for (const word of words) {
+    if (word.length >= 4) {
+      // Use 4-char prefix for broad match — catches typos later in the word
+      likeClauses.push('name LIKE ?');
+      params.push(`%${word.slice(0, 4)}%`);
+    } else {
+      likeClauses.push('name LIKE ?');
+      params.push(`%${word}%`);
+    }
+  }
+  sql += likeClauses.join(' OR ') + ')';
+  if (contentType) { sql += ' AND content_type = ?'; params.push(contentType); }
+  if (group) { sql += ' AND grp = ?'; params.push(group); }
+  sql += ' LIMIT 1000'; // broad candidate pool for fuzzy scoring
+
+  const candidates = db.prepare(sql).all(...params) as DBChannel[];
+
+  // Phase 2: score candidates with trigram similarity
+  const queryLower = query.toLowerCase();
+  const scored = candidates.map(ch => ({
+    channel: ch,
+    score: trigramScore(queryLower, ch.name.toLowerCase()),
+    exact: ch.name.toLowerCase().includes(queryLower) ? 1 : 0,
+  }));
+
+  // Filter: require at least some trigram overlap (0.15 threshold allows typos)
+  const MIN_SCORE = 0.15;
+  const filtered = scored.filter(s => s.score >= MIN_SCORE || s.exact);
+
+  // Sort: exact matches first, then by trigram score desc, then alphabetical
+  filtered.sort((a, b) => {
+    if (a.exact !== b.exact) return b.exact - a.exact;
+    if (Math.abs(a.score - b.score) > 0.01) return b.score - a.score;
+    return a.channel.name.localeCompare(b.channel.name);
+  });
+
+  return filtered.slice(0, 50).map(s => s.channel);
 }
 
 export function getChannelCountByContentType(contentType: string): number {

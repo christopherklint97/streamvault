@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import type { Channel } from '../types';
+import type { Channel, ContentType, Category } from '../types';
 import { usePlayerStore } from '../stores/playerStore';
-import { useChannelStore } from '../stores/channelStore';
+import { useChannelStore, SAME_ORIGIN } from '../stores/channelStore';
 import { useAppStore } from '../stores/appStore';
 import { KEY_CODES } from '../utils/keys';
 import { prefetchImages } from '../utils/image-pool';
@@ -10,69 +10,310 @@ import { isMobile } from '../utils/platform';
 import ChannelCard from './ChannelCard';
 
 interface ChannelListProps {
-  channels: Channel[];
-  groupName: string;
+  contentType: ContentType;
 }
 
 const MOBILE = isMobile();
-const COLUMN_COUNT = MOBILE ? 2 : 5;
-const ROW_HEIGHT = 160;
-const CONTAINER_HEIGHT = 800;
+const COLUMN_COUNT = MOBILE ? 3 : 6;
+const ROW_HEIGHT = MOBILE ? 200 : 260;
+const CONTAINER_HEIGHT = 900;
 const BUFFER = 2;
-/** How many rows ahead to prefetch images for */
 const PREFETCH_ROWS = 3;
+const SEARCH_DEBOUNCE_MS = 300;
+const PAGE_SIZE = 20;
 
-export default function ChannelList({ channels, groupName }: ChannelListProps) {
+// ---------- API helper ----------
+
+function getApiBase(): string {
+  return SAME_ORIGIN ? '' : useChannelStore.getState().apiBaseUrl;
+}
+
+async function apiBrowse(contentType: string, group?: string, limit = PAGE_SIZE, afterCursor?: string): Promise<{ channels: Channel[]; total: number; nextCursor: string | null }> {
+  const base = getApiBase();
+  const params = new URLSearchParams();
+  params.set('type', contentType);
+  if (group && group !== 'All') params.set('group', group);
+  params.set('limit', String(limit));
+  if (afterCursor) params.set('after', afterCursor);
+  const resp = await fetch(`${base}/api/browse?${params}`);
+  if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+  return resp.json();
+}
+
+// ---------- Filter Dropdown ----------
+
+interface FilterDropdownProps {
+  categories: Category[];
+  selectedGroup: string | null;
+  onSelect: (group: string) => void;
+}
+
+function FilterDropdown({ categories, selectedGroup, onSelect }: FilterDropdownProps) {
+  const [open, setOpen] = useState(false);
+  const [filterQuery, setFilterQuery] = useState('');
+  const [focusIdx, setFocusIdx] = useState(-1);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const filtered = useMemo(() => {
+    if (!filterQuery.trim()) return categories;
+    const q = filterQuery.toLowerCase();
+    return categories.filter(c => c.name.toLowerCase().includes(q));
+  }, [categories, filterQuery]);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  // Focus input when opened — reset filter state in the event handler, not the effect
+  useEffect(() => {
+    if (open) {
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }, [open]);
+
+  const handleToggle = useCallback(() => {
+    setOpen(prev => {
+      if (!prev) {
+        // Opening: reset state
+        setFilterQuery('');
+        setFocusIdx(-1);
+      }
+      return !prev;
+    });
+  }, []);
+
+  // Scroll focused item into view
+  useEffect(() => {
+    if (!open || focusIdx < 0) return;
+    const list = listRef.current;
+    if (!list) return;
+    const items = list.querySelectorAll('.filter-dropdown__item') as NodeListOf<HTMLElement>;
+    if (focusIdx < items.length) {
+      const item = items[focusIdx];
+      const top = item.offsetTop;
+      const bottom = top + item.offsetHeight;
+      if (top < list.scrollTop) list.scrollTop = top - 4;
+      else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight + 4;
+    }
+  }, [focusIdx, open]);
+
+  const handleSelect = useCallback((name: string) => {
+    onSelect(name);
+    setOpen(false);
+  }, [onSelect]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (!open) {
+      if (e.keyCode === KEY_CODES.ENTER) {
+        e.preventDefault();
+        handleToggle();
+      }
+      return;
+    }
+
+    if (e.keyCode === KEY_CODES.DOWN) {
+      e.preventDefault();
+      e.stopPropagation();
+      setFocusIdx(prev => Math.min(prev + 1, filtered.length)); // +1 for "All"
+    } else if (e.keyCode === KEY_CODES.UP) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (focusIdx <= 0) {
+        setFocusIdx(-1);
+        inputRef.current?.focus();
+      } else {
+        setFocusIdx(prev => prev - 1);
+      }
+    } else if (e.keyCode === KEY_CODES.ENTER) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (focusIdx === 0) {
+        handleSelect('All');
+      } else if (focusIdx > 0 && focusIdx <= filtered.length) {
+        handleSelect(filtered[focusIdx - 1].name);
+      }
+    } else if (e.keyCode === KEY_CODES.BACK || e.keyCode === 27) {
+      e.preventDefault();
+      e.stopPropagation();
+      setOpen(false);
+    }
+  }, [open, focusIdx, filtered, handleSelect, handleToggle]);
+
+  const label = selectedGroup && selectedGroup !== 'All' ? selectedGroup : 'All categories';
+
+  return (
+    <div className="filter-dropdown" ref={containerRef} onKeyDown={handleKeyDown}>
+      <button
+        className={`filter-dropdown__trigger${open ? ' filter-dropdown__trigger--open' : ''}`}
+        onClick={handleToggle}
+        tabIndex={0}
+      >
+        <span className="filter-dropdown__label">{label}</span>
+        <span className="filter-dropdown__arrow">{open ? '\u25B2' : '\u25BC'}</span>
+      </button>
+
+      {open && (
+        <div className="filter-dropdown__panel">
+          <input
+            ref={inputRef}
+            className="filter-dropdown__search"
+            type="text"
+            placeholder="Search categories..."
+            value={filterQuery}
+            onChange={e => { setFilterQuery(e.target.value); setFocusIdx(-1); }}
+          />
+          <div className="filter-dropdown__list" ref={listRef}>
+            <button
+              className={`filter-dropdown__item${selectedGroup === 'All' || !selectedGroup ? ' filter-dropdown__item--active' : ''}${focusIdx === 0 ? ' filter-dropdown__item--focused' : ''}`}
+              onClick={() => handleSelect('All')}
+            >
+              All categories
+            </button>
+            {filtered.map((cat, i) => (
+              <button
+                key={cat.id}
+                className={`filter-dropdown__item${selectedGroup === cat.name ? ' filter-dropdown__item--active' : ''}${focusIdx === i + 1 ? ' filter-dropdown__item--focused' : ''}`}
+                onClick={() => handleSelect(cat.name)}
+              >
+                <span className="filter-dropdown__item-name">{cat.name}</span>
+                {cat.stream_count > 0 && (
+                  <span className="filter-dropdown__item-count">{cat.stream_count}</span>
+                )}
+              </button>
+            ))}
+            {filtered.length === 0 && (
+              <div className="filter-dropdown__empty">No matching categories</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Channel List ----------
+
+type FocusZone = 'search' | 'filter' | 'grid';
+
+export default function ChannelList({ contentType }: ChannelListProps) {
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  const [selectedGroup, setSelectedGroup] = useState<string | null>('All');
+  const [isSearching, setIsSearching] = useState(false);
+  const [focusZone, setFocusZone] = useState<FocusZone>('search');
   const [focusIndex, setFocusIndex] = useState(0);
   const [scrollOffset, setScrollOffset] = useState(0);
-  const setChannel = usePlayerStore((s) => s.setChannel);
-  const hasMore = useChannelStore((s) => s.hasMore);
-  const channelTotal = useChannelStore((s) => s.channelTotal);
-  const fetchMoreChannels = useChannelStore((s) => s.fetchMoreChannels);
-  const navigate = useAppStore((s) => s.navigate);
+
+  // Local channel list state (not global store)
+  const [channels, setChannels] = useState<Channel[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
+
+  const categories = useChannelStore((s) => s.categories);
+  const fetchCategories = useChannelStore((s) => s.fetchCategories);
+  const searchChannelsFn = useChannelStore((s) => s.searchChannels);
+  const setChannel = usePlayerStore((s) => s.setChannel);
+  const navigate = useAppStore((s) => s.navigate);
+  const navigateToSeries = useAppStore((s) => s.navigateToSeries);
+
   const gridRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
-  const focusOnSearch = useRef(false);
+  const fetchIdRef = useRef(0); // to discard stale responses
 
-  const displayChannels = useMemo(() => {
-    if (!searchQuery.trim()) return channels;
-    const q = searchQuery.toLowerCase();
-    return channels.filter((ch) => ch.name.toLowerCase().includes(q));
-  }, [channels, searchQuery]);
+  // Fetch categories on mount
+  useEffect(() => {
+    fetchCategories(contentType);
+  }, [contentType, fetchCategories]);
 
-  const totalRows = Math.ceil(displayChannels.length / COLUMN_COUNT);
+  // Load initial page of channels (alphabetical, first 20)
+  useEffect(() => {
+    const id = ++fetchIdRef.current;
+    let cancelled = false;
+    const group = selectedGroup && selectedGroup !== 'All' ? selectedGroup : undefined;
+    apiBrowse(contentType, group, PAGE_SIZE).then(data => {
+      if (cancelled || fetchIdRef.current !== id) return;
+      // If "All" returned 0 results but we have categories, auto-select the first one
+      if (data.total === 0 && !group && categories.length > 0) {
+        setSelectedGroup(categories[0].name);
+        return;
+      }
+      setChannels(data.channels);
+      setTotalCount(data.total);
+      setNextCursor(data.nextCursor);
+      setInitialLoading(false);
+      setFocusIndex(0);
+      setScrollOffset(0);
+    }).catch(() => {
+      if (cancelled || fetchIdRef.current !== id) return;
+      setInitialLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [contentType, selectedGroup, categories]);
 
-  // Compute visible row range (TV only — mobile renders all)
+  // Debounce search
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(searchQuery), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // Execute search when debounced query changes
+  useEffect(() => {
+    if (!debouncedQuery.trim()) return;
+    const id = ++fetchIdRef.current;
+    let cancelled = false;
+    const group = selectedGroup && selectedGroup !== 'All' ? selectedGroup : undefined;
+    searchChannelsFn(debouncedQuery, contentType, group)
+      .then(results => {
+        if (cancelled || fetchIdRef.current !== id) return;
+        setChannels(results);
+        setTotalCount(results.length);
+        setNextCursor(null);
+        setIsSearching(false);
+        setFocusIndex(0);
+        setScrollOffset(0);
+      });
+    return () => { cancelled = true; };
+  }, [debouncedQuery, contentType, selectedGroup, searchChannelsFn]);
+
+  const totalRows = Math.ceil(channels.length / COLUMN_COUNT);
+
+  // Compute visible row range (TV only)
   const startRow = MOBILE ? 0 : Math.max(0, Math.floor(scrollOffset / ROW_HEIGHT) - BUFFER);
   const endRow = MOBILE ? totalRows - 1 : Math.min(totalRows - 1, Math.ceil((scrollOffset + CONTAINER_HEIGHT) / ROW_HEIGHT) + BUFFER);
 
-  // Prefetch images for rows about to come into view
+  // Prefetch images for upcoming rows
   useEffect(() => {
-    if (MOBILE) return; // mobile renders all, no prefetch needed
+    if (MOBILE) return;
     const prefetchStart = endRow + 1;
     const prefetchEnd = Math.min(totalRows - 1, endRow + PREFETCH_ROWS);
     if (prefetchStart > prefetchEnd) return;
-
     const urls: string[] = [];
     for (let row = prefetchStart; row <= prefetchEnd; row++) {
       for (let col = 0; col < COLUMN_COUNT; col++) {
         const idx = row * COLUMN_COUNT + col;
-        if (idx < displayChannels.length && displayChannels[idx].logo) {
-          urls.push(displayChannels[idx].logo);
+        if (idx < channels.length && channels[idx].logo) {
+          urls.push(channels[idx].logo);
         }
       }
     }
-    if (urls.length > 0) {
-      prefetchImages(urls);
-    }
-  }, [endRow, totalRows, displayChannels]);
+    if (urls.length > 0) prefetchImages(urls);
+  }, [endRow, totalRows, channels]);
 
-  // Focus the card at focusIndex after render (TV remote navigation)
+  // Focus the card at focusIndex after render (TV)
   useEffect(() => {
-    if (MOBILE) return;
-    if (focusOnSearch.current) return;
+    if (MOBILE || focusZone !== 'grid') return;
     requestAnimationFrame(() => {
       const grid = gridRef.current;
       if (!grid) return;
@@ -80,34 +321,66 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
       el?.focus({ preventScroll: true });
       markKeyRendered();
     });
-  }, [focusIndex, startRow, endRow, channels.length]);
+  }, [focusIndex, startRow, endRow, channels.length, focusZone]);
 
   const handleSelect = useCallback(
     (channel: Channel) => {
+      // Series containers have no URL — open series detail instead
+      if (channel.contentType === 'series' && !channel.url) {
+        navigateToSeries(channel);
+        return;
+      }
       setChannel(channel);
       navigate('player');
     },
-    [setChannel, navigate]
+    [setChannel, navigate, navigateToSeries]
   );
 
   const handleLoadMore = useCallback(async () => {
+    if (loadingMore || !nextCursor) return;
     setLoadingMore(true);
-    await fetchMoreChannels();
+    try {
+      const group = selectedGroup && selectedGroup !== 'All' ? selectedGroup : undefined;
+      const data = await apiBrowse(contentType, group, PAGE_SIZE, nextCursor);
+      setChannels(prev => [...prev, ...data.channels]);
+      setTotalCount(data.total);
+      setNextCursor(data.nextCursor);
+    } catch { /* ignore */ }
     setLoadingMore(false);
-  }, [fetchMoreChannels]);
+  }, [loadingMore, nextCursor, selectedGroup, contentType]);
 
+  const handleGroupSelect = useCallback((groupName: string) => {
+    setSelectedGroup(groupName);
+    setSearchQuery('');
+    setDebouncedQuery('');
+  }, []);
+
+  const handleSearchChange = useCallback((value: string) => {
+    setSearchQuery(value);
+    if (value.trim()) setIsSearching(true);
+    else setIsSearching(false);
+    setFocusIndex(0);
+    setScrollOffset(0);
+    setFocusZone('search');
+  }, []);
+
+  // TV keyboard navigation across zones: search, filter button, grid
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (MOBILE) return; // Mobile uses touch, not key navigation
-    const isOnSearch = document.activeElement === searchRef.current;
-    const count = displayChannels.length;
-
+    if (MOBILE) return;
     markKeyDown();
+    const count = channels.length;
 
     if (e.keyCode === KEY_CODES.DOWN) {
       e.preventDefault();
-      if (isOnSearch) {
+      if (focusZone === 'search') {
+        setFocusZone('filter');
+        requestAnimationFrame(() => {
+          const trigger = document.querySelector('.filter-dropdown__trigger') as HTMLElement | null;
+          trigger?.focus();
+        });
+      } else if (focusZone === 'filter') {
         if (count > 0) {
-          focusOnSearch.current = false;
+          setFocusZone('grid');
           setFocusIndex(0);
           setScrollOffset(0);
         }
@@ -121,106 +394,133 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
       }
     } else if (e.keyCode === KEY_CODES.UP) {
       e.preventDefault();
-      if (isOnSearch) return;
-      if (focusIndex - COLUMN_COUNT >= 0) {
-        const prev = focusIndex - COLUMN_COUNT;
-        setFocusIndex(prev);
-        const prevTop = Math.floor(prev / COLUMN_COUNT) * ROW_HEIGHT;
-        if (prevTop < scrollOffset) {
-          setScrollOffset(prevTop);
+      if (focusZone === 'grid') {
+        if (focusIndex - COLUMN_COUNT >= 0) {
+          const prev = focusIndex - COLUMN_COUNT;
+          setFocusIndex(prev);
+          const prevTop = Math.floor(prev / COLUMN_COUNT) * ROW_HEIGHT;
+          if (prevTop < scrollOffset) {
+            setScrollOffset(prevTop);
+          }
+        } else {
+          setFocusZone('filter');
+          requestAnimationFrame(() => {
+            const trigger = document.querySelector('.filter-dropdown__trigger') as HTMLElement | null;
+            trigger?.focus();
+          });
         }
-      } else {
-        focusOnSearch.current = true;
-        setFocusIndex(0);
+      } else if (focusZone === 'filter') {
+        setFocusZone('search');
         searchRef.current?.focus({ preventScroll: true });
       }
     } else if (e.keyCode === KEY_CODES.RIGHT) {
-      if (isOnSearch) return;
-      e.preventDefault();
+      if (focusZone === 'search' || focusZone === 'filter') return;
       if (focusIndex % COLUMN_COUNT < COLUMN_COUNT - 1 && focusIndex + 1 < count) {
+        e.preventDefault();
         setFocusIndex(focusIndex + 1);
       }
     } else if (e.keyCode === KEY_CODES.LEFT) {
-      if (isOnSearch) return;
+      if (focusZone === 'search' || focusZone === 'filter') return;
       if (focusIndex % COLUMN_COUNT > 0) {
         e.preventDefault();
         setFocusIndex(focusIndex - 1);
       }
     } else if (e.keyCode === KEY_CODES.ENTER) {
-      if (isOnSearch) return;
+      if (focusZone === 'search' || focusZone === 'filter') return;
       e.preventDefault();
       if (focusIndex >= 0 && focusIndex < count) {
-        handleSelect(displayChannels[focusIndex]);
+        handleSelect(channels[focusIndex]);
       }
     }
-  }, [focusIndex, displayChannels, scrollOffset, handleSelect]);
+  }, [focusZone, focusIndex, channels, scrollOffset, handleSelect]);
 
-  const handleSearchChange = useCallback((value: string) => {
-    setSearchQuery(value);
-    setFocusIndex(0);
-    setScrollOffset(0);
-    focusOnSearch.current = true;
+  // Auto-focus search on mount
+  useEffect(() => {
+    if (!MOBILE) {
+      requestAnimationFrame(() => searchRef.current?.focus({ preventScroll: true }));
+    }
   }, []);
+
+  const label = contentType === 'livetv' ? 'Live TV' : contentType === 'movies' ? 'Movies' : 'Series';
+
+  const showingSearch = !!debouncedQuery.trim();
+  const countText = initialLoading
+    ? 'Loading...'
+    : showingSearch
+      ? `${channels.length} result${channels.length !== 1 ? 's' : ''}${isSearching ? ' (searching...)' : ''}`
+      : `${channels.length} of ${totalCount} item${totalCount !== 1 ? 's' : ''}`;
+
+  const emptyMessage = initialLoading
+    ? 'Loading...'
+    : isSearching
+      ? 'Searching...'
+      : searchQuery
+        ? 'No matches found.'
+        : totalCount === 0 && (!selectedGroup || selectedGroup === 'All')
+          ? 'Select a category to browse.'
+          : 'No items in this category yet.';
+
+  const remaining = totalCount - channels.length;
 
   // Mobile: simple CSS grid, no virtualization
   if (MOBILE) {
     return (
       <div className="channel-list">
-        <h1 className="channel-list__title">{groupName}</h1>
-        <div className="channel-list__search">
-          <input
-            ref={searchRef}
-            className="channel-list__search-input"
-            type="text"
-            placeholder={`Search in ${groupName}...`}
-            value={searchQuery}
-            onChange={(e) => handleSearchChange(e.target.value)}
-          />
-          {searchQuery && (
-            <button className="channel-list__search-clear" onClick={() => handleSearchChange('')}>
-              X
-            </button>
-          )}
-        </div>
-        <div className="channel-list__count">
-          {displayChannels.length}{channelTotal > displayChannels.length ? ` of ${channelTotal}` : ''} item{displayChannels.length !== 1 ? 's' : ''}
+        <div className="channel-list__sticky-header">
+          <h1 className="channel-list__title">{label}</h1>
+          <div className="channel-list__search-row">
+            <div className="channel-list__search">
+              <input
+                ref={searchRef}
+                className="channel-list__search-input"
+                type="text"
+                placeholder={`Search ${label.toLowerCase()}...`}
+                value={searchQuery}
+                onChange={(e) => handleSearchChange(e.target.value)}
+              />
+              {searchQuery && (
+                <button className="channel-list__search-clear" onClick={() => handleSearchChange('')}>
+                  X
+                </button>
+              )}
+            </div>
+            <FilterDropdown
+              categories={categories}
+              selectedGroup={selectedGroup}
+              onSelect={handleGroupSelect}
+            />
+          </div>
+          <div className="channel-list__count">{countText}</div>
         </div>
         <div className="channel-list__grid channel-list__grid--mobile" ref={gridRef}>
-          {displayChannels.length === 0 ? (
-            <div className="channel-list__empty">
-              {searchQuery ? 'No matches found.' : 'Loading...'}
-            </div>
+          {channels.length === 0 ? (
+            <div className="channel-list__empty">{emptyMessage}</div>
           ) : (
-            displayChannels.map((ch, idx) => (
-              <ChannelCard
-                key={ch.id}
-                channel={ch}
-                onSelect={handleSelect}
-                vindex={idx}
-              />
+            channels.map((ch, idx) => (
+              <ChannelCard key={ch.id} channel={ch} onSelect={handleSelect} vindex={idx} />
             ))
           )}
         </div>
-        {hasMore && !searchQuery && (
+        {nextCursor && !showingSearch && (
           <button className="channel-list__load-more" onClick={handleLoadMore} disabled={loadingMore}>
-            {loadingMore ? 'Loading...' : `Load more (${channelTotal - displayChannels.length} remaining)`}
+            {loadingMore ? 'Loading...' : `Load more (${remaining} remaining)`}
           </button>
         )}
       </div>
     );
   }
 
-  // TV: virtualized grid with absolute positioning
+  // TV: virtualized grid
   const rows = [];
   for (let row = startRow; row <= endRow; row++) {
     const items = [];
     for (let col = 0; col < COLUMN_COUNT; col++) {
       const idx = row * COLUMN_COUNT + col;
-      if (idx < displayChannels.length) {
+      if (idx < channels.length) {
         items.push(
           <ChannelCard
-            key={displayChannels[idx].id}
-            channel={displayChannels[idx]}
+            key={channels[idx].id}
+            channel={channels[idx]}
             onSelect={handleSelect}
             vindex={idx}
           />
@@ -240,7 +540,7 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
           height: ROW_HEIGHT,
           display: 'grid',
           gridTemplateColumns: `repeat(${COLUMN_COUNT}, 1fr)`,
-          gap: '16px',
+          gap: '14px',
           alignContent: 'start',
           contain: 'strict',
         }}
@@ -252,47 +552,47 @@ export default function ChannelList({ channels, groupName }: ChannelListProps) {
 
   return (
     <div className="channel-list" onKeyDown={handleKeyDown}>
-      <h1 className="channel-list__title">{groupName}</h1>
-      <div className="channel-list__search">
-        <input
-          ref={searchRef}
-          className="channel-list__search-input"
-          type="text"
-          placeholder={`Search in ${groupName}...`}
-          value={searchQuery}
-          onChange={(e) => handleSearchChange(e.target.value)}
-          tabIndex={0}
+      <h1 className="channel-list__title">{label}</h1>
+      <div className="channel-list__search-row">
+        <div className="channel-list__search">
+          <input
+            ref={searchRef}
+            className="channel-list__search-input"
+            type="text"
+            placeholder={`Search ${label.toLowerCase()}...`}
+            value={searchQuery}
+            onChange={(e) => handleSearchChange(e.target.value)}
+            tabIndex={0}
+          />
+          {searchQuery && (
+            <button
+              className="channel-list__search-clear"
+              onClick={() => handleSearchChange('')}
+              tabIndex={-1}
+            >
+              X
+            </button>
+          )}
+        </div>
+        <FilterDropdown
+          categories={categories}
+          selectedGroup={selectedGroup}
+          onSelect={handleGroupSelect}
         />
-        {searchQuery && (
-          <button
-            className="channel-list__search-clear"
-            onClick={() => handleSearchChange('')}
-            tabIndex={-1}
-          >
-            X
-          </button>
-        )}
       </div>
-      <div className="channel-list__count">
-        {displayChannels.length}{channelTotal > displayChannels.length ? ` of ${channelTotal}` : ''} item{displayChannels.length !== 1 ? 's' : ''}
-      </div>
-      <div
-        className="channel-list__grid"
-        ref={gridRef}
-      >
-        {displayChannels.length === 0 ? (
-          <div className="channel-list__empty">
-            {searchQuery ? 'No matches found.' : 'Loading...'}
-          </div>
+      <div className="channel-list__count">{countText}</div>
+      <div className="channel-list__grid" ref={gridRef}>
+        {channels.length === 0 ? (
+          <div className="channel-list__empty">{emptyMessage}</div>
         ) : (
           <div style={{ height: totalRows * ROW_HEIGHT, position: 'relative' }}>
             {rows}
           </div>
         )}
       </div>
-      {hasMore && !searchQuery && (
+      {nextCursor && !showingSearch && (
         <button className="channel-list__load-more" onClick={handleLoadMore} disabled={loadingMore}>
-          {loadingMore ? 'Loading...' : `Load more (${channelTotal - displayChannels.length} remaining)`}
+          {loadingMore ? 'Loading...' : `Load more (${remaining} remaining)`}
         </button>
       )}
     </div>

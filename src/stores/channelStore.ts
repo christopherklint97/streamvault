@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Channel, Program, Category } from '../types';
+import type { Channel, Program, Category, SeriesInfo } from '../types';
 import { getItem, setItem } from '../utils/storage';
 
 export type InputMode = 'xtream' | 'manual';
@@ -38,6 +38,9 @@ interface ChannelState {
   nextCursor: { sort: number; name: string } | null;
   syncInterval: SyncInterval;
   lastSyncTime: number;
+  isCrawling: boolean;
+  crawlProgress: string;
+  lastCrawlTime: number;
   apiBaseUrl: string;
   _hydrated: boolean;
 }
@@ -75,11 +78,14 @@ interface ChannelActions {
   fetchMoreChannels: () => Promise<void>;
   fetchPrograms: () => Promise<void>;
   fetchEpgForStream: (streamId: number) => Promise<Program[]>;
-  searchChannels: (query: string, contentType?: string) => Promise<Channel[]>;
+  searchChannels: (query: string, contentType?: string, group?: string) => Promise<Channel[]>;
+  fetchSeriesInfo: (seriesId: number) => Promise<SeriesInfo | null>;
   fetchConfig: () => Promise<void>;
   saveConfig: (config: Record<string, string>) => Promise<void>;
   triggerSync: () => Promise<void>;
   cancelSync: () => void;
+  triggerCrawl: () => Promise<void>;
+  cancelCrawl: () => void;
   pollStatus: () => Promise<void>;
   setSelectedGroup: (group: string) => void;
   setSelectedRegion: (region: string) => void;
@@ -129,6 +135,9 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
   nextCursor: null,
   syncInterval: '24h',
   lastSyncTime: 0,
+  isCrawling: false,
+  crawlProgress: '',
+  lastCrawlTime: 0,
   apiBaseUrl: SAME_ORIGIN ? '' : getItem<string>(API_BASE_URL_KEY, DEFAULT_SERVER_URL),
   _hydrated: false,
 
@@ -274,16 +283,28 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     }
   },
 
-  searchChannels: async (query: string, contentType?: string) => {
+  searchChannels: async (query: string, contentType?: string, group?: string) => {
     const { apiBaseUrl } = get();
-    if (!apiBaseUrl || !query.trim()) return [];
+    if (!hasApi(apiBaseUrl) || !query.trim()) return [];
     try {
       const params = new URLSearchParams({ q: query });
       if (contentType) params.set('type', contentType);
+      if (group) params.set('group', group);
       const data = await apiFetch(apiBaseUrl, `/api/search?${params}`);
       return data.channels as Channel[];
     } catch {
       return [];
+    }
+  },
+
+  fetchSeriesInfo: async (seriesId: number) => {
+    const { apiBaseUrl } = get();
+    if (!hasApi(apiBaseUrl)) return null;
+    try {
+      const data = await apiFetch(apiBaseUrl, `/api/series/${seriesId}`);
+      return data as SeriesInfo;
+    } catch {
+      return null;
     }
   },
 
@@ -372,6 +393,25 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     set({ isLoading: false, loadingPhase: 'idle', loadingMessage: 'Sync cancelled' });
   },
 
+  triggerCrawl: async () => {
+    const { apiBaseUrl } = get();
+    if (!hasApi(apiBaseUrl)) return;
+    set({ isCrawling: true, crawlProgress: 'Starting crawl...' });
+    try {
+      await apiFetch(apiBaseUrl, '/api/crawl', { method: 'POST' });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to start crawl';
+      set({ isCrawling: false, crawlProgress: msg });
+    }
+  },
+
+  cancelCrawl: () => {
+    const { apiBaseUrl } = get();
+    if (!hasApi(apiBaseUrl)) return;
+    apiFetch(apiBaseUrl, '/api/crawl/cancel', { method: 'POST' }).catch(() => {});
+    set({ isCrawling: false, crawlProgress: 'Crawl cancelled' });
+  },
+
   pollStatus: async () => {
     const { apiBaseUrl } = get();
     if (!hasApi(apiBaseUrl)) return;
@@ -383,6 +423,9 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
         channelCount: status.channelCount,
         lastSyncTime: status.lastSyncTime,
         isLoading: status.isSyncing,
+        isCrawling: status.isCrawling,
+        crawlProgress: status.crawlProgress || '',
+        lastCrawlTime: status.lastCrawlTime || 0,
       });
 
       if (!status.isSyncing) {
@@ -412,10 +455,9 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
       return;
     }
     try {
-      // Fetch config, channels, and programs in parallel
+      // Fetch config and programs (NOT all channels — ChannelList loads on demand)
       await Promise.all([
         get().fetchConfig(),
-        get().fetchChannels(),
         get().fetchPrograms(),
       ]);
 
@@ -436,7 +478,24 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
         };
         schedulePoll();
       }
-      set({ lastSyncTime: status.lastSyncTime, _hydrated: true });
+      set({
+        lastSyncTime: status.lastSyncTime,
+        isCrawling: status.isCrawling,
+        crawlProgress: status.crawlProgress || '',
+        lastCrawlTime: status.lastCrawlTime || 0,
+        _hydrated: true,
+      });
+
+      // If crawling, poll for progress
+      if (status.isCrawling) {
+        const pollCrawl = () => {
+          pollInterval = setTimeout(async () => {
+            await get().pollStatus();
+            if (get().isCrawling) pollCrawl();
+          }, 5000);
+        };
+        pollCrawl();
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Cannot connect to server';
       set({ error: msg, _hydrated: true });

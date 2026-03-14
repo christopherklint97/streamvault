@@ -36,6 +36,73 @@ interface XtreamSeries {
   category_id: string;
 }
 
+// ---------- Series info types ----------
+
+interface XtreamSeriesInfo {
+  seasons: Array<{
+    air_date: string;
+    episode_count: number;
+    id: number;
+    name: string;
+    overview: string;
+    season_number: number;
+    cover: string;
+  }>;
+  episodes: Record<string, Array<{
+    id: string;
+    episode_num: number;
+    title: string;
+    container_extension: string;
+    season: number;
+    info: {
+      duration?: string;
+      plot?: string;
+      movie_image?: string;
+      rating?: number;
+      name?: string;
+    };
+  }>>;
+  info: {
+    name: string;
+    cover: string;
+    plot: string;
+    genre: string;
+    release_date: string;
+    rating: string;
+    cast: string;
+    director: string;
+  };
+}
+
+export interface SeriesInfoResult {
+  name: string;
+  cover: string;
+  plot: string;
+  genre: string;
+  releaseDate: string;
+  rating: string;
+  cast: string;
+  director: string;
+  seasons: Array<{
+    seasonNumber: number;
+    name: string;
+    episodeCount: number;
+    cover: string;
+  }>;
+  episodes: Record<number, Array<{
+    id: string;
+    episodeNum: number;
+    title: string;
+    season: number;
+    url: string;
+    containerExtension: string;
+    duration: string;
+    plot: string;
+    image: string;
+    rating: number;
+  }>>;
+}
+
 interface XtreamEpgEntry {
   id: string;
   epg_id: string;
@@ -66,19 +133,26 @@ function apiUrl(config: XtreamConfig, action?: string): string {
   return action ? `${url}&action=${action}` : url;
 }
 
-function streamUrl(config: XtreamConfig, streamId: number, type: 'live' | 'movie' | 'series', ext?: string): string {
+function streamUrl(config: XtreamConfig, streamId: number, type: 'live' | 'movie' | 'series', extension?: string): string {
   let base = config.server.trim();
   if (base.endsWith('/')) base = base.slice(0, -1);
   const u = encodeURIComponent(config.username);
   const p = encodeURIComponent(config.password);
   if (type === 'live') return `${base}/${u}/${p}/${streamId}`;
-  return `${base}/${type}/${u}/${p}/${streamId}${ext ? '.' + ext : ''}`;
+  // Include container extension for VOD — most providers require it
+  const ext = extension ? `.${extension}` : '';
+  return `${base}/${type}/${u}/${p}/${streamId}${ext}`;
 }
+
+const VLC_HEADERS = {
+  'User-Agent': 'VLC/3.0.20 LibVLC/3.0.20',
+  'Accept': '*/*',
+};
 
 async function fetchJson<T>(url: string, signal: AbortSignal, label: string): Promise<T> {
   logger.debug(`Fetching ${label}`);
   const start = Date.now();
-  const response = await fetch(url, { signal });
+  const response = await fetch(url, { signal, headers: VLC_HEADERS });
   if (!response.ok) {
     throw new Error(`${label}: HTTP ${response.status} ${response.statusText}`);
   }
@@ -148,6 +222,7 @@ export async function fetchXtreamStreamsByCategory(
   config: XtreamConfig,
   categoryId: string,
   categoryName: string,
+  timeoutMs = 180_000,
 ): Promise<DBChannel[]> {
   const parsed = parseCategoryId(categoryId);
   if (!parsed) throw new Error(`Invalid category ID: ${categoryId}`);
@@ -158,7 +233,7 @@ export async function fetchXtreamStreamsByCategory(
   if (type === 'live') {
     const streams = await fetchJson<XtreamLiveStream[]>(
       apiUrl(config, `get_live_streams&category_id=${rawId}`),
-      AbortSignal.timeout(60_000),
+      AbortSignal.timeout(timeoutMs),
       `live streams cat ${rawId}`,
     );
     for (const s of streams) {
@@ -177,7 +252,7 @@ export async function fetchXtreamStreamsByCategory(
   } else if (type === 'vod') {
     const streams = await fetchJson<XtreamVodStream[]>(
       apiUrl(config, `get_vod_streams&category_id=${rawId}`),
-      AbortSignal.timeout(60_000),
+      AbortSignal.timeout(timeoutMs),
       `vod streams cat ${rawId}`,
     );
     for (const s of streams) {
@@ -196,7 +271,7 @@ export async function fetchXtreamStreamsByCategory(
   } else {
     const series = await fetchJson<XtreamSeries[]>(
       apiUrl(config, `get_series&category_id=${rawId}`),
-      AbortSignal.timeout(60_000),
+      AbortSignal.timeout(timeoutMs),
       `series cat ${rawId}`,
     );
     for (const s of series) {
@@ -218,29 +293,134 @@ export async function fetchXtreamStreamsByCategory(
   return channels;
 }
 
-// ---------- Fetch all categories' streams (iterates per-category, caches each) ----------
+// ---------- Fetch all categories' streams with controlled parallelism ----------
+
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export async function fetchAllCategoryStreams(
   config: XtreamConfig,
   categories: Array<{ id: string; name: string }>,
   onCategoryDone: (categoryId: string, channels: DBChannel[]) => void,
+  concurrency = 2,
+  signal?: AbortSignal,
 ): Promise<number> {
   let totalFetched = 0;
+  let completed = 0;
+  let consecutiveErrors = 0;
+  const total = categories.length;
+  const queue = [...categories];
+  const retryQueue: Array<{ id: string; name: string }> = [];
+  const MAX_RETRIES = 2;
 
-  for (const cat of categories) {
-    try {
-      const channels = await fetchXtreamStreamsByCategory(config, cat.id, cat.name);
-      onCategoryDone(cat.id, channels);
-      totalFetched += channels.length;
-      logger.debug(`Cached ${channels.length} streams for "${cat.name}"`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Unknown error';
-      logger.warn(`Failed to fetch category "${cat.name}": ${msg}`);
+  async function processQueue(q: Array<{ id: string; name: string }>, isRetry: boolean): Promise<void> {
+    const timeout = isRetry ? 360_000 : 180_000; // 6min on retry, 3min on first pass
+    async function worker(): Promise<void> {
+      while (q.length > 0) {
+        if (signal?.aborted) return;
+        const cat = q.shift()!;
+        try {
+          const channels = await fetchXtreamStreamsByCategory(config, cat.id, cat.name, timeout);
+          onCategoryDone(cat.id, channels);
+          totalFetched += channels.length;
+          completed++;
+          consecutiveErrors = 0;
+          if (completed % 20 === 0 || completed === total) {
+            logger.info(`Stream crawl progress: ${completed}/${total} categories, ${totalFetched} streams`);
+          }
+        } catch (err) {
+          completed++;
+          consecutiveErrors++;
+          const msg = err instanceof Error ? err.message : 'Unknown error';
+          logger.warn(`Failed to fetch category "${cat.name}": ${msg}`);
+          if (!isRetry) {
+            retryQueue.push(cat);
+          }
+          if (consecutiveErrors >= 3) {
+            const backoff = Math.min(consecutiveErrors * 2000, 15000);
+            logger.info(`Backing off ${backoff / 1000}s after ${consecutiveErrors} consecutive errors`);
+            await delay(backoff);
+          }
+        }
+        await delay(isRetry ? 2000 : 500);
+      }
     }
+
+    const workerCount = isRetry ? 1 : Math.min(concurrency, q.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
   }
 
-  logger.info(`Fetched all categories: ${totalFetched} total streams from ${categories.length} categories`);
+  // Main pass
+  await processQueue(queue, false);
+
+  // Retry failed categories (up to MAX_RETRIES passes, single worker, slower pace)
+  for (let attempt = 1; attempt <= MAX_RETRIES && retryQueue.length > 0; attempt++) {
+    if (signal?.aborted) break;
+    const toRetry = retryQueue.splice(0);
+    logger.info(`Retry pass ${attempt}: ${toRetry.length} failed categories (waiting 10s before starting)`);
+    await delay(10_000);
+    await processQueue(toRetry, true);
+  }
+
+  if (retryQueue.length > 0) {
+    logger.warn(`${retryQueue.length} categories still failed after ${MAX_RETRIES} retries: ${retryQueue.map(c => c.name).join(', ')}`);
+  }
+
+  logger.info(`Stream crawl complete: ${totalFetched} streams from ${total} categories`);
   return totalFetched;
+}
+
+// ---------- On-demand: series info ----------
+
+export async function fetchXtreamSeriesInfo(
+  config: XtreamConfig,
+  seriesId: number,
+): Promise<SeriesInfoResult> {
+  const data = await fetchJson<XtreamSeriesInfo>(
+    apiUrl(config, `get_series_info&series_id=${seriesId}`),
+    AbortSignal.timeout(30_000),
+    `series info ${seriesId}`,
+  );
+
+  const info = data.info || {} as XtreamSeriesInfo['info'];
+
+  const seasons = (data.seasons || [])
+    .map(s => ({
+      seasonNumber: s.season_number,
+      name: s.name || `Season ${s.season_number}`,
+      episodeCount: s.episode_count || 0,
+      cover: s.cover || '',
+    }))
+    .sort((a, b) => a.seasonNumber - b.seasonNumber);
+
+  const episodes: SeriesInfoResult['episodes'] = {};
+  for (const [seasonNum, eps] of Object.entries(data.episodes || {})) {
+    const sn = parseInt(seasonNum, 10);
+    episodes[sn] = (eps || []).map(ep => ({
+      id: ep.id,
+      episodeNum: ep.episode_num,
+      title: ep.title || ep.info?.name || `Episode ${ep.episode_num}`,
+      season: ep.season || sn,
+      url: streamUrl(config, parseInt(ep.id, 10), 'series', ep.container_extension),
+      containerExtension: ep.container_extension || '',
+      duration: ep.info?.duration || '',
+      plot: ep.info?.plot || '',
+      image: ep.info?.movie_image || '',
+      rating: ep.info?.rating || 0,
+    })).sort((a, b) => a.episodeNum - b.episodeNum);
+  }
+
+  return {
+    name: info.name || '',
+    cover: info.cover || '',
+    plot: info.plot || '',
+    genre: info.genre || '',
+    releaseDate: info.release_date || '',
+    rating: info.rating || '',
+    cast: info.cast || '',
+    director: info.director || '',
+    seasons,
+    episodes,
+  };
 }
 
 // ---------- On-demand: short EPG for specific streams ----------

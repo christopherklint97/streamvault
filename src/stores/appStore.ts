@@ -1,10 +1,11 @@
 import { create } from 'zustand';
-import type { View } from '../types';
+import type { View, Channel } from '../types';
 
 interface AppState {
   currentView: View;
   previousView: View | null;
   selectedGroup: string | null;
+  selectedSeries: Channel | null;
   showExitDialog: boolean;
   showToast: boolean;
   toastMessage: string;
@@ -12,6 +13,7 @@ interface AppState {
 
 interface AppActions {
   navigate: (view: View) => void;
+  navigateToSeries: (series: Channel) => void;
   goBack: () => void;
   selectGroup: (group: string) => void;
   clearGroup: () => void;
@@ -22,16 +24,23 @@ interface AppActions {
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
+/** Push a browser history entry so the back button triggers popstate */
+function pushState(view: View, group?: string | null) {
+  history.pushState({ view, group: group || null }, '');
+}
+
 export const useAppStore = create<AppState & AppActions>()((set, get) => ({
   currentView: 'home',
   previousView: null,
   selectedGroup: null,
+  selectedSeries: null,
   showExitDialog: false,
   showToast: false,
   toastMessage: '',
 
   navigate: (view: View) => {
     const { currentView } = get();
+    pushState(view);
     set({
       previousView: currentView,
       currentView: view,
@@ -40,7 +49,19 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
     });
   },
 
+  navigateToSeries: (series: Channel) => {
+    const { currentView } = get();
+    pushState('seriesDetail');
+    set({
+      previousView: currentView,
+      currentView: 'seriesDetail',
+      selectedSeries: series,
+      showExitDialog: false,
+    });
+  },
+
   selectGroup: (group: string) => {
+    pushState(get().currentView, group);
     set({ selectedGroup: group });
   },
 
@@ -51,11 +72,12 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
   goBack: () => {
     const { currentView, previousView, selectedGroup } = get();
 
-    // From player, go back to previous view
-    if (currentView === 'player' && previousView) {
+    // From player or seriesDetail, go back to previous view
+    if ((currentView === 'player' || currentView === 'seriesDetail') && previousView) {
       set({
         currentView: previousView,
         previousView: null,
+        selectedSeries: currentView === 'seriesDetail' ? null : get().selectedSeries,
         showExitDialog: false,
       });
       return;

@@ -53,8 +53,6 @@ function ChannelCardInner({ channel, onSelect, vindex }: ChannelCardProps) {
         img.style.display = 'none';
       };
       img.src = channel.logo;
-      img.width = 64;
-      img.height = 48;
       container.prepend(img);
     }
 

@@ -36,3 +36,10 @@ certs/
 
 # Device maps
 .sdb.devicemap
+
+# Server compiled output
+server/src/*.js
+server/tsconfig.tsbuildinfo
+
+# Screenshots
+Screenshot*.png

@@ -25,7 +25,6 @@ export function acquireImage(): HTMLImageElement {
   const el = document.createElement('img');
   el.decoding = 'async';
   el.loading = 'lazy';
-  el.className = 'channel-logo__img';
   return el;
 }
 

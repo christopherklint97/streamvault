@@ -19,7 +19,7 @@ export interface Program {
   category: string;
 }
 
-export type View = 'home' | 'channels' | 'movies' | 'series' | 'player' | 'settings';
+export type View = 'home' | 'channels' | 'movies' | 'series' | 'player' | 'settings' | 'seriesDetail';
 
 export interface Category {
   id: string;
@@ -33,6 +33,39 @@ export interface PlayerState {
   status: 'idle' | 'loading' | 'playing' | 'paused' | 'error';
   currentChannel: Channel | null;
   errorMessage: string;
+}
+
+export interface Episode {
+  id: string;
+  episodeNum: number;
+  title: string;
+  season: number;
+  url: string;
+  containerExtension: string;
+  duration: string;
+  plot: string;
+  image: string;
+  rating: number;
+}
+
+export interface SeasonInfo {
+  seasonNumber: number;
+  name: string;
+  episodeCount: number;
+  cover: string;
+}
+
+export interface SeriesInfo {
+  name: string;
+  cover: string;
+  plot: string;
+  genre: string;
+  releaseDate: string;
+  rating: string;
+  cast: string;
+  director: string;
+  seasons: SeasonInfo[];
+  episodes: Record<number, Episode[]>;
 }
 
 export interface WatchProgress {

@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useMemo, lazy, Suspense } from 'react';
+import { useEffect, useCallback, lazy, Suspense } from 'react';
 import { useAppStore } from './stores/appStore';
 import { useChannelStore } from './stores/channelStore';
 import { useRemoteKeys } from './hooks/useRemoteKeys';
@@ -10,16 +10,15 @@ import Sidebar from './components/Sidebar';
 import Toast from './components/Toast';
 import ExitDialog from './components/ExitDialog';
 import Player from './components/Player';
-import GroupList from './components/GroupList';
 import ChannelList from './components/ChannelList';
+import SeriesDetail from './components/SeriesDetail';
 import Home from './pages/Home';
 
 const Settings = lazy(() => import('./pages/Settings'));
 
 function AppContent() {
   const currentView = useAppStore((s) => s.currentView);
-  const selectedGroup = useAppStore((s) => s.selectedGroup);
-  const channels = useChannelStore((s) => s.channels);
+  const selectedSeries = useAppStore((s) => s.selectedSeries);
   const isLoading = useChannelStore((s) => s.isLoading);
   const loadingMessage = useChannelStore((s) => s.loadingMessage);
   const loadingPhase = useChannelStore((s) => s.loadingPhase);
@@ -28,6 +27,18 @@ function AppContent() {
   const { isOnline } = useNetworkStatus();
 
   useRemoteKeys();
+
+  // Browser back button support (mobile PWA)
+  useEffect(() => {
+    // Replace initial state so we have a baseline
+    history.replaceState({ view: 'home', group: null }, '');
+
+    const handlePopState = () => {
+      useAppStore.getState().goBack();
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   // Register Tizen remote keys, set initial focus, and start perf monitoring
   useEffect(() => {
@@ -72,33 +83,18 @@ function AppContent() {
     }
   }, []);
 
-  // Memoize filtered channels by content type — single filter pass, stable reference
-  const filteredChannels = useMemo(() => {
-    const typeMap: Record<string, string> = { channels: 'livetv', movies: 'movies', series: 'series' };
-    const type = typeMap[currentView];
-    if (!type) return channels;
-    return channels.filter(ch => ch.contentType === type);
-  }, [channels, currentView]);
-
   const renderView = () => {
     switch (currentView) {
       case 'home':
         return <Home />;
       case 'channels':
-        if (selectedGroup) {
-          return <ChannelList channels={filteredChannels} groupName={selectedGroup} />;
-        }
-        return <GroupList contentType="livetv" />;
+        return <ChannelList contentType="livetv" />;
       case 'movies':
-        if (selectedGroup) {
-          return <ChannelList channels={filteredChannels} groupName={selectedGroup} />;
-        }
-        return <GroupList contentType="movies" />;
+        return <ChannelList contentType="movies" />;
       case 'series':
-        if (selectedGroup) {
-          return <ChannelList channels={filteredChannels} groupName={selectedGroup} />;
-        }
-        return <GroupList contentType="series" />;
+        return <ChannelList contentType="series" />;
+      case 'seriesDetail':
+        return selectedSeries ? <SeriesDetail series={selectedSeries} /> : <ChannelList contentType="series" />;
       case 'player':
         return <Player />;
       case 'settings':

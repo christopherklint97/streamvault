@@ -44,11 +44,16 @@ export default function Settings() {
   const channelCount = useChannelStore((s) => s.channelCount);
   const syncInterval = useChannelStore((s) => s.syncInterval);
   const lastSyncTime = useChannelStore((s) => s.lastSyncTime);
+  const isCrawling = useChannelStore((s) => s.isCrawling);
+  const crawlProgress = useChannelStore((s) => s.crawlProgress);
+  const lastCrawlTime = useChannelStore((s) => s.lastCrawlTime);
   const apiBaseUrl = useChannelStore((s) => s.apiBaseUrl);
   const setApiBaseUrl = useChannelStore((s) => s.setApiBaseUrl);
   const saveConfig = useChannelStore((s) => s.saveConfig);
   const triggerSync = useChannelStore((s) => s.triggerSync);
   const cancelSync = useChannelStore((s) => s.cancelSync);
+  const triggerCrawl = useChannelStore((s) => s.triggerCrawl);
+  const cancelCrawl = useChannelStore((s) => s.cancelCrawl);
   const hydrate = useChannelStore((s) => s.hydrate);
   const showToastMessage = useAppStore((s) => s.showToastMessage);
 
@@ -126,28 +131,10 @@ export default function Settings() {
     showToastMessage('Recently watched cleared');
   }, [showToastMessage]);
 
-  const handleForceUpdate = useCallback(async () => {
-    // Try to update service worker if available
-    try {
-      const registration = await navigator.serviceWorker?.getRegistration();
-      if (registration) {
-        await registration.update();
-        if (registration.waiting) {
-          registration.waiting.postMessage({ type: 'SKIP_WAITING' });
-        }
-      }
-    } catch {
-      // Service worker not available (e.g. no HTTPS) — that's fine
-    }
-    // Clear any caches
-    try {
-      const cacheNames = await caches.keys();
-      await Promise.all(cacheNames.map(name => caches.delete(name)));
-    } catch {
-      // Cache API may not be available
-    }
+  const handleForceUpdate = useCallback(() => {
     showToastMessage('Reloading...');
-    setTimeout(() => window.location.reload(), 300);
+    // Hard reload bypassing any browser cache
+    setTimeout(() => window.location.replace(window.location.href), 300);
   }, [showToastMessage]);
 
   const handleSyncCycle = useCallback(async () => {
@@ -357,13 +344,35 @@ export default function Settings() {
             </button>
           </div>
 
-          {/* Info */}
+          {/* Stream Library */}
           <div className="settings__section">
-            <h2 className="settings__section-title">Info</h2>
+            <h2 className="settings__section-title">Stream Library</h2>
             <div className="settings__info-row">
-              <span className="settings__info-label">Channels loaded:</span>
-              <span className="settings__info-value">{channels.length}</span>
+              <span className="settings__info-label">Streams cached:</span>
+              <span className="settings__info-value">{channels.length.toLocaleString()}</span>
             </div>
+            <div className="settings__info-row">
+              <span className="settings__info-label">Last full crawl:</span>
+              <span className="settings__info-value">{formatSyncTime(lastCrawlTime)}</span>
+            </div>
+            {isCrawling && crawlProgress && (
+              <div className="settings__info-row">
+                <span className="settings__info-label">Progress:</span>
+                <span className="settings__info-value">{crawlProgress}</span>
+              </div>
+            )}
+            <p className="settings__hint">
+              Full crawl downloads all streams for instant search. Runs automatically at 3 AM daily.
+            </p>
+            {isCrawling ? (
+              <button className="settings__btn settings__btn--cancel" data-focusable tabIndex={0} onClick={cancelCrawl}>
+                Cancel Crawl
+              </button>
+            ) : (
+              <button className="settings__btn" data-focusable tabIndex={0} onClick={triggerCrawl}>
+                Crawl All Streams Now
+              </button>
+            )}
           </div>
 
           {/* Data Management */}

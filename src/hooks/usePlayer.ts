@@ -11,15 +11,23 @@ import { clientLogger as log } from '../utils/logger';
 const PROGRESS_SAVE_INTERVAL = 10_000; // Save progress every 10 seconds
 
 /** Build a proxied stream URL that goes through our server */
-function getStreamUrl(channelId: string): string {
+function getStreamUrl(channelId: string, directUrl?: string): string {
   const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
-  return `${apiBaseUrl}/api/stream/${encodeURIComponent(channelId)}`;
+  let url = `${apiBaseUrl}/api/stream/${encodeURIComponent(channelId)}`;
+  // For episodes not in DB, pass URL and type as query params
+  if (directUrl && channelId.startsWith('episode_')) {
+    url += `?url=${encodeURIComponent(directUrl)}&type=series`;
+  }
+  return url;
 }
 
 export function usePlayer(): {
   play: () => void;
   stop: () => void;
   retry: () => void;
+  togglePlay: () => void;
+  seek: (time: number) => void;
+  getVideoElement: () => HTMLVideoElement | null;
   playerState: PlayerState;
   subtitleTracks: SubtitleTrack[];
   currentSubtitleIndex: number;
@@ -28,6 +36,7 @@ export function usePlayer(): {
 } {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const mpegtsRef = useRef<MpegtsType.Player | null>(null);
+  const bufferTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const store = usePlayerStore();
   const [subtitleTracks, setSubtitleTracks] = useState<SubtitleTrack[]>([]);
   const [currentSubtitleIndex, setCurrentSubtitleIndex] = useState(-1);
@@ -188,8 +197,17 @@ export function usePlayer(): {
             setError('Playback blocked — tap to retry');
           });
         };
-        video.onwaiting = () => { log.debug('HTML5 event: waiting'); setStatus('loading'); };
-        video.onplaying = () => { log.info('HTML5 event: playing'); setStatus('playing'); };
+        video.onwaiting = () => {
+          log.debug('HTML5 event: waiting');
+          // Delay showing loading spinner to avoid flashing during brief rebuffers
+          if (bufferTimerRef.current) clearTimeout(bufferTimerRef.current);
+          bufferTimerRef.current = setTimeout(() => setStatus('loading'), 1500);
+        };
+        video.onplaying = () => {
+          log.info('HTML5 event: playing');
+          if (bufferTimerRef.current) { clearTimeout(bufferTimerRef.current); bufferTimerRef.current = null; }
+          setStatus('playing');
+        };
         video.onstalled = () => log.warn('HTML5 event: stalled');
         video.onsuspend = () => log.debug('HTML5 event: suspend');
         video.onerror = () => {
@@ -214,11 +232,10 @@ export function usePlayer(): {
         });
       };
 
-      // Use the server proxy for stream playback (handles redirects + auth)
-      const playUrl = getStreamUrl(channel.id);
-      log.info(`HTML5: playUrl=${playUrl}, contentType=${channel.contentType}`);
-
       const isLiveTs = channel.contentType === 'livetv';
+      // All streams go through proxy (handles redirects, VLC UA, CDN tokens)
+      const playUrl = getStreamUrl(channel.id, channel.url);
+      log.info(`HTML5: playUrl=${playUrl}, contentType=${channel.contentType}`);
 
       if (isLiveTs) {
         // Live TV: MPEG-TS stream — use mpegts.js to demux in browser
@@ -238,10 +255,13 @@ export function usePlayer(): {
           }, {
             enableWorker: false,
             enableStashBuffer: true,
-            stashInitialSize: 128 * 1024,
+            stashInitialSize: 512 * 1024,    // 512KB initial buffer for smooth start
+            autoCleanupSourceBuffer: true,
+            autoCleanupMaxBackwardDuration: 30,
+            autoCleanupMinBackwardDuration: 15,
             liveBufferLatencyChasing: true,
-            liveBufferLatencyMaxLatency: 5,
-            liveBufferLatencyMinRemain: 1,
+            liveBufferLatencyMaxLatency: 10,  // Allow up to 10s behind live
+            liveBufferLatencyMinRemain: 2,    // Keep at least 2s buffered
           });
           mpegtsRef.current = player;
 
@@ -273,7 +293,7 @@ export function usePlayer(): {
           }
         }).catch((e) => { log.error('HTML5: failed to import mpegts.js', e); setError('Failed to load live TV player'); });
       } else {
-        // VOD (MP4, etc) — direct playback via proxy, canplay event triggers play()
+        // VOD (MP4, etc) — direct URL (no proxy needed, browser handles it)
         log.info(`HTML5: direct video playback, setting src=${playUrl}`);
         setupEvents();
         video.src = playUrl;
@@ -287,6 +307,7 @@ export function usePlayer(): {
     const setStatus = usePlayerStore.getState().setStatus;
 
     stopProgressTracking();
+    if (bufferTimerRef.current) { clearTimeout(bufferTimerRef.current); bufferTimerRef.current = null; }
 
     if (mpegtsRef.current) {
       log.info('Destroying mpegts.js player');
@@ -335,6 +356,32 @@ export function usePlayer(): {
     playerRef.current?.setSubtitleTrack(nextIndex);
   }, [subtitleTracks, currentSubtitleIndex]);
 
+  const togglePlay = useCallback(() => {
+    if (typeof webapis !== 'undefined' && webapis.avplay) {
+      try {
+        const state = webapis.avplay.getState();
+        if (state === 'PLAYING') webapis.avplay.pause();
+        else if (state === 'PAUSED') webapis.avplay.play();
+      } catch { /* ignore */ }
+    } else if (videoRef.current) {
+      if (videoRef.current.paused) {
+        videoRef.current.play().catch(() => {});
+      } else {
+        videoRef.current.pause();
+      }
+    }
+  }, []);
+
+  const seek = useCallback((time: number) => {
+    if (typeof webapis !== 'undefined' && webapis.avplay) {
+      try { webapis.avplay.seekTo(time * 1000); } catch { /* ignore */ }
+    } else if (videoRef.current) {
+      videoRef.current.currentTime = time;
+    }
+  }, []);
+
+  const getVideoElement = useCallback(() => videoRef.current, []);
+
   useEffect(() => {
     return () => {
       stop();
@@ -345,6 +392,9 @@ export function usePlayer(): {
     play,
     stop,
     retry,
+    togglePlay,
+    seek,
+    getVideoElement,
     playerState: {
       status: store.status,
       currentChannel: store.currentChannel,
