@@ -29,8 +29,11 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Typecheck
+      - name: Typecheck frontend
         run: npm run typecheck
+
+      - name: Typecheck server
+        run: cd server && npx tsc --noEmit
 
       - name: Test
         run: npm run test
