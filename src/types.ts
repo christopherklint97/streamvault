@@ -19,7 +19,20 @@ export interface Program {
   category: string;
 }
 
-export type View = 'home' | 'channels' | 'movies' | 'series' | 'player' | 'settings' | 'seriesDetail';
+export type View = 'home' | 'channels' | 'movies' | 'series' | 'player' | 'settings' | 'seriesDetail' | 'movieDetail';
+
+export interface MovieInfo {
+  name: string;
+  cover: string;
+  plot: string;
+  genre: string;
+  releaseDate: string;
+  rating: string;
+  cast: string;
+  director: string;
+  duration: string;
+  tmdbId: string;
+}
 
 export interface Category {
   id: string;
@@ -66,6 +79,12 @@ export interface SeriesInfo {
   director: string;
   seasons: SeasonInfo[];
   episodes: Record<number, Episode[]>;
+}
+
+export interface FavoriteList {
+  id: string;
+  name: string;
+  channelIds: string[];
 }
 
 export interface WatchProgress {

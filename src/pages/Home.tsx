@@ -1,7 +1,10 @@
-import { useMemo, useCallback, useRef, useEffect } from 'react';
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import type { Channel, View } from '../types';
 import { useChannelStore } from '../stores/channelStore';
 import { useFavoritesStore } from '../stores/favoritesStore';
+import { isMobile } from '../utils/platform';
+
+const MOBILE = isMobile();
 import { usePlayerStore } from '../stores/playerStore';
 import { useAppStore } from '../stores/appStore';
 import {
@@ -19,8 +22,16 @@ export default function Home() {
   const programs = useChannelStore((s) => s.programs);
   const contentTypeCounts = useChannelStore((s) => s.contentTypeCounts);
   const favoriteIds = useFavoritesStore((s) => s.favoriteIds);
+  const lists = useFavoritesStore((s) => s.lists);
+  const createList = useFavoritesStore((s) => s.createList);
+  const deleteList = useFavoritesStore((s) => s.deleteList);
+  const renameList = useFavoritesStore((s) => s.renameList);
   const setChannel = usePlayerStore((s) => s.setChannel);
   const navigate = useAppStore((s) => s.navigate);
+
+  const [newListName, setNewListName] = useState('');
+  const [editingListId, setEditingListId] = useState<string | null>(null);
+  const [editingListName, setEditingListName] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);
 
   const favoriteChannels = useMemo(
@@ -47,6 +58,7 @@ export default function Home() {
   }, [channels]);
 
   const navigateToSeries = useAppStore((s) => s.navigateToSeries);
+  const navigateToMovie = useAppStore((s) => s.navigateToMovie);
 
   const handleSelectChannel = useCallback(
     (channel: Channel) => {
@@ -55,10 +67,15 @@ export default function Home() {
         navigateToSeries(channel);
         return;
       }
+      // Movies go to detail page
+      if (channel.contentType === 'movies') {
+        navigateToMovie(channel);
+        return;
+      }
       setChannel(channel);
       navigate('player');
     },
-    [setChannel, navigate, navigateToSeries]
+    [setChannel, navigate, navigateToSeries, navigateToMovie]
   );
 
   const lastWatchedProgram = lastWatchedChannel
@@ -229,6 +246,79 @@ export default function Home() {
             channels={favoriteChannels}
             onSelect={handleSelectChannel}
           />
+        </div>
+      )}
+
+      {/* Custom Lists */}
+      {lists.map(list => {
+        const listChannels = channels.filter(ch => list.channelIds.includes(ch.id));
+        if (listChannels.length === 0) return null;
+        return (
+          <div key={list.id} className="home__section">
+            <div className="home__list-header">
+              {editingListId === list.id ? (
+                <form className="home__list-rename" onSubmit={(e) => {
+                  e.preventDefault();
+                  if (editingListName.trim()) {
+                    renameList(list.id, editingListName.trim());
+                  }
+                  setEditingListId(null);
+                }}>
+                  <input
+                    className="home__list-rename-input"
+                    value={editingListName}
+                    onChange={(e) => setEditingListName(e.target.value)}
+                    autoFocus
+                    onBlur={() => setEditingListId(null)}
+                  />
+                </form>
+              ) : (
+                <h2
+                  className="home__section-title"
+                  onClick={MOBILE ? () => { setEditingListId(list.id); setEditingListName(list.name); } : undefined}
+                >
+                  {list.name}
+                </h2>
+              )}
+              {MOBILE && (
+                <button
+                  className="home__list-delete"
+                  onClick={() => deleteList(list.id)}
+                >
+                  {'\u2715'}
+                </button>
+              )}
+            </div>
+            <HorizontalRow
+              title=""
+              channels={listChannels}
+              onSelect={handleSelectChannel}
+            />
+          </div>
+        );
+      })}
+
+      {/* Create New List */}
+      {MOBILE && (
+        <div className="home__section">
+          <form className="home__new-list" onSubmit={(e) => {
+            e.preventDefault();
+            if (newListName.trim()) {
+              createList(newListName.trim());
+              setNewListName('');
+            }
+          }}>
+            <input
+              className="home__new-list-input"
+              type="text"
+              placeholder="Create new list..."
+              value={newListName}
+              onChange={(e) => setNewListName(e.target.value)}
+            />
+            {newListName.trim() && (
+              <button className="home__new-list-btn" type="submit">Create</button>
+            )}
+          </form>
         </div>
       )}
 

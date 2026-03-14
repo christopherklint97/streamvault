@@ -36,6 +36,44 @@ interface XtreamSeries {
   category_id: string;
 }
 
+// ---------- VOD info types ----------
+
+interface XtreamVodInfo {
+  info: {
+    name: string;
+    o_name?: string;
+    cover_big?: string;
+    movie_image?: string;
+    plot?: string;
+    genre?: string;
+    releasedate?: string;
+    rating?: string;
+    cast?: string;
+    director?: string;
+    duration?: string;
+    tmdb_id?: string;
+    backdrop_path?: string[];
+  };
+  movie_data: {
+    stream_id: number;
+    name: string;
+    container_extension: string;
+  };
+}
+
+export interface VodInfoResult {
+  name: string;
+  cover: string;
+  plot: string;
+  genre: string;
+  releaseDate: string;
+  rating: string;
+  cast: string;
+  director: string;
+  duration: string;
+  tmdbId: string;
+}
+
 // ---------- Series info types ----------
 
 interface XtreamSeriesInfo {
@@ -420,6 +458,34 @@ export async function fetchXtreamSeriesInfo(
     director: info.director || '',
     seasons,
     episodes,
+  };
+}
+
+// ---------- On-demand: VOD info ----------
+
+export async function fetchXtreamVodInfo(
+  config: XtreamConfig,
+  vodId: number,
+): Promise<VodInfoResult> {
+  const data = await fetchJson<XtreamVodInfo>(
+    apiUrl(config, `get_vod_info&vod_id=${vodId}`),
+    AbortSignal.timeout(30_000),
+    `vod info ${vodId}`,
+  );
+
+  const info = data.info || {} as XtreamVodInfo['info'];
+
+  return {
+    name: info.name || '',
+    cover: info.cover_big || info.movie_image || '',
+    plot: info.plot || '',
+    genre: info.genre || '',
+    releaseDate: info.releasedate || '',
+    rating: info.rating || '',
+    cast: info.cast || '',
+    director: info.director || '',
+    duration: info.duration || '',
+    tmdbId: info.tmdb_id || '',
   };
 }
 

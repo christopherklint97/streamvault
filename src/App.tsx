@@ -12,6 +12,7 @@ import ExitDialog from './components/ExitDialog';
 import Player from './components/Player';
 import ChannelList from './components/ChannelList';
 import SeriesDetail from './components/SeriesDetail';
+import MovieDetail from './components/MovieDetail';
 import Home from './pages/Home';
 
 const Settings = lazy(() => import('./pages/Settings'));
@@ -19,6 +20,7 @@ const Settings = lazy(() => import('./pages/Settings'));
 function AppContent() {
   const currentView = useAppStore((s) => s.currentView);
   const selectedSeries = useAppStore((s) => s.selectedSeries);
+  const selectedMovie = useAppStore((s) => s.selectedMovie);
   const isLoading = useChannelStore((s) => s.isLoading);
   const loadingMessage = useChannelStore((s) => s.loadingMessage);
   const loadingPhase = useChannelStore((s) => s.loadingPhase);
@@ -70,8 +72,7 @@ function AppContent() {
   // Hydrate from server on startup
   useEffect(() => {
     hydrate();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [hydrate]);
 
   // Handle LEFT key on main content to return focus to sidebar
   const handleMainKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -95,6 +96,8 @@ function AppContent() {
         return <ChannelList contentType="series" />;
       case 'seriesDetail':
         return selectedSeries ? <SeriesDetail series={selectedSeries} /> : <ChannelList contentType="series" />;
+      case 'movieDetail':
+        return selectedMovie ? <MovieDetail movie={selectedMovie} /> : <ChannelList contentType="movies" />;
       case 'player':
         return <Player />;
       case 'settings':

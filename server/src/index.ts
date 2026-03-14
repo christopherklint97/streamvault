@@ -12,7 +12,7 @@ import {
   getChannelsByContentTypeCursor, getChannelsByGroupCursor,
 } from './db.js';
 import { getStatus, sync, cancelSync, startupSync, startCrawl, cancelCrawl } from './sync.js';
-import { fetchXtreamStreamsByCategory, fetchXtreamShortEpg, fetchAllCategoryStreams, fetchXtreamSeriesInfo } from './xtream.js';
+import { fetchXtreamStreamsByCategory, fetchXtreamShortEpg, fetchAllCategoryStreams, fetchXtreamSeriesInfo, fetchXtreamVodInfo } from './xtream.js';
 import type { XtreamConfig } from './xtream.js';
 import { logger } from './logger.js';
 
@@ -352,6 +352,31 @@ app.get('/api/series/:seriesId', async (req, res) => {
     const msg = err instanceof Error ? err.message : 'Unknown error';
     logger.error(`Series info fetch failed for ${seriesId}: ${msg}`);
     res.status(500).json({ error: `Failed to fetch series info: ${msg}` });
+  }
+});
+
+// ---------- VOD Info ----------
+
+app.get('/api/vod/:vodId', async (req, res) => {
+  const vodId = parseInt(req.params.vodId, 10);
+  if (isNaN(vodId)) {
+    res.status(400).json({ error: 'Invalid VOD ID' });
+    return;
+  }
+
+  const config = getXtreamConfig();
+  if (!config) {
+    res.status(400).json({ error: 'Xtream not configured' });
+    return;
+  }
+
+  try {
+    const info = await fetchXtreamVodInfo(config, vodId);
+    res.json(info);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    logger.error(`VOD info fetch failed for ${vodId}: ${msg}`);
+    res.status(500).json({ error: `Failed to fetch VOD info: ${msg}` });
   }
 });
 

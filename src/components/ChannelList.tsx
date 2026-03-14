@@ -8,6 +8,7 @@ import { prefetchImages } from '../utils/image-pool';
 import { markKeyDown, markKeyRendered } from '../utils/perf-monitor';
 import { isMobile } from '../utils/platform';
 import ChannelCard from './ChannelCard';
+import { useFavoritesStore } from '../stores/favoritesStore';
 
 interface ChannelListProps {
   contentType: ContentType;
@@ -20,7 +21,7 @@ const CONTAINER_HEIGHT = 900;
 const BUFFER = 2;
 const PREFETCH_ROWS = 3;
 const SEARCH_DEBOUNCE_MS = 300;
-const PAGE_SIZE = 20;
+const PAGE_SIZE = MOBILE ? 18 : 20;
 
 // ---------- API helper ----------
 
@@ -201,6 +202,27 @@ function FilterDropdown({ categories, selectedGroup, onSelect }: FilterDropdownP
   );
 }
 
+// ---------- Live TV List Item (mobile) ----------
+
+function LiveListItem({ channel, onSelect, vindex }: { channel: Channel; onSelect: (ch: Channel) => void; vindex: number }) {
+  const isFav = useFavoritesStore((s) => s.favoriteIds.has(channel.id));
+  const toggle = useFavoritesStore((s) => s.toggleFavorite);
+  return (
+    <div className="channel-list__live-item" data-vindex={vindex}>
+      <button className="channel-list__live-main" onClick={() => onSelect(channel)}>
+        <span className="channel-list__live-name">{channel.name}</span>
+        <span className="channel-list__live-group">{channel.group}</span>
+      </button>
+      <button
+        className={`channel-list__live-fav${isFav ? ' channel-list__live-fav--active' : ''}`}
+        onClick={() => toggle(channel.id)}
+      >
+        {isFav ? '\u2605' : '\u2606'}
+      </button>
+    </div>
+  );
+}
+
 // ---------- Channel List ----------
 
 type FocusZone = 'search' | 'filter' | 'grid';
@@ -227,6 +249,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
   const setChannel = usePlayerStore((s) => s.setChannel);
   const navigate = useAppStore((s) => s.navigate);
   const navigateToSeries = useAppStore((s) => s.navigateToSeries);
+  const navigateToMovie = useAppStore((s) => s.navigateToMovie);
 
   const gridRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -330,10 +353,15 @@ export default function ChannelList({ contentType }: ChannelListProps) {
         navigateToSeries(channel);
         return;
       }
+      // Movies go to detail page on mobile
+      if (MOBILE && channel.contentType === 'movies') {
+        navigateToMovie(channel);
+        return;
+      }
       setChannel(channel);
       navigate('player');
     },
-    [setChannel, navigate, navigateToSeries]
+    [setChannel, navigate, navigateToSeries, navigateToMovie]
   );
 
   const handleLoadMore = useCallback(async () => {
@@ -492,15 +520,28 @@ export default function ChannelList({ contentType }: ChannelListProps) {
           </div>
           <div className="channel-list__count">{countText}</div>
         </div>
-        <div className="channel-list__grid channel-list__grid--mobile" ref={gridRef}>
-          {channels.length === 0 ? (
-            <div className="channel-list__empty">{emptyMessage}</div>
-          ) : (
-            channels.map((ch, idx) => (
-              <ChannelCard key={ch.id} channel={ch} onSelect={handleSelect} vindex={idx} />
-            ))
-          )}
-        </div>
+        {contentType === 'livetv' ? (
+          /* Live TV: simple list view (no images, full titles visible) */
+          <div className="channel-list__live-list" ref={gridRef}>
+            {channels.length === 0 ? (
+              <div className="channel-list__empty">{emptyMessage}</div>
+            ) : (
+              channels.map((ch, idx) => (
+                <LiveListItem key={ch.id} channel={ch} onSelect={handleSelect} vindex={idx} />
+              ))
+            )}
+          </div>
+        ) : (
+          <div className="channel-list__grid channel-list__grid--mobile" ref={gridRef}>
+            {channels.length === 0 ? (
+              <div className="channel-list__empty">{emptyMessage}</div>
+            ) : (
+              channels.map((ch, idx) => (
+                <ChannelCard key={ch.id} channel={ch} onSelect={handleSelect} vindex={idx} />
+              ))
+            )}
+          </div>
+        )}
         {nextCursor && !showingSearch && (
           <button className="channel-list__load-more" onClick={handleLoadMore} disabled={loadingMore}>
             {loadingMore ? 'Loading...' : `Load more (${remaining} remaining)`}

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Channel, Program, Category, SeriesInfo } from '../types';
+import type { Channel, Program, Category, SeriesInfo, MovieInfo } from '../types';
 import { getItem, setItem } from '../utils/storage';
 
 export type InputMode = 'xtream' | 'manual';
@@ -80,6 +80,7 @@ interface ChannelActions {
   fetchEpgForStream: (streamId: number) => Promise<Program[]>;
   searchChannels: (query: string, contentType?: string, group?: string) => Promise<Channel[]>;
   fetchSeriesInfo: (seriesId: number) => Promise<SeriesInfo | null>;
+  fetchMovieInfo: (vodId: number) => Promise<MovieInfo | null>;
   fetchConfig: () => Promise<void>;
   saveConfig: (config: Record<string, string>) => Promise<void>;
   triggerSync: () => Promise<void>;
@@ -303,6 +304,17 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     try {
       const data = await apiFetch(apiBaseUrl, `/api/series/${seriesId}`);
       return data as SeriesInfo;
+    } catch {
+      return null;
+    }
+  },
+
+  fetchMovieInfo: async (vodId: number) => {
+    const { apiBaseUrl } = get();
+    if (!hasApi(apiBaseUrl)) return null;
+    try {
+      const data = await apiFetch(apiBaseUrl, `/api/vod/${vodId}`);
+      return data as MovieInfo;
     } catch {
       return null;
     }

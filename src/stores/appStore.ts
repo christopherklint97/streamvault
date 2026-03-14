@@ -6,6 +6,7 @@ interface AppState {
   previousView: View | null;
   selectedGroup: string | null;
   selectedSeries: Channel | null;
+  selectedMovie: Channel | null;
   showExitDialog: boolean;
   showToast: boolean;
   toastMessage: string;
@@ -14,6 +15,7 @@ interface AppState {
 interface AppActions {
   navigate: (view: View) => void;
   navigateToSeries: (series: Channel) => void;
+  navigateToMovie: (movie: Channel) => void;
   goBack: () => void;
   selectGroup: (group: string) => void;
   clearGroup: () => void;
@@ -34,6 +36,7 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
   previousView: null,
   selectedGroup: null,
   selectedSeries: null,
+  selectedMovie: null,
   showExitDialog: false,
   showToast: false,
   toastMessage: '',
@@ -60,6 +63,17 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
     });
   },
 
+  navigateToMovie: (movie: Channel) => {
+    const { currentView } = get();
+    pushState('movieDetail');
+    set({
+      previousView: currentView,
+      currentView: 'movieDetail',
+      selectedMovie: movie,
+      showExitDialog: false,
+    });
+  },
+
   selectGroup: (group: string) => {
     pushState(get().currentView, group);
     set({ selectedGroup: group });
@@ -72,12 +86,13 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
   goBack: () => {
     const { currentView, previousView, selectedGroup } = get();
 
-    // From player or seriesDetail, go back to previous view
-    if ((currentView === 'player' || currentView === 'seriesDetail') && previousView) {
+    // From player, seriesDetail, or movieDetail, go back to previous view
+    if ((currentView === 'player' || currentView === 'seriesDetail' || currentView === 'movieDetail') && previousView) {
       set({
         currentView: previousView,
         previousView: null,
         selectedSeries: currentView === 'seriesDetail' ? null : get().selectedSeries,
+        selectedMovie: currentView === 'movieDetail' ? null : get().selectedMovie,
         showExitDialog: false,
       });
       return;

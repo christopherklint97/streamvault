@@ -25,9 +25,16 @@ function formatTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+/** Check if a touch event target is inside a clickable OSD element */
+function isOsdControl(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return !!target.closest('button, input, .player__btn-row, .player__seek-row, .player__live-row');
+}
+
 export default function Player() {
   const { play, stop, retry, togglePlay, seek, getVideoElement, playerState, subtitleTracks, currentSubtitleIndex, subtitleText, cycleSubtitles } = usePlayer();
   const currentChannel = usePlayerStore((s) => s.currentChannel);
+  const channelId = currentChannel?.id;
   const programs = useChannelStore((s) => s.programs);
   const goBack = useAppStore((s) => s.goBack);
   const [showOSD, setShowOSD] = useState(true);
@@ -96,22 +103,22 @@ export default function Player() {
     };
   }, [getVideoElement, isSeeking, playerState.status]);
 
-  // EPG progress for live
+  // EPG progress for live (only used when currentProgram is rendered)
   const [liveProgress, setLiveProgress] = useState(0);
+  const programStartMs = currentProgram?.start.getTime() ?? 0;
+  const programStopMs = currentProgram?.stop.getTime() ?? 0;
   useEffect(() => {
-    if (!currentProgram) { setLiveProgress(0); return; }
+    if (!programStartMs || !programStopMs) return;
+    const total = programStopMs - programStartMs;
+    if (total <= 0) return;
     const update = () => {
-      const now = Date.now();
-      const start = currentProgram.start.getTime();
-      const end = currentProgram.stop.getTime();
-      const total = end - start;
-      if (total <= 0) { setLiveProgress(0); return; }
-      setLiveProgress(Math.min(100, Math.max(0, ((now - start) / total) * 100)));
+      const pct = Math.min(100, Math.max(0, ((Date.now() - programStartMs) / total) * 100));
+      setLiveProgress(pct);
     };
     update();
     const interval = setInterval(update, 30000);
     return () => clearInterval(interval);
-  }, [currentProgram]);
+  }, [programStartMs, programStopMs]);
 
   const resetOSDTimer = useCallback(() => {
     setShowOSD(true);
@@ -121,38 +128,44 @@ export default function Player() {
 
   // Start playback when channel changes
   useEffect(() => {
-    if (currentChannel) {
+    if (channelId) {
       play();
     }
     return () => {
       stop();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentChannel?.id]);
+  }, [channelId, play, stop]);
 
-  // Show OSD initially, auto-hide
+  // Show OSD initially, auto-hide after timeout
   useEffect(() => {
-    resetOSDTimer();
+    osdTimerRef.current = setTimeout(() => setShowOSD(false), OSD_TIMEOUT);
     return () => {
       if (osdTimerRef.current) clearTimeout(osdTimerRef.current);
     };
-  }, [resetOSDTimer]);
-
-  // Request landscape on mobile when player mounts
-  useEffect(() => {
-    if (!MOBILE) return;
-    try {
-      // @ts-expect-error screen.orientation.lock is not in all TS libs
-      screen.orientation?.lock?.('landscape').catch(() => {});
-    } catch { /* not supported */ }
-    return () => {
-      try {
-        screen.orientation?.unlock?.();
-      } catch { /* ignore */ }
-    };
   }, []);
 
+  // Auto-PIP when leaving the app (visibility change)
+  useEffect(() => {
+    if (!MOBILE || !('pictureInPictureEnabled' in document)) return;
+
+    const handleVisibilityChange = () => {
+      if (document.hidden && playerState.status === 'playing') {
+        const video = getVideoElement();
+        if (video && !document.pictureInPictureElement) {
+          video.requestPictureInPicture().catch(() => {});
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [getVideoElement, playerState.status]);
+
   const handleBack = useCallback(() => {
+    // Exit PIP if active
+    if (document.pictureInPictureElement) {
+      document.exitPictureInPicture().catch(() => {});
+    }
     stop();
     goBack();
   }, [stop, goBack]);
@@ -218,8 +231,9 @@ export default function Player() {
     doubleTapFadeRef.current = setTimeout(() => setDoubleTapSide(null), 600);
   }, [handleSkip, resetOSDTimer]);
 
-  // Touch gesture handlers
+  // Touch gesture handlers — skip if target is an OSD button/control
   const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    if (isOsdControl(e.target)) return;
     if (isLive || !hasDuration) return;
     const touch = e.touches[0];
     touchStartRef.current = { x: touch.clientX, y: touch.clientY, time: currentTime };
@@ -249,6 +263,9 @@ export default function Player() {
   }, [isLive, hasDuration, duration, swipeSeeking, resetOSDTimer]);
 
   const handleTouchEnd = useCallback((e: React.TouchEvent) => {
+    // Skip if touch was on an OSD control (let click handler handle it)
+    if (isOsdControl(e.target)) return;
+
     if (swipeActiveRef.current && swipeSeeking) {
       // Commit the scrub
       seek(swipePreview);

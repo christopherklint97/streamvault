@@ -2,6 +2,9 @@ import { memo, useCallback, useRef, useEffect } from 'react';
 import type { Channel } from '../types';
 import { useFavoritesStore } from '../stores/favoritesStore';
 import { acquireImage, releaseImage } from '../utils/image-pool';
+import { isMobile } from '../utils/platform';
+
+const MOBILE = isMobile();
 
 const LOGO_COLORS = [
   '#e74c3c', '#3498db', '#2ecc71', '#9b59b6', '#f39c12',
@@ -33,7 +36,12 @@ interface ChannelCardProps {
  */
 function ChannelCardInner({ channel, onSelect, vindex }: ChannelCardProps) {
   const isFavorite = useFavoritesStore((s) => s.favoriteIds.has(channel.id));
+  const toggleFavorite = useFavoritesStore((s) => s.toggleFavorite);
   const handleClick = useCallback(() => onSelect(channel), [onSelect, channel]);
+  const handleFavClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    toggleFavorite(channel.id);
+  }, [toggleFavorite, channel.id]);
   const logoRef = useRef<HTMLDivElement>(null);
   const pooledImg = useRef<HTMLImageElement | null>(null);
 
@@ -82,7 +90,13 @@ function ChannelCardInner({ channel, onSelect, vindex }: ChannelCardProps) {
         data-letter={channel.name.charAt(0).toUpperCase()}
       />
       <span className="channel-card__name">{channel.name}</span>
-      {isFavorite && <span className="channel-card__star">{'\u2605'}</span>}
+      {MOBILE ? (
+        <button className={`channel-card__star-btn${isFavorite ? ' channel-card__star-btn--active' : ''}`} onClick={handleFavClick}>
+          {isFavorite ? '\u2605' : '\u2606'}
+        </button>
+      ) : (
+        isFavorite && <span className="channel-card__star">{'\u2605'}</span>
+      )}
     </div>
   );
 }
