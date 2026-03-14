@@ -10,11 +10,11 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { icon: '\u25C6', label: 'Home', view: 'home' },
-  { icon: '\u25B8', label: 'Live TV', view: 'channels' },
-  { icon: '\uD83C\uDFAC', label: 'Movies', view: 'movies' },
-  { icon: '\u2261', label: 'Series', view: 'series' },
-  { icon: '\u2736', label: 'Settings', view: 'settings' },
+  { icon: '🏠', label: 'Home', view: 'home' },
+  { icon: '📺', label: 'Live TV', view: 'channels' },
+  { icon: '🎬', label: 'Movies', view: 'movies' },
+  { icon: '📂', label: 'Series', view: 'series' },
+  { icon: '⚙️', label: 'Settings', view: 'settings' },
 ];
 
 export default function Sidebar() {
