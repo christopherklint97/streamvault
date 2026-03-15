@@ -54,8 +54,6 @@
   --animate-spin-fast: spin 0.8s linear infinite;
   --animate-slide-up: slideUp 250ms ease;
   --animate-pulse-record: pulseRecord 1.5s ease-in-out infinite;
-  --animate-double-tap: doubleTapRipple 0.6s ease-out forwards;
-
   --transition-duration-150: 150ms;
   --transition-duration-180: 180ms;
 
@@ -79,10 +77,6 @@
     50% { opacity: 0.5; }
   }
 
-  @keyframes doubleTapRipple {
-    0% { background: rgba(255, 255, 255, 0.12); }
-    100% { background: transparent; }
-  }
 }
 
 /* ============================

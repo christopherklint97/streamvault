@@ -11,12 +11,6 @@ import { cn } from '../utils/cn';
 
 const OSD_TIMEOUT = 5000;
 const MOBILE = isMobile();
-/** Pixels of horizontal movement before a swipe is recognized */
-const SWIPE_THRESHOLD = 15;
-/** How many seconds per pixel of horizontal swipe */
-const SECONDS_PER_PIXEL = 0.5;
-/** Max ms between taps to count as double-tap */
-const DOUBLE_TAP_MS = 300;
 
 function formatTime(seconds: number): string {
   if (!isFinite(seconds) || seconds < 0) return '0:00';
@@ -52,18 +46,6 @@ export default function Player() {
   const seekBarRef = useRef<HTMLInputElement | null>(null);
   const timeUpdateRef = useRef<number>(0);
   const containerRef = useRef<HTMLDivElement | null>(null);
-
-  // Swipe-to-scrub state
-  const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
-  const [swipeSeeking, setSwipeSeeking] = useState(false);
-  const [swipePreview, setSwipePreview] = useState(0);
-  const swipeActiveRef = useRef(false);
-
-  // Double-tap state
-  const lastTapRef = useRef<{ time: number; x: number }>({ time: 0, x: 0 });
-  const tapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [doubleTapSide, setDoubleTapSide] = useState<'left' | 'right' | null>(null);
-  const doubleTapFadeRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isLive = currentChannel?.contentType === 'livetv';
   const hasDuration = isFinite(duration) && duration > 0;
@@ -297,8 +279,9 @@ export default function Player() {
     resetOSDTimer();
   }, [currentChannel, currentProgram, isRecording, createRecording, showToast, resetOSDTimer]);
 
-  // Touch: tap to toggle OSD (single tap only, after ruling out swipe/double-tap)
-  const handleSingleTap = useCallback(() => {
+  // Tap to toggle OSD — skip if target is an OSD button/control
+  const handleTap = useCallback((e: React.MouseEvent) => {
+    if (isOsdControl(e.target)) return;
     if (showOSD) {
       setShowOSD(false);
       if (osdTimerRef.current) clearTimeout(osdTimerRef.current);
@@ -306,80 +289,6 @@ export default function Player() {
       resetOSDTimer();
     }
   }, [showOSD, resetOSDTimer]);
-
-  // Double-tap to skip 10s
-  const handleDoubleTap = useCallback((side: 'left' | 'right') => {
-    const delta = side === 'right' ? 10 : -10;
-    handleSkip(delta);
-    resetOSDTimer();
-    setDoubleTapSide(side);
-    if (doubleTapFadeRef.current) clearTimeout(doubleTapFadeRef.current);
-    doubleTapFadeRef.current = setTimeout(() => setDoubleTapSide(null), 600);
-  }, [handleSkip, resetOSDTimer]);
-
-  // Touch gesture handlers — skip if target is an OSD button/control
-  const handleTouchStart = useCallback((e: React.TouchEvent) => {
-    if (isOsdControl(e.target)) return;
-    if (isLive || !hasDuration) return;
-    const touch = e.touches[0];
-    touchStartRef.current = { x: touch.clientX, y: touch.clientY, time: currentTime };
-    swipeActiveRef.current = false;
-  }, [isLive, hasDuration, currentTime]);
-
-  const handleTouchMove = useCallback((e: React.TouchEvent) => {
-    if (!touchStartRef.current || isLive || !hasDuration) return;
-    const touch = e.touches[0];
-    const dx = touch.clientX - touchStartRef.current.x;
-    const dy = touch.clientY - touchStartRef.current.y;
-
-    if (!swipeActiveRef.current && Math.abs(dy) > Math.abs(dx)) {
-      touchStartRef.current = null;
-      return;
-    }
-
-    if (Math.abs(dx) > SWIPE_THRESHOLD) {
-      swipeActiveRef.current = true;
-      if (!swipeSeeking) setSwipeSeeking(true);
-      const timeDelta = dx * SECONDS_PER_PIXEL;
-      const newTime = Math.max(0, Math.min(duration, touchStartRef.current.time + timeDelta));
-      setSwipePreview(newTime);
-      resetOSDTimer();
-    }
-  }, [isLive, hasDuration, duration, swipeSeeking, resetOSDTimer]);
-
-  const handleTouchEnd = useCallback((e: React.TouchEvent) => {
-    if (isOsdControl(e.target)) return;
-
-    if (swipeActiveRef.current && swipeSeeking) {
-      seek(swipePreview);
-      setSwipeSeeking(false);
-      swipeActiveRef.current = false;
-      touchStartRef.current = null;
-      return;
-    }
-
-    touchStartRef.current = null;
-    swipeActiveRef.current = false;
-    if (swipeSeeking) { setSwipeSeeking(false); return; }
-
-    const now = Date.now();
-    const tapX = e.changedTouches[0]?.clientX ?? 0;
-    const lastTap = lastTapRef.current;
-
-    if (now - lastTap.time < DOUBLE_TAP_MS && Math.abs(tapX - lastTap.x) < 100) {
-      if (tapTimerRef.current) { clearTimeout(tapTimerRef.current); tapTimerRef.current = null; }
-      const screenMid = window.innerWidth / 2;
-      handleDoubleTap(tapX > screenMid ? 'right' : 'left');
-      lastTapRef.current = { time: 0, x: 0 };
-    } else {
-      lastTapRef.current = { time: now, x: tapX };
-      if (tapTimerRef.current) clearTimeout(tapTimerRef.current);
-      tapTimerRef.current = setTimeout(() => {
-        handleSingleTap();
-        tapTimerRef.current = null;
-      }, DOUBLE_TAP_MS);
-    }
-  }, [swipeSeeking, swipePreview, seek, handleDoubleTap, handleSingleTap]);
 
   // TV remote keys
   const handleKeyDown = useCallback(
@@ -427,9 +336,7 @@ export default function Player() {
       className="w-full h-dvh lg:w-tv lg:h-tv relative bg-black fixed lg:static top-0 left-0 right-0 bottom-0"
       tabIndex={0}
       onKeyDown={handleKeyDown}
-      onTouchStart={MOBILE ? handleTouchStart : undefined}
-      onTouchMove={MOBILE ? handleTouchMove : undefined}
-      onTouchEnd={MOBILE ? handleTouchEnd : undefined}
+      onClick={MOBILE ? handleTap : undefined}
     >
       {/* Video container */}
       <div className="w-full h-full">
@@ -466,27 +373,6 @@ export default function Player() {
       {subtitleText && (
         <div className="absolute bottom-[60px] lg:bottom-20 left-1/2 -translate-x-1/2 max-w-[80%] py-2 px-4 bg-black/75 rounded text-20 lg:text-28 text-center z-[2]">
           <span>{subtitleText}</span>
-        </div>
-      )}
-
-      {/* Swipe-to-scrub preview */}
-      {MOBILE && swipeSeeking && (
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center gap-1 bg-black/75 rounded-xl py-4 px-7 z-20 pointer-events-none">
-          <span className="text-36 font-bold text-white tabular-nums">{formatTime(swipePreview)}</span>
-          <span className="text-base text-brand-red font-semibold">
-            {swipePreview >= currentTime ? '+' : ''}{formatTime(Math.abs(swipePreview - currentTime))}
-          </span>
-        </div>
-      )}
-
-      {/* Double-tap skip indicator */}
-      {MOBILE && doubleTapSide && (
-        <div className={cn(
-          'absolute top-0 bottom-0 w-[40%] flex items-center justify-center z-[18] pointer-events-none animate-double-tap',
-          doubleTapSide === 'left' && 'left-0 rounded-r-[50%]',
-          doubleTapSide === 'right' && 'right-0 rounded-l-[50%]'
-        )}>
-          <span className="text-20 font-bold text-white bg-white/[0.15] rounded-full w-16 h-16 flex items-center justify-center">10s</span>
         </div>
       )}
 
