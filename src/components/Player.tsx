@@ -230,27 +230,27 @@ export default function Player() {
 
   const handleFullscreen = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-    const el = document.documentElement as HTMLElement & {
-      webkitRequestFullscreen?: () => Promise<void>;
-      msRequestFullscreen?: () => void;
-    };
     const doc = document as Document & {
       webkitFullscreenElement?: Element | null;
-      msFullscreenElement?: Element | null;
       webkitExitFullscreen?: () => Promise<void>;
-      msExitFullscreen?: () => void;
     };
-    const isFs = !!(doc.fullscreenElement || doc.webkitFullscreenElement || doc.msFullscreenElement);
+    const isFs = !!(doc.fullscreenElement || doc.webkitFullscreenElement);
     if (isFs) {
       if (doc.exitFullscreen) doc.exitFullscreen();
       else if (doc.webkitExitFullscreen) doc.webkitExitFullscreen();
-      else if (doc.msExitFullscreen) doc.msExitFullscreen();
     } else {
-      if (el.requestFullscreen) el.requestFullscreen();
-      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
-      else if (el.msRequestFullscreen) el.msRequestFullscreen();
+      // Use video element for iOS Safari compatibility (documentElement fullscreen not supported)
+      const video = getVideoElement() as (HTMLVideoElement & {
+        webkitRequestFullscreen?: () => Promise<void>;
+        webkitEnterFullscreen?: () => void;
+      }) | null;
+      if (video) {
+        if (video.requestFullscreen) video.requestFullscreen();
+        else if (video.webkitRequestFullscreen) video.webkitRequestFullscreen();
+        else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
+      }
     }
-  }, []);
+  }, [getVideoElement]);
 
   useEffect(() => {
     const onFsChange = () => {
@@ -514,6 +514,25 @@ export default function Player() {
                 </svg>
               </button>
             )}
+            {MOBILE && (
+              <button className="player__fullscreen-btn" onClick={handleFullscreen} title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+                {isFullscreen ? (
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+                    <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+                    <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+                    <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+                  </svg>
+                ) : (
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+                    <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+                    <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+                    <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+                  </svg>
+                )}
+              </button>
+            )}
           </div>
 
           {/* Bottom bar: controls */}
@@ -592,26 +611,6 @@ export default function Player() {
               </span>
             )}
 
-            {/* Fullscreen button (bottom right) */}
-            {MOBILE && (
-              <button className="player__fullscreen-btn" onClick={handleFullscreen} title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
-                {isFullscreen ? (
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M8 3v3a2 2 0 0 1-2 2H3" />
-                    <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
-                    <path d="M3 16h3a2 2 0 0 1 2 2v3" />
-                    <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
-                  </svg>
-                ) : (
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M8 3H5a2 2 0 0 0-2 2v3" />
-                    <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
-                    <path d="M3 16v3a2 2 0 0 0 2 2h3" />
-                    <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
-                  </svg>
-                )}
-              </button>
-            )}
           </div>
         </div>
       )}

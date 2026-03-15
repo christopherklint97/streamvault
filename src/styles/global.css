@@ -864,9 +864,6 @@ img { display: block; }
 }
 
 .player__fullscreen-btn {
-  position: absolute;
-  bottom: 12px;
-  right: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
