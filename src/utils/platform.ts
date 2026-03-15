@@ -15,17 +15,24 @@ export function isTizen(): boolean {
 
 /**
  * Open a stream URL in the device's native video player.
- * On Android, this triggers an intent chooser (VLC, MX Player, etc.)
- * On iOS, Safari handles video natively.
+ * Uses window.open to avoid navigating away from the SPA.
+ * On Android, tries intent scheme first (for VLC/MX Player), falls back to new tab.
+ * On iOS/other, opens in a new tab where the OS handles it.
  */
 export function openInNativePlayer(url: string): void {
-  // Android: use intent scheme for video apps
+  // Android: try intent scheme via a temporary link (more reliable than window.location in PWAs)
   if (/Android/i.test(navigator.userAgent)) {
     const intentUrl = `intent:${url}#Intent;type=video/*;end`;
-    window.location.href = intentUrl;
+    const link = document.createElement('a');
+    link.href = intentUrl;
+    link.click();
+    // If intent didn't fire (no handler), fall back to opening URL directly
+    setTimeout(() => {
+      window.open(url, '_blank');
+    }, 500);
     return;
   }
 
-  // iOS / other: open directly — the OS will handle it
-  window.location.href = url;
+  // iOS / other: open in new tab — Safari handles video natively
+  window.open(url, '_blank');
 }

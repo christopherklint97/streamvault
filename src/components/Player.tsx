@@ -234,8 +234,10 @@ export default function Player() {
     const absoluteUrl = streamUrl.startsWith('http')
       ? streamUrl
       : `${window.location.origin}${streamUrl}`;
+    // Stop the web player first so it doesn't hold the stream
+    stop();
     openInNativePlayer(absoluteUrl);
-  }, [currentChannel]);
+  }, [currentChannel, stop]);
 
   const handleRecord = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation();
