@@ -234,9 +234,18 @@ export default function Player() {
     const absoluteUrl = streamUrl.startsWith('http')
       ? streamUrl
       : `${window.location.origin}${streamUrl}`;
+    // Build player page URL for iOS (serves HTML with <video> element)
+    const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
+    let playerPageUrl = `${apiBaseUrl}/api/player/${encodeURIComponent(currentChannel.id)}`;
+    if (currentChannel.url && currentChannel.id.startsWith('episode_')) {
+      playerPageUrl += `?url=${encodeURIComponent(currentChannel.url)}&type=series`;
+    }
+    const absolutePlayerUrl = playerPageUrl.startsWith('http')
+      ? playerPageUrl
+      : `${window.location.origin}${playerPageUrl}`;
     // Stop the web player first so it doesn't hold the stream
     stop();
-    openInNativePlayer(absoluteUrl);
+    openInNativePlayer(absoluteUrl, absolutePlayerUrl);
   }, [currentChannel, stop]);
 
   const handleRecord = useCallback(async (e: React.MouseEvent) => {

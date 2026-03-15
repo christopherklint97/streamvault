@@ -486,6 +486,36 @@ app.post('/api/client-logs', (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- Native Player Page ----------
+// Serves a minimal HTML page with a <video> element for iOS Safari.
+// Safari can't play raw MPEG-TS in a new tab, but <video> triggers the native player.
+
+app.get('/api/player/:channelId', (req, res) => {
+  const channelId = req.params.channelId;
+  const channel = getChannelById(channelId);
+  const title = channel?.name || channelId;
+  // Build the stream URL with same logic as the stream proxy
+  let streamSrc = `/api/stream/${encodeURIComponent(channelId)}`;
+  if (!channel && req.query.url) {
+    streamSrc += `?url=${encodeURIComponent(req.query.url as string)}`;
+    if (req.query.type) streamSrc += `&type=${encodeURIComponent(req.query.type as string)}`;
+  }
+  res.setHeader('Content-Type', 'text/html');
+  res.send(`<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title.replace(/[<>&"]/g, '')}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#000;display:flex;align-items:center;justify-content:center;height:100vh;height:100dvh}
+video{width:100%;height:100%;object-fit:contain}
+</style>
+</head><body>
+<video src="${streamSrc}" autoplay playsinline controls controlslist="nodownload"></video>
+</body></html>`);
+});
+
 // ---------- Stream Proxy ----------
 // Proxies stream URLs through the server so mobile clients don't need
 // direct access to the Xtream server (avoids CORS and network issues).
