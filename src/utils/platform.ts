@@ -9,6 +9,10 @@ export function isMobile(): boolean {
   return _isMobile;
 }
 
+export function isIPhone(): boolean {
+  return /iPhone|iPod/i.test(navigator.userAgent);
+}
+
 export function isTizen(): boolean {
   return typeof webapis !== 'undefined' && typeof webapis.avplay !== 'undefined';
 }

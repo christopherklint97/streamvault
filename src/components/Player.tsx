@@ -6,7 +6,7 @@ import { useAppStore } from '../stores/appStore';
 import { useRecordingStore } from '../stores/recordingStore';
 import { getCurrentProgram } from '../services/epg-service';
 import { KEY_CODES } from '../utils/keys';
-import { isMobile } from '../utils/platform';
+import { isMobile, isIPhone } from '../utils/platform';
 import { cn } from '../utils/cn';
 
 const OSD_TIMEOUT = 5000;
@@ -201,9 +201,26 @@ export default function Player() {
 
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  // Fullscreen: use the container element so custom controls remain visible
+  // Fullscreen: container-level on Android/iPad, native video fullscreen on iPhone
   const handleFullscreen = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
+
+    // iPhone doesn't support the Fullscreen API — use native video fullscreen
+    if (isIPhone()) {
+      const video = getVideoElement() as HTMLVideoElement & {
+        webkitEnterFullscreen?: () => void;
+        webkitExitFullscreen?: () => void;
+      };
+      if (!video) return;
+      if ((video as HTMLVideoElement & { webkitDisplayingFullscreen?: boolean }).webkitDisplayingFullscreen) {
+        video.webkitExitFullscreen?.();
+      } else {
+        video.webkitEnterFullscreen?.();
+      }
+      return;
+    }
+
+    // Android / iPad: fullscreen on the container to keep custom controls
     const container = containerRef.current;
     if (!container) return;
 
@@ -214,12 +231,10 @@ export default function Player() {
     const el = container as HTMLElement & {
       webkitRequestFullscreen?: () => Promise<void>;
     };
-    const isFs = !!(doc.fullscreenElement || doc.webkitFullscreenElement);
 
-    if (isFs) {
+    if (doc.fullscreenElement || doc.webkitFullscreenElement) {
       if (doc.exitFullscreen) doc.exitFullscreen();
       else if (doc.webkitExitFullscreen) doc.webkitExitFullscreen();
-      // Unlock orientation when exiting fullscreen
       try { screen.orientation.unlock(); } catch { /* ignore */ }
     } else {
       const goFs = el.requestFullscreen
@@ -227,33 +242,38 @@ export default function Player() {
         : el.webkitRequestFullscreen
           ? el.webkitRequestFullscreen()
           : Promise.resolve();
-      // Try to lock to landscape in fullscreen
-      if (goFs) {
-        (goFs as Promise<void>).then(() => {
-          try {
-            const orientation = screen.orientation as ScreenOrientation & { lock?: (o: string) => Promise<void> };
-            orientation.lock?.('landscape')?.catch(() => {});
-          } catch { /* ignore */ }
-        }).catch(() => {});
-      }
+      (goFs as Promise<void>).then(() => {
+        try {
+          const orientation = screen.orientation as ScreenOrientation & { lock?: (o: string) => Promise<void> };
+          orientation.lock?.('landscape')?.catch(() => {});
+        } catch { /* ignore */ }
+      }).catch(() => {});
     }
-  }, []);
+  }, [getVideoElement]);
 
   useEffect(() => {
     const onFsChange = () => {
-      const doc = document as Document & {
-        webkitFullscreenElement?: Element | null;
-        msFullscreenElement?: Element | null;
-      };
-      setIsFullscreen(!!(doc.fullscreenElement || doc.webkitFullscreenElement || doc.msFullscreenElement));
+      const doc = document as Document & { webkitFullscreenElement?: Element | null };
+      setIsFullscreen(!!(doc.fullscreenElement || doc.webkitFullscreenElement));
     };
     document.addEventListener('fullscreenchange', onFsChange);
     document.addEventListener('webkitfullscreenchange', onFsChange);
+
+    // iPhone fires these events on the video element instead
+    const video = getVideoElement();
+    const onWebkitFs = () => {
+      setIsFullscreen(!!(video as HTMLVideoElement & { webkitDisplayingFullscreen?: boolean })?.webkitDisplayingFullscreen);
+    };
+    video?.addEventListener('webkitbeginfullscreen', onWebkitFs);
+    video?.addEventListener('webkitendfullscreen', onWebkitFs);
+
     return () => {
       document.removeEventListener('fullscreenchange', onFsChange);
       document.removeEventListener('webkitfullscreenchange', onFsChange);
+      video?.removeEventListener('webkitbeginfullscreen', onWebkitFs);
+      video?.removeEventListener('webkitendfullscreen', onWebkitFs);
     };
-  }, []);
+  }, [getVideoElement]);
 
   const handleRecord = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation();
