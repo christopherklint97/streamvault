@@ -53,13 +53,13 @@ export default function MovieDetail({ movie }: MovieDetailProps) {
   const title = info?.name || movie.name;
 
   return (
-    <div className="p-4 lg:p-6 lg:px-8 overflow-y-auto h-full outline-none">
+    <div className="p-4 lg:p-6 lg:px-8 overflow-y-auto h-full outline-hidden">
       <button className="inline-flex items-center gap-1.5 py-2 px-4 bg-white/[0.08] border-none rounded-lg text-[#ccc] text-sm mb-4 tap-none active:bg-white/[0.16] lg:hidden" onClick={goBack}>
         {'\u2190'} Back
       </button>
 
       <div className="flex flex-col items-center gap-4 lg:flex-row lg:items-start lg:gap-7 lg:mb-7">
-        <div className="w-[200px] h-[300px] rounded-xl overflow-hidden bg-surface-border flex-shrink-0 lg:w-[220px] lg:min-w-[220px] lg:h-[320px] lg:rounded-[10px]">
+        <div className="w-[200px] h-[300px] rounded-xl overflow-hidden bg-surface-border shrink-0 lg:w-[220px] lg:min-w-[220px] lg:h-[320px] lg:rounded-[10px]">
           {cover ? (
             <img className="w-full h-full object-cover" src={cover} alt={title} />
           ) : (
@@ -84,7 +84,7 @@ export default function MovieDetail({ movie }: MovieDetailProps) {
           )}
 
           <div className="flex gap-2.5 justify-center flex-wrap mt-2 lg:justify-start lg:gap-3 lg:mt-3">
-            <button className="py-3 px-8 bg-brand-red text-white border-none rounded-lg text-base lg:text-18 font-semibold tap-none active:opacity-80 hover:bg-brand-red-hover focus:bg-brand-red-hover focus:outline-none" onClick={handlePlay}>
+            <button className="py-3 px-8 bg-brand-red text-white border-none rounded-lg text-base lg:text-18 font-semibold tap-none active:opacity-80 hover:bg-brand-red-hover focus:bg-brand-red-hover focus:outline-hidden" onClick={handlePlay}>
               {pct > 0 && pct < 95 ? `Resume (${pct}%)` : 'Play'}
             </button>
             <button

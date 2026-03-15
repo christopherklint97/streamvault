@@ -53,7 +53,7 @@ export default function Sidebar() {
   );
 
   return (
-    <nav className="flex w-full flex-row justify-around items-center border-t border-white/[0.08] bg-dark-sidebar pb-[env(safe-area-inset-bottom,0px)] lg:w-sidebar lg:h-tv lg:flex-col lg:items-center lg:pt-5 lg:flex-shrink-0 lg:z-[100] lg:border-r lg:border-white/[0.06] lg:border-t-0 lg:[contain:layout_style_paint]" ref={sidebarRef}>
+    <nav className="flex w-full flex-row justify-around items-center border-t border-white/[0.08] bg-dark-sidebar pb-[env(safe-area-inset-bottom,0px)] lg:w-sidebar lg:h-tv lg:flex-col lg:items-center lg:pt-5 lg:shrink-0 lg:z-[100] lg:border-r lg:border-white/[0.06] lg:border-t-0 lg:[contain:layout_style_paint]" ref={sidebarRef}>
       <div className="hidden lg:block text-24 font-bold text-accent mb-8">SV</div>
       <ul className="flex flex-row lg:flex-col gap-0 lg:gap-1 w-full justify-around lg:justify-start list-none">
         {NAV_ITEMS.map((item, index) => (

@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import { execSync } from 'child_process'
+import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 
@@ -11,6 +12,7 @@ const serverUrl = process.env.VITE_SERVER_URL !== undefined
 
 export default defineConfig({
   plugins: [
+    tailwindcss(),
     react(),
     VitePWA({
       registerType: 'autoUpdate',

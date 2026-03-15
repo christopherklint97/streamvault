@@ -73,7 +73,7 @@ export default function HorizontalRow({ title, channels, onSelect }: HorizontalR
               <div style={{ width: startIdx * CARD_WIDTH, flexShrink: 0 }} />
             )}
             {channels.slice(startIdx, endIdx + 1).map((channel) => (
-              <div key={channel.id} className="w-[130px] lg:w-[200px] flex-shrink-0">
+              <div key={channel.id} className="w-[130px] lg:w-[200px] shrink-0">
                 <ChannelCard
                   channel={channel}
                   onSelect={onSelect}
@@ -87,7 +87,7 @@ export default function HorizontalRow({ title, channels, onSelect }: HorizontalR
           </>
         ) : (
           channels.map((channel) => (
-            <div key={channel.id} className="w-[130px] lg:w-[200px] flex-shrink-0">
+            <div key={channel.id} className="w-[130px] lg:w-[200px] shrink-0">
               <ChannelCard
                 channel={channel}
                 onSelect={onSelect}

@@ -494,7 +494,7 @@ export default function Player() {
           {/* Top bar: back + title */}
           <div className="flex items-start gap-3 pt-[calc(12px+env(safe-area-inset-top,0px))] pb-8 px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] bg-gradient-to-b from-black/[0.85] to-transparent lg:gap-3 lg:pt-6 lg:px-10 lg:pb-10">
             {MOBILE && (
-              <button className="flex items-center justify-center w-9 h-9 bg-white/[0.12] border-none rounded-full text-white text-18 flex-shrink-0 tap-none active:bg-white/[0.24]" onClick={(e) => { e.stopPropagation(); handleBack(); }}>
+              <button className="flex items-center justify-center w-9 h-9 bg-white/[0.12] border-none rounded-full text-white text-18 shrink-0 tap-none active:bg-white/[0.24]" onClick={(e) => { e.stopPropagation(); handleBack(); }}>
                 {'\u2190'}
               </button>
             )}
@@ -517,7 +517,7 @@ export default function Player() {
               </button>
             )}
             {MOBILE && pipSupported && (
-              <button className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-white/[0.12] text-white flex-shrink-0 tap-none cursor-pointer active:bg-white/[0.24]" onClick={handlePiP} title="Picture-in-Picture">
+              <button className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-white/[0.12] text-white shrink-0 tap-none cursor-pointer active:bg-white/[0.24]" onClick={handlePiP} title="Picture-in-Picture">
                 {/* PiP icon */}
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <rect x="2" y="3" width="20" height="14" rx="2" />
@@ -526,7 +526,7 @@ export default function Player() {
               </button>
             )}
             {MOBILE && (
-              <button className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-white/[0.12] text-white flex-shrink-0 tap-none cursor-pointer active:bg-white/[0.24]" onClick={handleFullscreen} title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+              <button className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-white/[0.12] text-white shrink-0 tap-none cursor-pointer active:bg-white/[0.24]" onClick={handleFullscreen} title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
                 {isFullscreen ? (
                   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M8 3v3a2 2 0 0 1-2 2H3" />
@@ -574,7 +574,7 @@ export default function Player() {
             {/* Live progress bar */}
             {isLive && currentProgram && (
               <div className="flex items-center gap-2.5 mb-2" data-player-controls>
-                <span className="text-11 font-bold tracking-wider text-white bg-[#e53935] py-0.5 px-2 rounded-[3px] flex-shrink-0">LIVE</span>
+                <span className="text-11 font-bold tracking-wider text-white bg-[#e53935] py-0.5 px-2 rounded-[3px] shrink-0">LIVE</span>
                 <div className="flex-1 h-1 bg-white/[0.15] rounded-sm overflow-hidden">
                   <div className="h-full bg-accent rounded-sm transition-[width] duration-1000 linear" style={{ width: `${liveProgress}%` }} />
                 </div>

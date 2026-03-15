@@ -78,7 +78,7 @@ function ChannelCardInner({ channel, onSelect, vindex }: ChannelCardProps) {
 
   return (
     <div
-      className="relative flex flex-col bg-surface rounded-lg overflow-hidden border-2 border-transparent cursor-pointer [contain:layout_style_paint] transition-all duration-180 tap-none active:scale-[0.97] lg:active:scale-100 focus:border-accent focus:outline-none focus:scale-105 focus:z-[2] focus:will-change-transform lg:focus:scale-105"
+      className="relative flex flex-col bg-surface rounded-lg overflow-hidden border-2 border-transparent cursor-pointer [contain:layout_style_paint] transition-all duration-180 tap-none active:scale-[0.97] lg:active:scale-100 focus:border-accent focus:outline-hidden focus:scale-105 focus:z-[2] focus:will-change-transform lg:focus:scale-105"
       data-focusable
       data-vindex={vindex}
       tabIndex={-1}

@@ -94,7 +94,7 @@ function EpgProgressBar({ programs }: { programs: EpgProgram[] | undefined }) {
       </div>
       <div className="flex justify-between items-center gap-2">
         <span className="text-12 text-[#888] flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{current.title}</span>
-        <span className="text-11 text-[#555] flex-shrink-0">{fmt(start)} – {fmt(stop)}</span>
+        <span className="text-11 text-[#555] shrink-0">{fmt(start)} – {fmt(stop)}</span>
       </div>
     </div>
   );
@@ -212,7 +212,7 @@ function FilterDropdown({ categories, selectedGroup, onSelect }: FilterDropdownP
   const label = selectedGroup && selectedGroup !== 'All' ? selectedGroup : 'All categories';
 
   return (
-    <div className="relative flex-shrink-0" ref={containerRef} onKeyDown={handleKeyDown}>
+    <div className="relative shrink-0" ref={containerRef} onKeyDown={handleKeyDown}>
       <button
         className={cn(
           'flex items-center gap-2 py-2.5 px-3.5 lg:py-3 lg:px-[18px] bg-surface border-2 border-surface-border rounded-lg text-sm lg:text-17 font-semibold text-[#ccc] whitespace-nowrap transition-all duration-150 w-full lg:w-auto lg:max-w-[320px] tap-none',
@@ -223,14 +223,14 @@ function FilterDropdown({ categories, selectedGroup, onSelect }: FilterDropdownP
         tabIndex={0}
       >
         <span className="overflow-hidden text-ellipsis">{label}</span>
-        <span className="text-12 text-[#555] flex-shrink-0">{open ? '\u25B2' : '\u25BC'}</span>
+        <span className="text-12 text-[#555] shrink-0">{open ? '\u25B2' : '\u25BC'}</span>
       </button>
 
       {open && (
         <div className="absolute top-[calc(100%+6px)] left-0 right-0 lg:min-w-[320px] lg:max-w-[460px] bg-surface border-2 border-surface-border rounded-[10px] z-[100] flex flex-col animate-fade-in-fast shadow-[0_12px_40px_rgba(0,0,0,0.6)] max-h-[60dvh] lg:max-h-none">
           <input
             ref={inputRef}
-            className="py-2.5 px-3 lg:py-3 lg:px-3.5 text-sm lg:text-17 bg-dark-deep border-none border-b border-surface-border rounded-t-[10px] text-[#e8eaed] outline-none placeholder:text-[#444]"
+            className="py-2.5 px-3 lg:py-3 lg:px-3.5 text-sm lg:text-17 bg-dark-deep border-none border-b border-surface-border rounded-t-[10px] text-[#e8eaed] outline-hidden placeholder:text-[#444]"
             type="text"
             placeholder="Search categories..."
             value={filterQuery}
@@ -261,7 +261,7 @@ function FilterDropdown({ categories, selectedGroup, onSelect }: FilterDropdownP
               >
                 <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{cat.name}</span>
                 {cat.stream_count > 0 && (
-                  <span className="text-13 text-[#555] flex-shrink-0">{cat.stream_count}</span>
+                  <span className="text-13 text-[#555] shrink-0">{cat.stream_count}</span>
                 )}
               </button>
             ))}
@@ -288,7 +288,7 @@ function LiveListItem({ channel, onSelect, vindex, epgPrograms }: { channel: Cha
       </button>
       <button
         className={cn(
-          'w-11 h-11 flex items-center justify-center bg-transparent border-none text-18 text-[#444] flex-shrink-0 tap-none',
+          'w-11 h-11 flex items-center justify-center bg-transparent border-none text-18 text-[#444] shrink-0 tap-none',
           isFav && 'text-favorite'
         )}
         onClick={() => toggle(channel.id)}

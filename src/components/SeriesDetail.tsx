@@ -132,7 +132,7 @@ export default function SeriesDetail({ series }: SeriesDetailProps) {
 
   if (loading) {
     return (
-      <div className="p-4 lg:p-6 lg:px-8 overflow-y-auto h-full outline-none" onKeyDown={handleKeyDown}>
+      <div className="p-4 lg:p-6 lg:px-8 overflow-y-auto h-full outline-hidden" onKeyDown={handleKeyDown}>
         <div className="flex items-center justify-center h-[300px] text-20 text-[#888]">Loading series info...</div>
       </div>
     );
@@ -140,7 +140,7 @@ export default function SeriesDetail({ series }: SeriesDetailProps) {
 
   if (error || !info) {
     return (
-      <div className="p-4 lg:p-6 lg:px-8 overflow-y-auto h-full outline-none" onKeyDown={handleKeyDown}>
+      <div className="p-4 lg:p-6 lg:px-8 overflow-y-auto h-full outline-hidden" onKeyDown={handleKeyDown}>
         <div className="flex items-center justify-center h-[300px] text-20 text-[#888]">{error || 'Series not found'}</div>
         <button className="block mx-auto my-5 py-2.5 px-6 bg-[#333] text-white border-none rounded-md text-base cursor-pointer" onClick={goBack}>Go Back</button>
       </div>
@@ -160,7 +160,7 @@ export default function SeriesDetail({ series }: SeriesDetailProps) {
   }
 
   return (
-    <div className="p-4 lg:p-6 lg:px-8 overflow-y-auto h-full outline-none" onKeyDown={handleKeyDown} tabIndex={-1}>
+    <div className="p-4 lg:p-6 lg:px-8 overflow-y-auto h-full outline-hidden" onKeyDown={handleKeyDown} tabIndex={-1}>
       {/* Header */}
       <div className="flex flex-col gap-4 lg:flex-row lg:gap-7 lg:mb-7">
         <div className="w-full max-w-[200px] h-[280px] mx-auto lg:w-[220px] lg:min-w-[220px] lg:h-[320px] lg:max-w-none lg:mx-0 rounded-[10px] overflow-hidden bg-surface-border">
@@ -182,7 +182,7 @@ export default function SeriesDetail({ series }: SeriesDetailProps) {
           {info.director && <p className="text-13 text-[#7a8290]">Director: {info.director}</p>}
           {nextUpEpisode && (
             <button
-              className="mt-3 py-2.5 px-6 lg:py-3 lg:px-8 bg-brand-red text-white border-none rounded-md text-15 lg:text-18 font-semibold cursor-pointer self-start transition-colors duration-150 hover:bg-brand-red-hover focus:bg-brand-red-hover focus:outline-none"
+              className="mt-3 py-2.5 px-6 lg:py-3 lg:px-8 bg-brand-red text-white border-none rounded-md text-15 lg:text-18 font-semibold cursor-pointer self-start transition-colors duration-150 hover:bg-brand-red-hover focus:bg-brand-red-hover focus:outline-hidden"
               data-focusable
               tabIndex={0}
               onClick={() => handlePlayEpisode(nextUpEpisode!)}

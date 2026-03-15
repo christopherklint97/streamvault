@@ -180,7 +180,7 @@ export default function Home() {
   const hasContent = typeCounts.livetv > 0 || typeCounts.movies > 0 || typeCounts.series > 0 || channelMap.size > 0;
   if (!hasContent) {
     return (
-      <div className={cn('flex flex-col gap-5 lg:gap-7 outline-none animate-fade-in', 'justify-center items-center min-h-[60dvh] lg:h-full')} ref={containerRef} onKeyDown={handleKeyDown}>
+      <div className={cn('flex flex-col gap-5 lg:gap-7 outline-hidden animate-fade-in', 'justify-center items-center min-h-[60dvh] lg:h-full')} ref={containerRef} onKeyDown={handleKeyDown}>
         <div className="text-center">
           <h1 className="text-22 lg:text-32 mb-3">Welcome to StreamVault</h1>
           <p className="text-sm lg:text-18 text-[#888] mb-6">Go to Settings to add a playlist URL and start watching.</p>
@@ -198,7 +198,7 @@ export default function Home() {
   }
 
   return (
-    <div className="flex flex-col gap-5 lg:gap-7 outline-none animate-fade-in" ref={containerRef} onKeyDown={handleKeyDown}>
+    <div className="flex flex-col gap-5 lg:gap-7 outline-hidden animate-fade-in" ref={containerRef} onKeyDown={handleKeyDown}>
       {/* Continue Watching */}
       {continueWatchingChannels.length > 0 && (
         <div className="flex flex-col [contain:layout_style]">
@@ -212,7 +212,7 @@ export default function Home() {
               return (
                 <div
                   key={ch.id}
-                  className="w-[140px] lg:w-[220px] flex-shrink-0 bg-surface border-2 border-transparent rounded-lg overflow-hidden cursor-pointer transition-all duration-180 tap-none active:scale-[0.97] lg:active:scale-100 focus:border-accent focus:scale-[1.06] focus:z-[2]"
+                  className="w-[140px] lg:w-[220px] shrink-0 bg-surface border-2 border-transparent rounded-lg overflow-hidden cursor-pointer transition-all duration-180 tap-none active:scale-[0.97] lg:active:scale-100 focus:border-accent focus:scale-[1.06] focus:z-[2]"
                   data-focusable
                   tabIndex={-1}
                   onClick={() => handleSelectChannel(ch)}
@@ -250,7 +250,7 @@ export default function Home() {
             tabIndex={-1}
             onClick={() => handleSelectChannel(lastWatchedChannel)}
           >
-            <div className="w-12 h-12 lg:w-[72px] lg:h-[72px] flex-shrink-0 flex items-center justify-center bg-dark-deep rounded-md lg:rounded-lg overflow-hidden">
+            <div className="w-12 h-12 lg:w-[72px] lg:h-[72px] shrink-0 flex items-center justify-center bg-dark-deep rounded-md lg:rounded-lg overflow-hidden">
               {lastWatchedChannel.logo ? (
                 <img className="max-w-10 lg:max-w-14 max-h-9 lg:max-h-12 object-contain" src={lastWatchedChannel.logo} alt={lastWatchedChannel.name} width={56} height={48} loading="lazy" decoding="async" />
               ) : (

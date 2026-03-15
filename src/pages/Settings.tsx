@@ -150,7 +150,7 @@ export default function Settings() {
   const isConnected = SAME_ORIGIN || !!apiBaseUrl;
 
   return (
-    <FocusZone className="flex flex-col gap-5 lg:gap-7 max-w-full lg:max-w-[900px] outline-none animate-fade-in pb-6 lg:pb-0">
+    <FocusZone className="flex flex-col gap-5 lg:gap-7 max-w-full lg:max-w-[900px] outline-hidden animate-fade-in pb-6 lg:pb-0">
       <h1 className="text-28 font-bold">Settings</h1>
 
       {error && <div className="text-[#ff4757]">{error}</div>}

@@ -157,7 +157,7 @@ export default function EpgGuide() {
 
   return (
     <div className="p-3 lg:p-5 h-full flex flex-col overflow-hidden">
-      <div className="flex items-center gap-2.5 lg:gap-5 mb-4 flex-shrink-0 flex-wrap lg:flex-nowrap">
+      <div className="flex items-center gap-2.5 lg:gap-5 mb-4 shrink-0 flex-wrap lg:flex-nowrap">
         <h1 className="text-20 lg:text-28 font-bold">TV Guide</h1>
         <div className="flex gap-1 lg:gap-1.5">
           <button className="py-2 px-3 lg:py-1.5 lg:px-3.5 rounded-md bg-white/[0.06] text-13 lg:text-sm text-[#aaa] transition-colors duration-150 tap-none hover:bg-white/[0.12] focus:bg-white/[0.12]" onClick={() => handleTimeShift(-3)}>-3h</button>
@@ -186,13 +186,13 @@ export default function EpgGuide() {
             return (
               <div key={ch.id} className="flex border-b border-white/[0.04]" style={{ height: ROW_HEIGHT }}>
                 <button
-                  className="flex-shrink-0 flex items-center px-2 lg:px-2.5 text-12 lg:text-13 font-medium text-[#ccc] bg-[#0d0d16] overflow-hidden text-ellipsis whitespace-nowrap text-left sticky left-0 z-[1] hover:bg-[#151520]"
+                  className="shrink-0 flex items-center px-2 lg:px-2.5 text-12 lg:text-13 font-medium text-[#ccc] bg-[#0d0d16] overflow-hidden text-ellipsis whitespace-nowrap text-left sticky left-0 z-[1] hover:bg-[#151520]"
                   style={{ width: CHANNEL_COL_WIDTH }}
                   onClick={() => handleChannelClick(ch)}
                 >
                   {ch.name}
                 </button>
-                <div className="relative flex-shrink-0" style={{ width: TIMELINE_WIDTH }}>
+                <div className="relative shrink-0" style={{ width: TIMELINE_WIDTH }}>
                   {programs.map((p, i) => {
                     const start = new Date(p.start).getTime();
                     const stop = new Date(p.stop).getTime();
@@ -234,7 +234,7 @@ export default function EpgGuide() {
 
       {/* Program detail panel */}
       {selectedProgram && (
-        <div className="flex-shrink-0 p-3.5 lg:p-4 mt-2 bg-white/[0.04] rounded-lg max-h-[100px] lg:max-h-[120px] overflow-y-auto">
+        <div className="shrink-0 p-3.5 lg:p-4 mt-2 bg-white/[0.04] rounded-lg max-h-[100px] lg:max-h-[120px] overflow-y-auto">
           <div className="text-base font-semibold mb-1">{selectedProgram.title}</div>
           <div className="text-13 text-[#888] mb-1.5">
             {formatTime(new Date(selectedProgram.start))} – {formatTime(new Date(selectedProgram.stop))}

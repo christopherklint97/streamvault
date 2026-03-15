@@ -223,7 +223,7 @@ export default function FocusZone({ children, className, onEnter }: FocusZonePro
     <div
       ref={ref}
       tabIndex={0}
-      className={cn('outline-none', className)}
+      className={cn('outline-hidden', className)}
       onFocus={handleFocus}
       onKeyDown={handleKeyDown}
     >
