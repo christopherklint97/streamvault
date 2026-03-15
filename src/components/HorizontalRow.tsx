@@ -63,9 +63,9 @@ export default function HorizontalRow({ title, channels, onSelect }: HorizontalR
   const useVirtualization = channels.length > VISIBLE_COUNT + BUFFER * 2;
 
   return (
-    <div className="horizontal-row">
-      <h2 className="horizontal-row__title">{title}</h2>
-      <div className="horizontal-row__scroll" ref={scrollRef}>
+    <div className="flex flex-col gap-2">
+      <h2 className="text-22 font-bold">{title}</h2>
+      <div className="flex gap-2.5 lg:gap-4 overflow-x-auto py-2 px-1 [contain:content] [will-change:scroll-position] [-webkit-overflow-scrolling:touch]" ref={scrollRef}>
         {useVirtualization ? (
           <>
             {/* Spacer for items before visible window */}
@@ -73,11 +73,12 @@ export default function HorizontalRow({ title, channels, onSelect }: HorizontalR
               <div style={{ width: startIdx * CARD_WIDTH, flexShrink: 0 }} />
             )}
             {channels.slice(startIdx, endIdx + 1).map((channel) => (
-              <ChannelCard
-                key={channel.id}
-                channel={channel}
-                onSelect={onSelect}
-              />
+              <div key={channel.id} className="w-[130px] lg:w-[200px] flex-shrink-0">
+                <ChannelCard
+                  channel={channel}
+                  onSelect={onSelect}
+                />
+              </div>
             ))}
             {/* Spacer for items after visible window */}
             {endIdx < channels.length - 1 && (
@@ -86,11 +87,12 @@ export default function HorizontalRow({ title, channels, onSelect }: HorizontalR
           </>
         ) : (
           channels.map((channel) => (
-            <ChannelCard
-              key={channel.id}
-              channel={channel}
-              onSelect={onSelect}
-            />
+            <div key={channel.id} className="w-[130px] lg:w-[200px] flex-shrink-0">
+              <ChannelCard
+                channel={channel}
+                onSelect={onSelect}
+              />
+            </div>
           ))
         )}
       </div>

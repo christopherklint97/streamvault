@@ -3,6 +3,7 @@ import type { Channel } from '../types';
 import { useFavoritesStore } from '../stores/favoritesStore';
 import { acquireImage, releaseImage } from '../utils/image-pool';
 import { isMobile } from '../utils/platform';
+import { cn } from '../utils/cn';
 
 const MOBILE = isMobile();
 
@@ -77,7 +78,7 @@ function ChannelCardInner({ channel, onSelect, vindex }: ChannelCardProps) {
 
   return (
     <div
-      className="channel-card"
+      className="relative flex flex-col bg-surface rounded-lg overflow-hidden border-2 border-transparent cursor-pointer [contain:layout_style_paint] transition-all duration-180 tap-none active:scale-[0.97] lg:active:scale-100 focus:border-accent focus:outline-none focus:scale-105 focus:z-[2] focus:will-change-transform lg:focus:scale-105"
       data-focusable
       data-vindex={vindex}
       tabIndex={-1}
@@ -85,17 +86,23 @@ function ChannelCardInner({ channel, onSelect, vindex }: ChannelCardProps) {
     >
       <div
         ref={logoRef}
-        className="channel-card__logo-container"
+        className="card-poster w-full h-[140px] lg:h-[200px] flex items-center justify-center bg-dark-deep relative [contain:layout_style]"
         style={!channel.logo ? { backgroundColor: getColorForName(channel.name) } : undefined}
         data-letter={channel.name.charAt(0).toUpperCase()}
       />
-      <span className="channel-card__name">{channel.name}</span>
+      <span className="py-1.5 px-2 lg:py-2.5 lg:px-3 text-11 lg:text-15 font-semibold whitespace-nowrap overflow-hidden text-ellipsis">{channel.name}</span>
       {MOBILE ? (
-        <button className={`channel-card__star-btn${isFavorite ? ' channel-card__star-btn--active' : ''}`} onClick={handleFavClick}>
+        <button
+          className={cn(
+            'absolute top-1 right-1 z-[3] w-7 h-7 rounded-full bg-black/50 border-none text-sm text-[#888] flex items-center justify-center tap-none',
+            isFavorite && 'text-favorite'
+          )}
+          onClick={handleFavClick}
+        >
           {isFavorite ? '\u2605' : '\u2606'}
         </button>
       ) : (
-        isFavorite && <span className="channel-card__star">{'\u2605'}</span>
+        isFavorite && <span className="absolute top-1.5 right-2 text-sm text-favorite z-[2]">{'\u2605'}</span>
       )}
     </div>
   );

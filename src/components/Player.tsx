@@ -7,6 +7,7 @@ import { useRecordingStore } from '../stores/recordingStore';
 import { getCurrentProgram } from '../services/epg-service';
 import { KEY_CODES } from '../utils/keys';
 import { isMobile } from '../utils/platform';
+import { cn } from '../utils/cn';
 
 const OSD_TIMEOUT = 5000;
 const MOBILE = isMobile();
@@ -29,7 +30,7 @@ function formatTime(seconds: number): string {
 /** Check if a touch event target is inside a clickable OSD element */
 function isOsdControl(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
-  return !!target.closest('button, input, .player__btn-row, .player__seek-row, .player__live-row');
+  return !!target.closest('button, input, [data-player-controls]');
 }
 
 export default function Player() {
@@ -418,7 +419,7 @@ export default function Player() {
 
   return (
     <div
-      className="player"
+      className="w-full h-dvh lg:w-tv lg:h-tv relative bg-black fixed lg:static top-0 left-0 right-0 bottom-0"
       tabIndex={0}
       onKeyDown={handleKeyDown}
       onTouchStart={MOBILE ? handleTouchStart : undefined}
@@ -426,48 +427,48 @@ export default function Player() {
       onTouchEnd={MOBILE ? handleTouchEnd : undefined}
     >
       {/* Video container */}
-      <div className="player__video-container">
+      <div className="w-full h-full">
         {typeof webapis !== 'undefined' && webapis.avplay ? (
           <div id="av-player" className="player__av-object" />
         ) : (
-          <video id="av-player" className="player__video" autoPlay playsInline />
+          <video id="av-player" className="w-full h-full bg-black object-contain object-[center_top] lg:object-center" autoPlay playsInline />
         )}
       </div>
 
       {/* Loading spinner */}
       {playerState.status === 'loading' && (
-        <div className="player__loading">
-          <div className="player__spinner" />
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center gap-4 text-[#888] text-20 animate-fade-in">
+          <div className="w-12 h-12 border-[3px] border-[#222] border-t-accent rounded-full animate-spin-fast" />
           <span>Loading...</span>
         </div>
       )}
 
       {/* Error display */}
       {playerState.status === 'error' && (
-        <div className="player__error">
-          <div className="player__error-icon">{'\u26A0'}</div>
-          <h2>Playback Error</h2>
-          <p>{playerState.errorMessage}</p>
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center text-[#ff4757] animate-fade-in px-6 lg:px-0">
+          <div className="text-48 mb-3">{'\u26A0'}</div>
+          <h2 className="text-20 lg:text-26 font-bold mb-2">Playback Error</h2>
+          <p className="text-15 lg:text-18 text-[#888] mb-2">{playerState.errorMessage}</p>
           {MOBILE ? (
-            <button className="player__error-btn" onClick={retry}>Retry</button>
+            <button className="mt-4 py-3 px-8 bg-accent border-none rounded-lg text-black text-base font-bold tap-none active:opacity-80" onClick={retry}>Retry</button>
           ) : (
-            <p className="player__error-hint">Press ENTER to retry</p>
+            <p className="text-base text-[#555]">Press ENTER to retry</p>
           )}
         </div>
       )}
 
       {/* Subtitle text overlay */}
       {subtitleText && (
-        <div className="player__subtitles">
-          <span className="player__subtitle-text">{subtitleText}</span>
+        <div className="absolute bottom-[60px] lg:bottom-20 left-1/2 -translate-x-1/2 max-w-[80%] py-2 px-4 bg-black/75 rounded text-20 lg:text-28 text-center z-[2]">
+          <span>{subtitleText}</span>
         </div>
       )}
 
       {/* Swipe-to-scrub preview */}
       {MOBILE && swipeSeeking && (
-        <div className="player__scrub-preview">
-          <span className="player__scrub-time">{formatTime(swipePreview)}</span>
-          <span className="player__scrub-delta">
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center gap-1 bg-black/75 rounded-xl py-4 px-7 z-20 pointer-events-none">
+          <span className="text-36 font-bold text-white tabular-nums">{formatTime(swipePreview)}</span>
+          <span className="text-base text-brand-red font-semibold">
             {swipePreview >= currentTime ? '+' : ''}{formatTime(Math.abs(swipePreview - currentTime))}
           </span>
         </div>
@@ -475,30 +476,40 @@ export default function Player() {
 
       {/* Double-tap skip indicator */}
       {MOBILE && doubleTapSide && (
-        <div className={`player__double-tap player__double-tap--${doubleTapSide}`}>
-          <span className="player__double-tap-text">10s</span>
+        <div className={cn(
+          'absolute top-0 bottom-0 w-[40%] flex items-center justify-center z-[18] pointer-events-none animate-double-tap',
+          doubleTapSide === 'left' && 'left-0 rounded-r-[50%]',
+          doubleTapSide === 'right' && 'right-0 rounded-l-[50%]'
+        )}>
+          <span className="text-20 font-bold text-white bg-white/[0.15] rounded-full w-16 h-16 flex items-center justify-center">10s</span>
         </div>
       )}
 
       {/* Controls OSD */}
       {currentChannel && playerState.status !== 'error' && (
-        <div className={`player__osd${showOSD ? ' player__osd--visible' : ''}`}>
+        <div className={cn(
+          'absolute inset-0 flex flex-col justify-between opacity-0 transition-opacity duration-300 pointer-events-none z-[3] player-osd-portrait',
+          showOSD && 'opacity-100 pointer-events-auto'
+        )}>
           {/* Top bar: back + title */}
-          <div className="player__osd-top">
+          <div className="flex items-start gap-3 pt-[calc(12px+env(safe-area-inset-top,0px))] pb-8 px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] bg-gradient-to-b from-black/[0.85] to-transparent lg:gap-3 lg:pt-6 lg:px-10 lg:pb-10">
             {MOBILE && (
-              <button className="player__back-btn" onClick={(e) => { e.stopPropagation(); handleBack(); }}>
+              <button className="flex items-center justify-center w-9 h-9 bg-white/[0.12] border-none rounded-full text-white text-18 flex-shrink-0 tap-none active:bg-white/[0.24]" onClick={(e) => { e.stopPropagation(); handleBack(); }}>
                 {'\u2190'}
               </button>
             )}
-            <div className="player__osd-info">
-              <span className="player__osd-channel-name">{currentChannel.name}</span>
+            <div className="flex-1 min-w-0">
+              <span className="text-base lg:text-28 font-bold block whitespace-nowrap overflow-hidden text-ellipsis">{currentChannel.name}</span>
               {currentProgram && (
-                <span className="player__osd-program">{currentProgram.title}</span>
+                <span className="text-12 lg:text-18 text-[#aaa] mt-1 block">{currentProgram.title}</span>
               )}
             </div>
             {MOBILE && isLive && (
               <button
-                className={`player__record-btn${isRecording ? ' player__record-btn--active' : ''}`}
+                className={cn(
+                  'w-9 h-9 flex items-center justify-center text-20 text-white opacity-80 transition-opacity duration-150 hover:opacity-100',
+                  isRecording && 'text-[#ef4444] opacity-100 animate-pulse-record'
+                )}
                 onClick={handleRecord}
                 title={isRecording ? 'Recording...' : 'Record'}
               >
@@ -506,7 +517,7 @@ export default function Player() {
               </button>
             )}
             {MOBILE && pipSupported && (
-              <button className="player__pip-btn" onClick={handlePiP} title="Picture-in-Picture">
+              <button className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-white/[0.12] text-white flex-shrink-0 tap-none cursor-pointer active:bg-white/[0.24]" onClick={handlePiP} title="Picture-in-Picture">
                 {/* PiP icon */}
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <rect x="2" y="3" width="20" height="14" rx="2" />
@@ -515,7 +526,7 @@ export default function Player() {
               </button>
             )}
             {MOBILE && (
-              <button className="player__fullscreen-btn" onClick={handleFullscreen} title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+              <button className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-white/[0.12] text-white flex-shrink-0 tap-none cursor-pointer active:bg-white/[0.24]" onClick={handleFullscreen} title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
                 {isFullscreen ? (
                   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M8 3v3a2 2 0 0 1-2 2H3" />
@@ -536,14 +547,14 @@ export default function Player() {
           </div>
 
           {/* Bottom bar: controls */}
-          <div className="player__controls">
+          <div className="relative px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] pt-8 pb-[calc(12px+env(safe-area-inset-bottom,0px))] lg:px-10 lg:pt-10 lg:pb-6 bg-gradient-to-t from-black/90 to-transparent">
             {/* Seek bar for VOD */}
             {!isLive && hasDuration && (
-              <div className="player__seek-row">
-                <span className="player__time">{formatTime(seekDisplay)}</span>
+              <div className="flex items-center gap-3 mb-2" data-player-controls>
+                <span className="text-sm text-[#aaa] tabular-nums min-w-[48px] text-center">{formatTime(seekDisplay)}</span>
                 <input
                   ref={seekBarRef}
-                  className="player__seek-bar"
+                  className="seek-bar flex-1 h-1.5 lg:h-1 rounded-sm"
                   type="range"
                   min={0}
                   max={duration}
@@ -556,18 +567,18 @@ export default function Player() {
                   onTouchEnd={handleSeekEnd}
                   onClick={(e) => e.stopPropagation()}
                 />
-                <span className="player__time">{formatTime(duration)}</span>
+                <span className="text-sm text-[#aaa] tabular-nums min-w-[48px] text-center">{formatTime(duration)}</span>
               </div>
             )}
 
             {/* Live progress bar */}
             {isLive && currentProgram && (
-              <div className="player__live-row">
-                <span className="player__live-badge">LIVE</span>
-                <div className="player__osd-progress-bar">
-                  <div className="player__osd-progress-fill" style={{ width: `${liveProgress}%` }} />
+              <div className="flex items-center gap-2.5 mb-2" data-player-controls>
+                <span className="text-11 font-bold tracking-wider text-white bg-[#e53935] py-0.5 px-2 rounded-[3px] flex-shrink-0">LIVE</span>
+                <div className="flex-1 h-1 bg-white/[0.15] rounded-sm overflow-hidden">
+                  <div className="h-full bg-accent rounded-sm transition-[width] duration-1000 linear" style={{ width: `${liveProgress}%` }} />
                 </div>
-                <span className="player__time player__time--small">
+                <span className="text-sm text-[#aaa] tabular-nums min-w-0 text-12 text-center">
                   {currentProgram.start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   {' - '}
                   {currentProgram.stop.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -577,16 +588,16 @@ export default function Player() {
 
             {/* Playback buttons */}
             {MOBILE && (
-              <div className="player__btn-row">
+              <div className="flex items-center justify-center gap-6 mt-1" data-player-controls>
                 {!isLive && (
-                  <button className="player__ctrl-btn" onClick={(e) => { e.stopPropagation(); handleSkip(-10); }} title="Back 10s">
+                  <button className="flex items-center justify-center w-11 h-11 rounded-full border-none bg-white/[0.12] text-white tap-none cursor-pointer active:bg-white/[0.24]" onClick={(e) => { e.stopPropagation(); handleSkip(-10); }} title="Back 10s">
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
                       <path d="M12.5 3C7.26 3 3.03 7.03 3 12.13L1 10.1 0 11.18l3.5 3.5 3.5-3.5-1-1.07L4 12.13C4.03 7.59 7.59 4 12.5 4c4.14 0 7.5 3.36 7.5 7.5S16.64 19 12.5 19c-2.95 0-5.5-1.71-6.71-4.19l-.91.39C6.17 17.89 9.09 20 12.5 20c4.69 0 8.5-3.81 8.5-8.5S17.19 3 12.5 3z" />
                       <text x="9" y="15" fontSize="7" fontWeight="bold" fill="currentColor">10</text>
                     </svg>
                   </button>
                 )}
-                <button className="player__ctrl-btn player__ctrl-btn--play" onClick={handleTogglePlay}>
+                <button className="flex items-center justify-center w-14 h-14 rounded-full border-none bg-white/[0.18] text-white tap-none cursor-pointer active:bg-white/[0.24]" onClick={handleTogglePlay}>
                   {isPaused ? (
                     <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
                   ) : (
@@ -594,7 +605,7 @@ export default function Player() {
                   )}
                 </button>
                 {!isLive && (
-                  <button className="player__ctrl-btn" onClick={(e) => { e.stopPropagation(); handleSkip(10); }} title="Forward 10s">
+                  <button className="flex items-center justify-center w-11 h-11 rounded-full border-none bg-white/[0.12] text-white tap-none cursor-pointer active:bg-white/[0.24]" onClick={(e) => { e.stopPropagation(); handleSkip(10); }} title="Forward 10s">
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
                       <path d="M11.5 3C16.74 3 20.97 7.03 21 12.13L23 10.1l1 1.07-3.5 3.5-3.5-3.5 1-1.07 2 2.02C19.97 7.59 16.41 4 11.5 4 7.36 4 4 7.36 4 11.5S7.36 19 11.5 19c2.95 0 5.5-1.71 6.71-4.19l.91.39C17.83 17.89 14.91 20 11.5 20 6.81 20 3 16.19 3 11.5S6.81 3 11.5 3z" />
                       <text x="8" y="15" fontSize="7" fontWeight="bold" fill="currentColor">10</text>
@@ -606,7 +617,7 @@ export default function Player() {
 
             {/* Subtitle indicator (TV only) */}
             {!MOBILE && (
-              <span className="player__osd-subtitle-indicator">
+              <span className="text-sm text-[#555] mt-1 block">
                 {currentSubtitleIndex === -1 ? 'Subs: Off' : `Subs: ${subtitleTracks[currentSubtitleIndex]?.label || 'On'}`}
               </span>
             )}

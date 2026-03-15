@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import type { ReactNode } from 'react';
+import { cn } from '../utils/cn';
 
 interface VirtualGridProps {
   itemCount: number;
@@ -77,7 +78,6 @@ export default function VirtualGrid({
     rows.push(
       <div
         key={row}
-        className="virtual-grid__row"
         style={{
           transform: `translateY(${row * rowHeight}px)`,
           height: rowHeight,
@@ -92,11 +92,11 @@ export default function VirtualGrid({
   return (
     <div
       ref={containerRef}
-      className={`virtual-grid${className ? ` ${className}` : ''}`}
+      className={cn('overflow-hidden relative', className)}
       style={{ height: containerHeight }}
       onScroll={handleScroll}
     >
-      <div className="virtual-grid__inner" style={{ height: totalHeight }}>
+      <div className="relative" style={{ height: totalHeight }}>
         {rows}
       </div>
     </div>

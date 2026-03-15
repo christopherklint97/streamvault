@@ -5,6 +5,7 @@ import { useFavoritesStore } from '../stores/favoritesStore';
 import { useAppStore } from '../stores/appStore';
 import { clearRecentChannels } from '../services/channel-service';
 import FocusZone from '../components/FocusZone';
+import { cn } from '../utils/cn';
 
 function formatSyncTime(timestamp: number): string {
   if (!timestamp) return 'Never';
@@ -149,17 +150,17 @@ export default function Settings() {
   const isConnected = SAME_ORIGIN || !!apiBaseUrl;
 
   return (
-    <FocusZone className="settings">
-      <h1 className="settings__title">Settings</h1>
+    <FocusZone className="flex flex-col gap-5 lg:gap-7 max-w-full lg:max-w-[900px] outline-none animate-fade-in pb-6 lg:pb-0">
+      <h1 className="text-28 font-bold">Settings</h1>
 
-      {error && <div className="settings__error">{error}</div>}
+      {error && <div className="text-[#ff4757]">{error}</div>}
 
       {/* Loading Progress */}
       {isLoading && (
-        <div className="settings__progress">
-          <div className="settings__progress-bar">
+        <div className="flex flex-col gap-2">
+          <div className="h-1 bg-surface-border rounded-sm overflow-hidden">
             <div
-              className="settings__progress-fill"
+              className="h-full bg-gradient-to-r from-accent to-accent-green rounded-sm"
               style={{
                 width: loadingPhase === 'fetching-playlist' ? '10%'
                   : loadingPhase === 'parsing-playlist' ? '30%'
@@ -169,18 +170,18 @@ export default function Settings() {
               }}
             />
           </div>
-          <span className="settings__progress-text">{loadingMessage}</span>
+          <span className="text-sm lg:text-base text-[#888]">{loadingMessage}</span>
           {channelCount > 0 && loadingPhase !== 'fetching-playlist' && (
-            <span className="settings__progress-count">{channelCount.toLocaleString()} channels found</span>
+            <span className="text-sm text-[#888]">{channelCount.toLocaleString()} channels found</span>
           )}
           <button
-            className="settings__btn settings__btn--cancel"
+            className="py-2.5 px-5 lg:py-3 lg:px-7 bg-[#ff4757] text-white border-2 border-[#ff4757] rounded-lg text-sm lg:text-17 font-semibold self-start transition-all duration-150 tap-none focus:border-white focus:text-white focus:scale-[1.02] disabled:opacity-40"
             data-focusable
             tabIndex={0}
             onClick={() => {
               cancelSync();
               requestAnimationFrame(() => {
-                const target = document.querySelector('.settings [data-focusable]') as HTMLElement | null;
+                const target = document.querySelector('[data-focusable]') as HTMLElement | null;
                 target?.focus();
               });
             }}
@@ -191,17 +192,17 @@ export default function Settings() {
       )}
 
       {!isLoading && loadingPhase === 'done' && loadingMessage && (
-        <div className="settings__success">{loadingMessage}</div>
+        <div className="text-success">{loadingMessage}</div>
       )}
 
       {/* Server Connection — hidden when PWA is served from same origin */}
       {!SAME_ORIGIN && (
-        <div className="settings__section">
-          <h2 className="settings__section-title">Server</h2>
-          <div className="settings__field">
-            <label className="settings__label">StreamVault Server URL</label>
+        <div className="flex flex-col gap-3">
+          <h2 className="text-base lg:text-20 font-bold text-accent">Server</h2>
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm lg:text-base text-[#666] font-semibold">StreamVault Server URL</label>
             <input
-              className="settings__input"
+              className="py-2.5 px-3.5 lg:py-3 lg:px-4 text-base lg:text-20 bg-surface border-2 border-surface-border rounded-lg text-[#e8eaed] transition-colors duration-200 focus:border-accent"
               type="text"
               data-focusable
               tabIndex={0}
@@ -210,8 +211,8 @@ export default function Settings() {
               placeholder="http://192.168.0.100:3001"
             />
           </div>
-          {fieldError && !isConnected && <span className="settings__field-error">{fieldError}</span>}
-          <button className="settings__btn" data-focusable tabIndex={0} onClick={handleConnectServer}>
+          {fieldError && !isConnected && <span className="text-[#ff4757] text-sm">{fieldError}</span>}
+          <button className="py-2.5 px-5 lg:py-3 lg:px-7 bg-surface-hover border-2 border-[#222] rounded-lg text-sm lg:text-17 font-semibold text-[#ccc] self-start transition-all duration-150 tap-none focus:border-accent focus:text-white focus:scale-[1.02] disabled:opacity-40" data-focusable tabIndex={0} onClick={handleConnectServer}>
             {isConnected ? 'Reconnect' : 'Connect'}
           </button>
         </div>
@@ -220,11 +221,14 @@ export default function Settings() {
       {isConnected && (
         <>
           {/* Input Mode Toggle */}
-          <div className="settings__section">
-            <h2 className="settings__section-title">Playlist Source</h2>
-            <div className="settings__mode-toggle">
+          <div className="flex flex-col gap-3">
+            <h2 className="text-base lg:text-20 font-bold text-accent">Playlist Source</h2>
+            <div className="flex gap-2">
               <button
-                className={`settings__mode-btn${inputMode === 'xtream' ? ' settings__mode-btn--active' : ''}`}
+                className={cn(
+                  'py-2 px-4 lg:py-2.5 lg:px-6 border-2 rounded-lg text-sm lg:text-17 transition-all duration-150 tap-none focus:border-accent',
+                  inputMode === 'xtream' ? 'bg-accent text-black border-accent' : 'bg-surface border-surface-border text-[#888]'
+                )}
                 data-focusable
                 tabIndex={0}
                 onClick={() => handleModeSwitch('xtream')}
@@ -232,7 +236,10 @@ export default function Settings() {
                 Xtream Codes
               </button>
               <button
-                className={`settings__mode-btn${inputMode === 'manual' ? ' settings__mode-btn--active' : ''}`}
+                className={cn(
+                  'py-2 px-4 lg:py-2.5 lg:px-6 border-2 rounded-lg text-sm lg:text-17 transition-all duration-150 tap-none focus:border-accent',
+                  inputMode === 'manual' ? 'bg-accent text-black border-accent' : 'bg-surface border-surface-border text-[#888]'
+                )}
                 data-focusable
                 tabIndex={0}
                 onClick={() => handleModeSwitch('manual')}
@@ -244,12 +251,12 @@ export default function Settings() {
 
           {/* Xtream Codes Input */}
           {inputMode === 'xtream' && (
-            <div className="settings__section">
-              <h2 className="settings__section-title">Xtream Codes Login</h2>
-              <div className="settings__field">
-                <label className="settings__label">Server URL</label>
+            <div className="flex flex-col gap-3">
+              <h2 className="text-base lg:text-20 font-bold text-accent">Xtream Codes Login</h2>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm lg:text-base text-[#666] font-semibold">Server URL</label>
                 <input
-                  className="settings__input"
+                  className="py-2.5 px-3.5 lg:py-3 lg:px-4 text-base lg:text-20 bg-surface border-2 border-surface-border rounded-lg text-[#e8eaed] transition-colors duration-200 focus:border-accent"
                   type="text"
                   data-focusable
                   tabIndex={0}
@@ -258,10 +265,10 @@ export default function Settings() {
                   placeholder="http://example.com"
                 />
               </div>
-              <div className="settings__field">
-                <label className="settings__label">Username</label>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm lg:text-base text-[#666] font-semibold">Username</label>
                 <input
-                  className="settings__input"
+                  className="py-2.5 px-3.5 lg:py-3 lg:px-4 text-base lg:text-20 bg-surface border-2 border-surface-border rounded-lg text-[#e8eaed] transition-colors duration-200 focus:border-accent"
                   type="text"
                   data-focusable
                   tabIndex={0}
@@ -270,10 +277,10 @@ export default function Settings() {
                   placeholder="Your username"
                 />
               </div>
-              <div className="settings__field">
-                <label className="settings__label">Password</label>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm lg:text-base text-[#666] font-semibold">Password</label>
                 <input
-                  className="settings__input"
+                  className="py-2.5 px-3.5 lg:py-3 lg:px-4 text-base lg:text-20 bg-surface border-2 border-surface-border rounded-lg text-[#e8eaed] transition-colors duration-200 focus:border-accent"
                   type="text"
                   data-focusable
                   tabIndex={0}
@@ -282,8 +289,8 @@ export default function Settings() {
                   placeholder="Your password"
                 />
               </div>
-              {fieldError && isConnected && <span className="settings__field-error">{fieldError}</span>}
-              <button className="settings__btn" data-focusable tabIndex={0} onClick={handleSaveXtream} disabled={isLoading}>
+              {fieldError && isConnected && <span className="text-[#ff4757] text-sm">{fieldError}</span>}
+              <button className="py-2.5 px-5 lg:py-3 lg:px-7 bg-surface-hover border-2 border-[#222] rounded-lg text-sm lg:text-17 font-semibold text-[#ccc] self-start transition-all duration-150 tap-none focus:border-accent focus:text-white focus:scale-[1.02] disabled:opacity-40" data-focusable tabIndex={0} onClick={handleSaveXtream} disabled={isLoading}>
                 {isLoading ? 'Syncing...' : 'Connect & Sync'}
               </button>
             </div>
@@ -292,12 +299,12 @@ export default function Settings() {
           {/* Manual URL Input */}
           {inputMode === 'manual' && (
             <>
-              <div className="settings__section">
-                <h2 className="settings__section-title">Playlist</h2>
-                <div className="settings__field">
-                  <label className="settings__label">Playlist URL (M3U/M3U8)</label>
+              <div className="flex flex-col gap-3">
+                <h2 className="text-base lg:text-20 font-bold text-accent">Playlist</h2>
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-sm lg:text-base text-[#666] font-semibold">Playlist URL (M3U/M3U8)</label>
                   <input
-                    className="settings__input"
+                    className="py-2.5 px-3.5 lg:py-3 lg:px-4 text-base lg:text-20 bg-surface border-2 border-surface-border rounded-lg text-[#e8eaed] transition-colors duration-200 focus:border-accent"
                     type="text"
                     data-focusable
                     tabIndex={0}
@@ -306,10 +313,10 @@ export default function Settings() {
                     placeholder="https://example.com/playlist.m3u"
                   />
                 </div>
-                <div className="settings__field">
-                  <label className="settings__label">EPG URL (XMLTV, optional)</label>
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-sm lg:text-base text-[#666] font-semibold">EPG URL (XMLTV, optional)</label>
                   <input
-                    className="settings__input"
+                    className="py-2.5 px-3.5 lg:py-3 lg:px-4 text-base lg:text-20 bg-surface border-2 border-surface-border rounded-lg text-[#e8eaed] transition-colors duration-200 focus:border-accent"
                     type="text"
                     data-focusable
                     tabIndex={0}
@@ -318,8 +325,8 @@ export default function Settings() {
                     placeholder="https://example.com/epg.xml"
                   />
                 </div>
-                {fieldError && isConnected && <span className="settings__field-error">{fieldError}</span>}
-                <button className="settings__btn" data-focusable tabIndex={0} onClick={handleSavePlaylist} disabled={isLoading}>
+                {fieldError && isConnected && <span className="text-[#ff4757] text-sm">{fieldError}</span>}
+                <button className="py-2.5 px-5 lg:py-3 lg:px-7 bg-surface-hover border-2 border-[#222] rounded-lg text-sm lg:text-17 font-semibold text-[#ccc] self-start transition-all duration-150 tap-none focus:border-accent focus:text-white focus:scale-[1.02] disabled:opacity-40" data-focusable tabIndex={0} onClick={handleSavePlaylist} disabled={isLoading}>
                   {isLoading ? 'Syncing...' : 'Save & Sync'}
                 </button>
               </div>
@@ -327,71 +334,71 @@ export default function Settings() {
           )}
 
           {/* Sync Settings */}
-          <div className="settings__section">
-            <h2 className="settings__section-title">Sync</h2>
-            <div className="settings__info-row">
-              <span className="settings__info-label">Last synced:</span>
-              <span className="settings__info-value">{formatSyncTime(lastSyncTime)}</span>
+          <div className="flex flex-col gap-3">
+            <h2 className="text-base lg:text-20 font-bold text-accent">Sync</h2>
+            <div className="flex items-center gap-2 text-sm lg:text-base text-[#888]">
+              <span className="text-[#888]">Last synced:</span>
+              <span className="text-[#ccc]">{formatSyncTime(lastSyncTime)}</span>
             </div>
-            <div className="settings__info-row">
-              <span className="settings__info-label">Auto-sync:</span>
-              <button className="settings__sync-toggle" data-focusable tabIndex={0} onClick={handleSyncCycle}>
+            <div className="flex items-center gap-2 text-sm lg:text-base text-[#888]">
+              <span className="text-[#888]">Auto-sync:</span>
+              <button className="py-1.5 px-3.5 lg:py-2 lg:px-5 bg-surface border-2 border-surface-border rounded-lg text-sm lg:text-base text-[#aaa] transition-colors duration-150 focus:border-accent" data-focusable tabIndex={0} onClick={handleSyncCycle}>
                 {syncLabel}
               </button>
             </div>
-            <button className="settings__btn" data-focusable tabIndex={0} onClick={handleSyncNow} disabled={isLoading}>
+            <button className="py-2.5 px-5 lg:py-3 lg:px-7 bg-surface-hover border-2 border-[#222] rounded-lg text-sm lg:text-17 font-semibold text-[#ccc] self-start transition-all duration-150 tap-none focus:border-accent focus:text-white focus:scale-[1.02] disabled:opacity-40" data-focusable tabIndex={0} onClick={handleSyncNow} disabled={isLoading}>
               {isLoading ? 'Syncing...' : 'Sync Now'}
             </button>
           </div>
 
           {/* Stream Library */}
-          <div className="settings__section">
-            <h2 className="settings__section-title">Stream Library</h2>
-            <div className="settings__info-row">
-              <span className="settings__info-label">Streams cached:</span>
-              <span className="settings__info-value">{channels.length.toLocaleString()}</span>
+          <div className="flex flex-col gap-3">
+            <h2 className="text-base lg:text-20 font-bold text-accent">Stream Library</h2>
+            <div className="flex items-center gap-2 text-sm lg:text-base text-[#888]">
+              <span className="text-[#888]">Streams cached:</span>
+              <span className="text-[#ccc]">{channels.length.toLocaleString()}</span>
             </div>
-            <div className="settings__info-row">
-              <span className="settings__info-label">Last full crawl:</span>
-              <span className="settings__info-value">{formatSyncTime(lastCrawlTime)}</span>
+            <div className="flex items-center gap-2 text-sm lg:text-base text-[#888]">
+              <span className="text-[#888]">Last full crawl:</span>
+              <span className="text-[#ccc]">{formatSyncTime(lastCrawlTime)}</span>
             </div>
             {isCrawling && crawlProgress && (
-              <div className="settings__info-row">
-                <span className="settings__info-label">Progress:</span>
-                <span className="settings__info-value">{crawlProgress}</span>
+              <div className="flex items-center gap-2 text-sm lg:text-base text-[#888]">
+                <span className="text-[#888]">Progress:</span>
+                <span className="text-[#ccc]">{crawlProgress}</span>
               </div>
             )}
-            <p className="settings__hint">
+            <p className="text-13 text-[#555] my-2 lg:mb-3 leading-snug">
               Full crawl downloads all streams for instant search. Runs automatically at 3 AM daily.
             </p>
             {isCrawling ? (
-              <button className="settings__btn settings__btn--cancel" data-focusable tabIndex={0} onClick={cancelCrawl}>
+              <button className="py-2.5 px-5 lg:py-3 lg:px-7 bg-[#ff4757] text-white border-2 border-[#ff4757] rounded-lg text-sm lg:text-17 font-semibold self-start transition-all duration-150 tap-none focus:border-white focus:text-white focus:scale-[1.02] disabled:opacity-40" data-focusable tabIndex={0} onClick={cancelCrawl}>
                 Cancel Crawl
               </button>
             ) : (
-              <button className="settings__btn" data-focusable tabIndex={0} onClick={triggerCrawl}>
+              <button className="py-2.5 px-5 lg:py-3 lg:px-7 bg-surface-hover border-2 border-[#222] rounded-lg text-sm lg:text-17 font-semibold text-[#ccc] self-start transition-all duration-150 tap-none focus:border-accent focus:text-white focus:scale-[1.02] disabled:opacity-40" data-focusable tabIndex={0} onClick={triggerCrawl}>
                 Crawl All Streams Now
               </button>
             )}
           </div>
 
           {/* Data Management */}
-          <div className="settings__section">
-            <h2 className="settings__section-title">Data Management</h2>
-            <div className="settings__btn-row">
-              <button className="settings__btn settings__btn--danger" data-focusable tabIndex={0} onClick={handleClearFavorites}>
+          <div className="flex flex-col gap-3">
+            <h2 className="text-base lg:text-20 font-bold text-accent">Data Management</h2>
+            <div className="flex flex-wrap gap-2 lg:gap-3">
+              <button className="py-2.5 px-5 lg:py-3 lg:px-7 bg-[#ff4757] text-white border-2 border-[#ff4757] rounded-lg text-sm lg:text-17 font-semibold self-start transition-all duration-150 tap-none focus:border-white focus:text-white focus:scale-[1.02] disabled:opacity-40" data-focusable tabIndex={0} onClick={handleClearFavorites}>
                 Clear Favorites
               </button>
-              <button className="settings__btn settings__btn--danger" data-focusable tabIndex={0} onClick={handleClearRecent}>
+              <button className="py-2.5 px-5 lg:py-3 lg:px-7 bg-[#ff4757] text-white border-2 border-[#ff4757] rounded-lg text-sm lg:text-17 font-semibold self-start transition-all duration-150 tap-none focus:border-white focus:text-white focus:scale-[1.02] disabled:opacity-40" data-focusable tabIndex={0} onClick={handleClearRecent}>
                 Clear Recently Watched
               </button>
             </div>
           </div>
 
           {/* App Update */}
-          <div className="settings__section">
-            <h2 className="settings__section-title">App</h2>
-            <button className="settings__btn" data-focusable tabIndex={0} onClick={handleForceUpdate}>
+          <div className="flex flex-col gap-3">
+            <h2 className="text-base lg:text-20 font-bold text-accent">App</h2>
+            <button className="py-2.5 px-5 lg:py-3 lg:px-7 bg-surface-hover border-2 border-[#222] rounded-lg text-sm lg:text-17 font-semibold text-[#ccc] self-start transition-all duration-150 tap-none focus:border-accent focus:text-white focus:scale-[1.02] disabled:opacity-40" data-focusable tabIndex={0} onClick={handleForceUpdate}>
               Check for Update
             </button>
           </div>

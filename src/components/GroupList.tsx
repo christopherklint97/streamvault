@@ -3,6 +3,7 @@ import type { ContentType } from '../types';
 import { useChannelStore } from '../stores/channelStore';
 import { useAppStore } from '../stores/appStore';
 import { KEY_CODES } from '../utils/keys';
+import { cn } from '../utils/cn';
 
 interface GroupListProps {
   contentType: ContentType;
@@ -57,7 +58,7 @@ export default function GroupList({ contentType }: GroupListProps) {
   const focusItem = useCallback((index: number) => {
     const items = itemsRef.current;
     if (!items) return;
-    const buttons = items.querySelectorAll('.group-list__item') as NodeListOf<HTMLElement>;
+    const buttons = items.querySelectorAll('[data-group-item]') as NodeListOf<HTMLElement>;
     if (index >= 0 && index < buttons.length) {
       buttons[index].focus({ preventScroll: true });
       // Manual scroll - cheap, no smooth animation
@@ -93,7 +94,7 @@ export default function GroupList({ contentType }: GroupListProps) {
         focusItem(next);
       } else if (focusIndex === displayed.length - 1 && hasMore) {
         // Focus load more button
-        const loadMore = itemsRef.current?.querySelector('.group-list__load-more') as HTMLElement | null;
+        const loadMore = itemsRef.current?.querySelector('[data-group-loadmore]') as HTMLElement | null;
         loadMore?.focus({ preventScroll: true });
         setFocusIndex(displayed.length);
       }
@@ -133,12 +134,12 @@ export default function GroupList({ contentType }: GroupListProps) {
   const label = contentType === 'livetv' ? 'Live TV' : contentType === 'movies' ? 'Movies' : 'Series';
 
   return (
-    <div className="group-list" ref={containerRef} onKeyDown={handleKeyDown}>
-      <h1 className="group-list__title">{label}</h1>
-      <div className="group-list__search">
+    <div className="flex flex-col gap-3 lg:gap-4 animate-fade-in" ref={containerRef} onKeyDown={handleKeyDown}>
+      <h1 className="text-20 lg:text-28 font-bold">{label}</h1>
+      <div className="flex gap-2.5">
         <input
           ref={searchRef}
-          className="channel-list__search-input"
+          className="flex-1 py-2.5 px-3.5 lg:py-3 lg:px-4 text-base lg:text-20 bg-surface border-2 border-surface-border rounded-lg text-[#e8eaed] transition-colors duration-200 focus:border-accent placeholder:text-[#444]"
           type="text"
           placeholder={`Search ${label.toLowerCase()} categories...`}
           value={searchQuery}
@@ -147,7 +148,7 @@ export default function GroupList({ contentType }: GroupListProps) {
         />
         {searchQuery && (
           <button
-            className="channel-list__search-clear"
+            className="py-2 px-4 bg-surface-border rounded-lg text-base border-2 border-transparent transition-all duration-150 focus:border-accent focus:bg-[#222]"
             onClick={() => handleSearchChange('')}
             tabIndex={0}
           >
@@ -155,33 +156,38 @@ export default function GroupList({ contentType }: GroupListProps) {
           </button>
         )}
       </div>
-      <div className="group-list__count">
+      <div className="text-base text-[#555]">
         {filtered.length} categor{filtered.length !== 1 ? 'ies' : 'y'}
       </div>
-      <div className="group-list__items" ref={itemsRef}>
+      <div className="flex flex-col gap-1 overflow-y-visible py-1 lg:max-h-[820px] lg:overflow-y-auto lg:[contain:content] lg:[will-change:scroll-position]" ref={itemsRef}>
         {displayed.length === 0 ? (
-          <div className="channel-list__empty">
+          <div className="text-center py-10 lg:py-20 text-base lg:text-22 text-[#444] col-span-full">
             {categories.length === 0 ? 'No categories found. Sync in Settings.' : 'No matching categories.'}
           </div>
         ) : (
           displayed.map((cat, i) => (
             <button
               key={cat.id}
-              className={`group-list__item${focusIndex === i ? ' group-list__item--focused' : ''}`}
+              className={cn(
+                'group flex items-center gap-3 py-3.5 px-4 lg:py-4 lg:px-5 bg-surface border-2 border-transparent rounded-lg text-left [contain:layout_style_paint] transition-all duration-150 tap-none focus:border-accent focus:bg-surface-hover lg:focus:scale-[1.01]',
+                focusIndex === i && 'border-accent bg-surface-hover lg:scale-[1.01]'
+              )}
+              data-group-item
               tabIndex={focusIndex === i ? 0 : -1}
               onClick={() => handleSelectGroup(cat.name)}
             >
-              <span className="group-list__item-name">{cat.name}</span>
-              <span className="group-list__item-count">
+              <span className="flex-1 text-15 lg:text-20 font-semibold">{cat.name}</span>
+              <span className="text-base text-[#555]">
                 {cat.stream_count > 0 ? cat.stream_count : ''}
               </span>
-              <span className="group-list__item-arrow">{'\u203A'}</span>
+              <span className="text-24 text-[#333] transition-all duration-150 group-focus:text-accent group-focus:translate-x-0.5">{'\u203A'}</span>
             </button>
           ))
         )}
         {hasMore && (
           <button
-            className="group-list__load-more"
+            className="py-3 bg-surface border-2 border-transparent rounded-lg text-[#666] text-center text-17 transition-all duration-150 focus:border-accent focus:bg-surface-hover"
+            data-group-loadmore
             tabIndex={focusIndex === displayed.length ? 0 : -1}
             onClick={handleLoadMore}
           >

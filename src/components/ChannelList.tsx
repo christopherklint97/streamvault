@@ -7,6 +7,7 @@ import { KEY_CODES } from '../utils/keys';
 import { prefetchImages } from '../utils/image-pool';
 import { markKeyDown, markKeyRendered } from '../utils/perf-monitor';
 import { isMobile } from '../utils/platform';
+import { cn } from '../utils/cn';
 import ChannelCard from './ChannelCard';
 import { useFavoritesStore } from '../stores/favoritesStore';
 
@@ -87,13 +88,13 @@ function EpgProgressBar({ programs }: { programs: EpgProgram[] | undefined }) {
   const fmt = (d: Date) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   return (
-    <div className="epg-bar">
-      <div className="epg-bar__track">
-        <div className="epg-bar__fill" style={{ width: `${Math.min(progress * 100, 100)}%` }} />
+    <div className="flex flex-col gap-[3px] w-full">
+      <div className="h-[3px] bg-white/[0.08] rounded-sm overflow-hidden">
+        <div className="h-full bg-epg-purple rounded-sm transition-[width] duration-300" style={{ width: `${Math.min(progress * 100, 100)}%` }} />
       </div>
-      <div className="epg-bar__info">
-        <span className="epg-bar__title">{current.title}</span>
-        <span className="epg-bar__time">{fmt(start)} – {fmt(stop)}</span>
+      <div className="flex justify-between items-center gap-2">
+        <span className="text-12 text-[#888] flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{current.title}</span>
+        <span className="text-11 text-[#555] flex-shrink-0">{fmt(start)} – {fmt(stop)}</span>
       </div>
     </div>
   );
@@ -156,7 +157,7 @@ function FilterDropdown({ categories, selectedGroup, onSelect }: FilterDropdownP
     if (!open || focusIdx < 0) return;
     const list = listRef.current;
     if (!list) return;
-    const items = list.querySelectorAll('.filter-dropdown__item') as NodeListOf<HTMLElement>;
+    const items = list.querySelectorAll('[data-filter-item]') as NodeListOf<HTMLElement>;
     if (focusIdx < items.length) {
       const item = items[focusIdx];
       const top = item.offsetTop;
@@ -211,29 +212,38 @@ function FilterDropdown({ categories, selectedGroup, onSelect }: FilterDropdownP
   const label = selectedGroup && selectedGroup !== 'All' ? selectedGroup : 'All categories';
 
   return (
-    <div className="filter-dropdown" ref={containerRef} onKeyDown={handleKeyDown}>
+    <div className="relative flex-shrink-0" ref={containerRef} onKeyDown={handleKeyDown}>
       <button
-        className={`filter-dropdown__trigger${open ? ' filter-dropdown__trigger--open' : ''}`}
+        className={cn(
+          'flex items-center gap-2 py-2.5 px-3.5 lg:py-3 lg:px-[18px] bg-surface border-2 border-surface-border rounded-lg text-sm lg:text-17 font-semibold text-[#ccc] whitespace-nowrap transition-all duration-150 w-full lg:w-auto lg:max-w-[320px] tap-none',
+          open && 'border-accent text-white'
+        )}
+        data-filter-trigger
         onClick={handleToggle}
         tabIndex={0}
       >
-        <span className="filter-dropdown__label">{label}</span>
-        <span className="filter-dropdown__arrow">{open ? '\u25B2' : '\u25BC'}</span>
+        <span className="overflow-hidden text-ellipsis">{label}</span>
+        <span className="text-12 text-[#555] flex-shrink-0">{open ? '\u25B2' : '\u25BC'}</span>
       </button>
 
       {open && (
-        <div className="filter-dropdown__panel">
+        <div className="absolute top-[calc(100%+6px)] left-0 right-0 lg:min-w-[320px] lg:max-w-[460px] bg-surface border-2 border-surface-border rounded-[10px] z-[100] flex flex-col animate-fade-in-fast shadow-[0_12px_40px_rgba(0,0,0,0.6)] max-h-[60dvh] lg:max-h-none">
           <input
             ref={inputRef}
-            className="filter-dropdown__search"
+            className="py-2.5 px-3 lg:py-3 lg:px-3.5 text-sm lg:text-17 bg-dark-deep border-none border-b border-surface-border rounded-t-[10px] text-[#e8eaed] outline-none placeholder:text-[#444]"
             type="text"
             placeholder="Search categories..."
             value={filterQuery}
             onChange={e => { setFilterQuery(e.target.value); setFocusIdx(-1); }}
           />
-          <div className="filter-dropdown__list" ref={listRef}>
+          <div className="max-h-[50dvh] lg:max-h-[400px] overflow-y-auto p-1 [-webkit-overflow-scrolling:touch]" ref={listRef}>
             <button
-              className={`filter-dropdown__item${selectedGroup === 'All' || !selectedGroup ? ' filter-dropdown__item--active' : ''}${focusIdx === 0 ? ' filter-dropdown__item--focused' : ''}`}
+              className={cn(
+                'flex items-center gap-2 w-full py-3 px-3.5 lg:py-[11px] lg:px-3.5 bg-transparent border-none rounded-md text-left text-sm lg:text-base text-[#aaa] cursor-pointer transition-colors duration-100 tap-none hover:bg-surface-hover hover:text-white',
+                (selectedGroup === 'All' || !selectedGroup) && 'text-accent',
+                focusIdx === 0 && 'bg-surface-hover text-white outline-2 outline-accent outline-offset-[-2px]'
+              )}
+              data-filter-item
               onClick={() => handleSelect('All')}
             >
               All categories
@@ -241,17 +251,22 @@ function FilterDropdown({ categories, selectedGroup, onSelect }: FilterDropdownP
             {filtered.map((cat, i) => (
               <button
                 key={cat.id}
-                className={`filter-dropdown__item${selectedGroup === cat.name ? ' filter-dropdown__item--active' : ''}${focusIdx === i + 1 ? ' filter-dropdown__item--focused' : ''}`}
+                className={cn(
+                  'flex items-center gap-2 w-full py-3 px-3.5 lg:py-[11px] lg:px-3.5 bg-transparent border-none rounded-md text-left text-sm lg:text-base text-[#aaa] cursor-pointer transition-colors duration-100 tap-none hover:bg-surface-hover hover:text-white',
+                  selectedGroup === cat.name && 'text-accent',
+                  focusIdx === i + 1 && 'bg-surface-hover text-white outline-2 outline-accent outline-offset-[-2px]'
+                )}
+                data-filter-item
                 onClick={() => handleSelect(cat.name)}
               >
-                <span className="filter-dropdown__item-name">{cat.name}</span>
+                <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{cat.name}</span>
                 {cat.stream_count > 0 && (
-                  <span className="filter-dropdown__item-count">{cat.stream_count}</span>
+                  <span className="text-13 text-[#555] flex-shrink-0">{cat.stream_count}</span>
                 )}
               </button>
             ))}
             {filtered.length === 0 && (
-              <div className="filter-dropdown__empty">No matching categories</div>
+              <div className="p-5 text-center text-15 text-[#444]">No matching categories</div>
             )}
           </div>
         </div>
@@ -266,13 +281,16 @@ function LiveListItem({ channel, onSelect, vindex, epgPrograms }: { channel: Cha
   const isFav = useFavoritesStore((s) => s.favoriteIds.has(channel.id));
   const toggle = useFavoritesStore((s) => s.toggleFavorite);
   return (
-    <div className="channel-list__live-item" data-vindex={vindex}>
-      <button className="channel-list__live-main" onClick={() => onSelect(channel)}>
-        <span className="channel-list__live-name">{channel.name}</span>
+    <div className="flex items-center gap-0 bg-surface" data-vindex={vindex}>
+      <button className="flex flex-col items-stretch gap-1.5 py-3.5 px-3 lg:px-4 flex-1 min-w-0 bg-transparent border-none text-left tap-none active:bg-white/[0.04]" onClick={() => onSelect(channel)}>
+        <span className="text-15 font-medium text-[#e8eaed] flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{channel.name}</span>
         <EpgProgressBar programs={epgPrograms} />
       </button>
       <button
-        className={`channel-list__live-fav${isFav ? ' channel-list__live-fav--active' : ''}`}
+        className={cn(
+          'w-11 h-11 flex items-center justify-center bg-transparent border-none text-18 text-[#444] flex-shrink-0 tap-none',
+          isFav && 'text-favorite'
+        )}
         onClick={() => toggle(channel.id)}
       >
         {isFav ? '\u2605' : '\u2606'}
@@ -484,7 +502,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
       if (focusZone === 'search') {
         setFocusZone('filter');
         requestAnimationFrame(() => {
-          const trigger = document.querySelector('.filter-dropdown__trigger') as HTMLElement | null;
+          const trigger = document.querySelector('[data-filter-trigger]') as HTMLElement | null;
           trigger?.focus();
         });
       } else if (focusZone === 'filter') {
@@ -514,7 +532,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
         } else {
           setFocusZone('filter');
           requestAnimationFrame(() => {
-            const trigger = document.querySelector('.filter-dropdown__trigger') as HTMLElement | null;
+            const trigger = document.querySelector('[data-filter-trigger]') as HTMLElement | null;
             trigger?.focus();
           });
         }
@@ -574,21 +592,21 @@ export default function ChannelList({ contentType }: ChannelListProps) {
   // Mobile: simple CSS grid, no virtualization
   if (MOBILE) {
     return (
-      <div className="channel-list">
-        <div className="channel-list__sticky-header">
-          <h1 className="channel-list__title">{label}</h1>
-          <div className="channel-list__search-row">
-            <div className="channel-list__search">
+      <div className="flex flex-col gap-3 lg:gap-4 animate-fade-in">
+        <div className="sticky top-[calc(-16px-env(safe-area-inset-top,0px))] z-10 bg-dark px-4 pt-[calc(8px+env(safe-area-inset-top,0px))] pb-0 -mx-4 -mt-[calc(16px+env(safe-area-inset-top,0px))] flex flex-col gap-2 lg:static lg:p-0 lg:m-0 lg:z-auto lg:bg-transparent">
+          <h1 className="text-20 lg:text-28 font-bold">{label}</h1>
+          <div className="flex flex-col lg:flex-row gap-2 lg:gap-3 items-stretch lg:items-start">
+            <div className="flex gap-2.5 flex-1">
               <input
                 ref={searchRef}
-                className="channel-list__search-input"
+                className="flex-1 py-2.5 px-3.5 lg:py-3 lg:px-4 text-base lg:text-20 bg-surface border-2 border-surface-border rounded-lg text-[#e8eaed] transition-colors duration-200 focus:border-accent placeholder:text-[#444]"
                 type="text"
                 placeholder={`Search ${label.toLowerCase()}...`}
                 value={searchQuery}
                 onChange={(e) => handleSearchChange(e.target.value)}
               />
               {searchQuery && (
-                <button className="channel-list__search-clear" onClick={() => handleSearchChange('')}>
+                <button className="py-2 px-4 bg-surface-border rounded-lg text-base border-2 border-transparent transition-all duration-150 focus:border-accent focus:bg-[#222]" onClick={() => handleSearchChange('')}>
                   X
                 </button>
               )}
@@ -599,13 +617,13 @@ export default function ChannelList({ contentType }: ChannelListProps) {
               onSelect={handleGroupSelect}
             />
           </div>
-          <div className="channel-list__count">{countText}</div>
+          <div className="text-13 lg:text-base text-[#555]">{countText}</div>
         </div>
         {contentType === 'livetv' ? (
           /* Live TV: simple list view (no images, full titles visible) */
-          <div className="channel-list__live-list" ref={gridRef}>
+          <div className="flex flex-col gap-px" ref={gridRef}>
             {channels.length === 0 ? (
-              <div className="channel-list__empty">{emptyMessage}</div>
+              <div className="text-center py-10 lg:py-20 text-base lg:text-22 text-[#444] col-span-full">{emptyMessage}</div>
             ) : (
               channels.map((ch, idx) => (
                 <LiveListItem key={ch.id} channel={ch} onSelect={handleSelect} vindex={idx} epgPrograms={epgMap[ch.id]} />
@@ -613,9 +631,9 @@ export default function ChannelList({ contentType }: ChannelListProps) {
             )}
           </div>
         ) : (
-          <div className="channel-list__grid channel-list__grid--mobile" ref={gridRef}>
+          <div className="h-auto max-h-none overflow-visible [contain:initial] [content-visibility:visible] grid grid-cols-3 gap-2.5 py-1" ref={gridRef}>
             {channels.length === 0 ? (
-              <div className="channel-list__empty">{emptyMessage}</div>
+              <div className="text-center py-10 lg:py-20 text-base lg:text-22 text-[#444] col-span-full">{emptyMessage}</div>
             ) : (
               channels.map((ch, idx) => (
                 <ChannelCard key={ch.id} channel={ch} onSelect={handleSelect} vindex={idx} />
@@ -624,7 +642,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
           </div>
         )}
         {nextCursor && !showingSearch && (
-          <button className="channel-list__load-more" onClick={handleLoadMore} disabled={loadingMore}>
+          <button className="col-span-full py-3.5 lg:py-3 bg-surface border-2 border-transparent rounded-lg text-[#666] text-center text-15 lg:text-17 transition-all duration-150 w-full mt-2 lg:mt-0 tap-none focus:border-accent focus:bg-surface-hover" onClick={handleLoadMore} disabled={loadingMore}>
             {loadingMore ? 'Loading...' : `Load more (${remaining} remaining)`}
           </button>
         )}
@@ -652,7 +670,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     rows.push(
       <div
         key={row}
-        className="channel-list__row"
+        className="[contain:layout_style_paint]"
         style={{
           position: 'absolute',
           top: 0,
@@ -673,13 +691,13 @@ export default function ChannelList({ contentType }: ChannelListProps) {
   }
 
   return (
-    <div className="channel-list" onKeyDown={handleKeyDown}>
-      <h1 className="channel-list__title">{label}</h1>
-      <div className="channel-list__search-row">
-        <div className="channel-list__search">
+    <div className="flex flex-col gap-3 lg:gap-4 animate-fade-in" onKeyDown={handleKeyDown}>
+      <h1 className="text-20 lg:text-28 font-bold">{label}</h1>
+      <div className="flex flex-col lg:flex-row gap-2 lg:gap-3 items-stretch lg:items-start">
+        <div className="flex gap-2.5 flex-1">
           <input
             ref={searchRef}
-            className="channel-list__search-input"
+            className="flex-1 py-2.5 px-3.5 lg:py-3 lg:px-4 text-base lg:text-20 bg-surface border-2 border-surface-border rounded-lg text-[#e8eaed] transition-colors duration-200 focus:border-accent placeholder:text-[#444]"
             type="text"
             placeholder={`Search ${label.toLowerCase()}...`}
             value={searchQuery}
@@ -688,7 +706,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
           />
           {searchQuery && (
             <button
-              className="channel-list__search-clear"
+              className="py-2 px-4 bg-surface-border rounded-lg text-base border-2 border-transparent transition-all duration-150 focus:border-accent focus:bg-[#222]"
               onClick={() => handleSearchChange('')}
               tabIndex={-1}
             >
@@ -702,10 +720,10 @@ export default function ChannelList({ contentType }: ChannelListProps) {
           onSelect={handleGroupSelect}
         />
       </div>
-      <div className="channel-list__count">{countText}</div>
-      <div className="channel-list__grid" ref={gridRef}>
+      <div className="text-13 lg:text-base text-[#555]">{countText}</div>
+      <div className="h-[900px] overflow-hidden relative [contain:strict] py-2 px-1 [content-visibility:auto]" ref={gridRef}>
         {channels.length === 0 ? (
-          <div className="channel-list__empty">{emptyMessage}</div>
+          <div className="text-center py-10 lg:py-20 text-base lg:text-22 text-[#444] col-span-full">{emptyMessage}</div>
         ) : (
           <div style={{ height: totalRows * ROW_HEIGHT, position: 'relative' }}>
             {rows}
@@ -713,7 +731,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
         )}
       </div>
       {nextCursor && !showingSearch && (
-        <button className="channel-list__load-more" onClick={handleLoadMore} disabled={loadingMore}>
+        <button className="col-span-full py-3.5 lg:py-3 bg-surface border-2 border-transparent rounded-lg text-[#666] text-center text-15 lg:text-17 transition-all duration-150 w-full mt-2 lg:mt-0 tap-none focus:border-accent focus:bg-surface-hover" onClick={handleLoadMore} disabled={loadingMore}>
           {loadingMore ? 'Loading...' : `Load more (${remaining} remaining)`}
         </button>
       )}

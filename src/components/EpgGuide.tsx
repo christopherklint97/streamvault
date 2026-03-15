@@ -4,6 +4,7 @@ import { useChannelStore, SAME_ORIGIN } from '../stores/channelStore';
 import { usePlayerStore } from '../stores/playerStore';
 import { useAppStore } from '../stores/appStore';
 import { useRecordingStore } from '../stores/recordingStore';
+import { cn } from '../utils/cn';
 
 interface EpgProgram {
   channelId: string;
@@ -151,47 +152,47 @@ export default function EpgGuide() {
   }, [windowStart]);
 
   if (loading) {
-    return <div className="epg-guide"><div className="epg-guide__loading">Loading guide...</div></div>;
+    return <div className="p-3 lg:p-5 h-full flex flex-col overflow-hidden"><div className="text-[#888] text-center py-[60px]">Loading guide...</div></div>;
   }
 
   return (
-    <div className="epg-guide">
-      <div className="epg-guide__header">
-        <h1 className="epg-guide__title">TV Guide</h1>
-        <div className="epg-guide__nav">
-          <button className="epg-guide__nav-btn" onClick={() => handleTimeShift(-3)}>-3h</button>
-          <button className="epg-guide__nav-btn" onClick={() => handleTimeShift(-1)}>-1h</button>
-          <button className="epg-guide__nav-btn epg-guide__nav-btn--now" onClick={() => { setTimeOffset(0); setSelectedProgram(null); }}>Now</button>
-          <button className="epg-guide__nav-btn" onClick={() => handleTimeShift(1)}>+1h</button>
-          <button className="epg-guide__nav-btn" onClick={() => handleTimeShift(3)}>+3h</button>
+    <div className="p-3 lg:p-5 h-full flex flex-col overflow-hidden">
+      <div className="flex items-center gap-2.5 lg:gap-5 mb-4 flex-shrink-0 flex-wrap lg:flex-nowrap">
+        <h1 className="text-20 lg:text-28 font-bold">TV Guide</h1>
+        <div className="flex gap-1 lg:gap-1.5">
+          <button className="py-2 px-3 lg:py-1.5 lg:px-3.5 rounded-md bg-white/[0.06] text-13 lg:text-sm text-[#aaa] transition-colors duration-150 tap-none hover:bg-white/[0.12] focus:bg-white/[0.12]" onClick={() => handleTimeShift(-3)}>-3h</button>
+          <button className="py-2 px-3 lg:py-1.5 lg:px-3.5 rounded-md bg-white/[0.06] text-13 lg:text-sm text-[#aaa] transition-colors duration-150 tap-none hover:bg-white/[0.12] focus:bg-white/[0.12]" onClick={() => handleTimeShift(-1)}>-1h</button>
+          <button className="py-2 px-3 lg:py-1.5 lg:px-3.5 rounded-md bg-epg-purple/20 text-epg-purple-light transition-colors duration-150 tap-none text-13 lg:text-sm hover:bg-epg-purple/[0.35] focus:bg-epg-purple/[0.35]" onClick={() => { setTimeOffset(0); setSelectedProgram(null); }}>Now</button>
+          <button className="py-2 px-3 lg:py-1.5 lg:px-3.5 rounded-md bg-white/[0.06] text-13 lg:text-sm text-[#aaa] transition-colors duration-150 tap-none hover:bg-white/[0.12] focus:bg-white/[0.12]" onClick={() => handleTimeShift(1)}>+1h</button>
+          <button className="py-2 px-3 lg:py-1.5 lg:px-3.5 rounded-md bg-white/[0.06] text-13 lg:text-sm text-[#aaa] transition-colors duration-150 tap-none hover:bg-white/[0.12] focus:bg-white/[0.12]" onClick={() => handleTimeShift(3)}>+3h</button>
         </div>
-        <div className="epg-guide__date">{formatDate(new Date(windowStart))}</div>
+        <div className="text-sm text-[#666] ml-auto">{formatDate(new Date(windowStart))}</div>
       </div>
 
-      <div className="epg-guide__grid-wrapper" ref={gridRef}>
+      <div className="flex-1 overflow-auto relative [-webkit-overflow-scrolling:touch]" ref={gridRef}>
         {/* Timeline header */}
-        <div className="epg-guide__timeline" style={{ marginLeft: CHANNEL_COL_WIDTH }}>
+        <div className="flex sticky top-0 z-[2] bg-dark h-8" style={{ marginLeft: CHANNEL_COL_WIDTH }}>
           {hourMarkers.map((m, i) => (
-            <div key={i} className="epg-guide__hour" style={{ left: m.offset, width: HOUR_WIDTH }}>
+            <div key={i} className="absolute top-0 h-8 flex items-center pl-2 text-13 text-[#666] border-l border-white/[0.06]" style={{ left: m.offset, width: HOUR_WIDTH }}>
               {formatTime(m.time)}
             </div>
           ))}
         </div>
 
         {/* Channel rows */}
-        <div className="epg-guide__rows">
+        <div className="relative">
           {channels.map(ch => {
             const programs = epgData[ch.id] || [];
             return (
-              <div key={ch.id} className="epg-guide__row" style={{ height: ROW_HEIGHT }}>
+              <div key={ch.id} className="flex border-b border-white/[0.04]" style={{ height: ROW_HEIGHT }}>
                 <button
-                  className="epg-guide__channel-name"
+                  className="flex-shrink-0 flex items-center px-2 lg:px-2.5 text-12 lg:text-13 font-medium text-[#ccc] bg-[#0d0d16] overflow-hidden text-ellipsis whitespace-nowrap text-left sticky left-0 z-[1] hover:bg-[#151520]"
                   style={{ width: CHANNEL_COL_WIDTH }}
                   onClick={() => handleChannelClick(ch)}
                 >
                   {ch.name}
                 </button>
-                <div className="epg-guide__programs" style={{ width: TIMELINE_WIDTH }}>
+                <div className="relative flex-shrink-0" style={{ width: TIMELINE_WIDTH }}>
                   {programs.map((p, i) => {
                     const start = new Date(p.start).getTime();
                     const stop = new Date(p.stop).getTime();
@@ -206,18 +207,23 @@ export default function EpgGuide() {
                     return (
                       <button
                         key={i}
-                        className={`epg-guide__program${isLive ? ' epg-guide__program--live' : ''}${isPast ? ' epg-guide__program--past' : ''}${isSelected ? ' epg-guide__program--selected' : ''}`}
+                        className={cn(
+                          'absolute top-1 bottom-1 rounded px-2 flex items-center overflow-hidden cursor-pointer transition-colors duration-150',
+                          isLive ? 'bg-epg-purple/[0.15] border-l-[3px] border-epg-purple hover:bg-epg-purple/25' : 'bg-white/[0.06] hover:bg-white/[0.12]',
+                          isPast && 'opacity-50',
+                          isSelected && 'epg-program-selected'
+                        )}
                         style={{ left, width: Math.max(width - 2, 1) }}
                         onClick={() => setSelectedProgram(isSelected ? null : p)}
                         title={`${p.title}\n${formatTime(new Date(p.start))} - ${formatTime(new Date(p.stop))}`}
                       >
-                        <span className="epg-guide__program-title">{p.title}</span>
+                        <span className="text-11 lg:text-12 text-[#ddd] whitespace-nowrap overflow-hidden text-ellipsis">{p.title}</span>
                       </button>
                     );
                   })}
                   {/* Now line */}
                   {showNowLine && (
-                    <div className="epg-guide__now-line" style={{ left: nowOffset }} />
+                    <div className="absolute top-0 bottom-0 w-0.5 bg-brand-red z-[1] pointer-events-none" style={{ left: nowOffset }} />
                   )}
                 </div>
               </div>
@@ -228,17 +234,17 @@ export default function EpgGuide() {
 
       {/* Program detail panel */}
       {selectedProgram && (
-        <div className="epg-guide__detail">
-          <div className="epg-guide__detail-title">{selectedProgram.title}</div>
-          <div className="epg-guide__detail-time">
+        <div className="flex-shrink-0 p-3.5 lg:p-4 mt-2 bg-white/[0.04] rounded-lg max-h-[100px] lg:max-h-[120px] overflow-y-auto">
+          <div className="text-base font-semibold mb-1">{selectedProgram.title}</div>
+          <div className="text-13 text-[#888] mb-1.5">
             {formatTime(new Date(selectedProgram.start))} – {formatTime(new Date(selectedProgram.stop))}
           </div>
           {selectedProgram.description && (
-            <div className="epg-guide__detail-desc">{selectedProgram.description}</div>
+            <div className="text-13 text-[#aaa] leading-snug">{selectedProgram.description}</div>
           )}
           {new Date(selectedProgram.stop).getTime() > now && (
             <button
-              className="epg-guide__record-btn"
+              className="inline-block mt-2 py-1.5 px-[18px] bg-[#dc2626] text-white rounded-md text-sm font-semibold cursor-pointer transition-colors duration-150 hover:bg-[#b91c1c] focus:bg-[#b91c1c]"
               onClick={() => handleRecord(selectedProgram.channelId, selectedProgram)}
             >
               ⏺ Record

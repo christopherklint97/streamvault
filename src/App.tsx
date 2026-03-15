@@ -4,6 +4,7 @@ import { useChannelStore } from './stores/channelStore';
 import { useRemoteKeys } from './hooks/useRemoteKeys';
 import { useNetworkStatus } from './hooks/useNetworkStatus';
 import { KEY_CODES } from './utils/keys';
+import { cn } from './utils/cn';
 import { markTTI, startFPSMonitor, stopFPSMonitor } from './utils/perf-monitor';
 import ErrorBoundary from './components/ErrorBoundary';
 import Sidebar from './components/Sidebar';
@@ -58,7 +59,7 @@ function AppContent() {
     }
 
     requestAnimationFrame(() => {
-      const firstItem = document.querySelector('.sidebar-item') as HTMLElement | null;
+      const firstItem = document.querySelector('[data-sidebar-item]') as HTMLElement | null;
       firstItem?.focus();
       // Mark Time To Interactive after first focus
       markTTI();
@@ -80,8 +81,8 @@ function AppContent() {
   const handleMainKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.keyCode === KEY_CODES.LEFT) {
       e.preventDefault();
-      const activeItem = document.querySelector('.sidebar-item--active') as HTMLElement | null;
-      const fallback = document.querySelector('.sidebar-item') as HTMLElement | null;
+      const activeItem = document.querySelector('[data-sidebar-item][data-active]') as HTMLElement | null;
+      const fallback = document.querySelector('[data-sidebar-item]') as HTMLElement | null;
       (activeItem ?? fallback)?.focus();
     }
   }, []);
@@ -114,17 +115,17 @@ function AppContent() {
   };
 
   return (
-    <div className="app">
+    <div className="flex flex-col-reverse w-full h-dvh lg:flex-row lg:w-tv lg:h-tv overflow-hidden">
       {!isOnline && (
-        <div className="app__offline-banner">
+        <div className="fixed top-0 left-0 right-0 z-[9999] p-2 lg:p-2.5 bg-[#c0392b] text-white text-center text-sm lg:text-18">
           No network connection. Some features may be unavailable.
         </div>
       )}
       {isLoading && currentView !== 'settings' && currentView !== 'player' && (
-        <div className="app__loading-banner">
-          <div className="app__loading-bar">
+        <div className="fixed top-0 left-0 lg:left-[68px] right-0 z-[9998] flex items-center gap-4 px-4 py-2 lg:px-6 lg:py-3 bg-[rgba(12,12,22,0.95)] border-b border-surface-border animate-fade-in">
+          <div className="flex-1 h-1 bg-surface-border rounded-sm overflow-hidden">
             <div
-              className="app__loading-fill"
+              className="h-full bg-gradient-to-r from-accent to-accent-green rounded-sm transition-[width] duration-400 ease-in-out"
               style={{
                 width: loadingPhase === 'fetching-playlist' ? '10%'
                   : loadingPhase === 'parsing-playlist' ? '30%'
@@ -135,11 +136,11 @@ function AppContent() {
               }}
             />
           </div>
-          <span className="app__loading-text">{loadingMessage}</span>
-          <button className="app__loading-cancel" onClick={() => {
+          <span className="text-base lg:text-[16px] text-[#888]">{loadingMessage}</span>
+          <button className="px-4 py-1.5 bg-[#222] rounded text-base lg:text-[16px] transition-colors duration-150 focus:bg-[#333] focus:text-white" onClick={() => {
             cancelSync();
             requestAnimationFrame(() => {
-              const sidebar = document.querySelector('.sidebar-item--active, .sidebar-item') as HTMLElement | null;
+              const sidebar = document.querySelector('[data-sidebar-item][data-active], [data-sidebar-item]') as HTMLElement | null;
               sidebar?.focus();
             });
           }}>Cancel</button>
@@ -147,7 +148,11 @@ function AppContent() {
       )}
       {currentView !== 'player' && <Sidebar />}
       <main
-        className={`app__content${currentView === 'player' ? ' app__content--fullscreen' : ''}`}
+        data-app-content
+        className={cn(
+          'flex-1 overflow-y-auto p-4 pt-[calc(16px+env(safe-area-inset-top,0px))] min-h-0 lg:p-8 lg:px-10',
+          currentView === 'player' && '!p-0 w-full h-dvh lg:!w-tv lg:!h-tv'
+        )}
         onKeyDown={currentView !== 'player' ? handleMainKeyDown : undefined}
       >
         {renderView()}

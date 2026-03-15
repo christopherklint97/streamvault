@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { KEY_CODES } from '../utils/keys';
+import { cn } from '../utils/cn';
 
 export default function ExitDialog() {
   const showExitDialog = useAppStore((s) => s.showExitDialog);
@@ -43,13 +44,16 @@ export default function ExitDialog() {
   if (!showExitDialog) return null;
 
   return (
-    <div className="exit-dialog-overlay" onKeyDown={handleKeyDown}>
-      <div className="exit-dialog">
-        <h2 className="exit-dialog__title">Exit StreamVault?</h2>
-        <p className="exit-dialog__text">Are you sure you want to exit?</p>
-        <div className="exit-dialog__buttons">
+    <div className="fixed inset-0 bg-black/75 flex items-center justify-center z-[10000] animate-fade-in p-4 lg:p-0" onKeyDown={handleKeyDown}>
+      <div className="bg-surface-dialog border border-white/[0.08] rounded-2xl py-6 px-5 lg:py-9 lg:px-11 text-center w-full max-w-[340px] lg:max-w-none lg:w-auto lg:min-w-[380px] animate-scale-in">
+        <h2 className="text-18 lg:text-24 font-bold mb-2">Exit StreamVault?</h2>
+        <p className="text-sm lg:text-18 text-[#666] mb-5 lg:mb-7">Are you sure you want to exit?</p>
+        <div className="flex gap-2.5 lg:gap-4 justify-center">
           <button
-            className={`exit-dialog__btn${focusedButton === 'yes' ? ' exit-dialog__btn--focused' : ''}`}
+            className={cn(
+              'py-2.5 px-5 lg:py-3 lg:px-9 border-2 border-[#222] rounded-[10px] text-sm lg:text-18 font-semibold bg-surface-border text-[#ccc] transition-all duration-150 focus:border-accent focus:text-white focus:scale-[1.04]',
+              focusedButton === 'yes' && 'border-accent bg-accent text-black'
+            )}
             data-focusable
             tabIndex={0}
             onClick={handleExit}
@@ -58,7 +62,10 @@ export default function ExitDialog() {
             Yes
           </button>
           <button
-            className={`exit-dialog__btn${focusedButton === 'no' ? ' exit-dialog__btn--focused' : ''}`}
+            className={cn(
+              'py-2.5 px-5 lg:py-3 lg:px-9 border-2 border-[#222] rounded-[10px] text-sm lg:text-18 font-semibold bg-surface-border text-[#ccc] transition-all duration-150 focus:border-accent focus:text-white focus:scale-[1.04]',
+              focusedButton === 'no' && 'border-accent bg-accent text-black'
+            )}
             data-focusable
             tabIndex={0}
             autoFocus

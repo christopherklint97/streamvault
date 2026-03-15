@@ -5,6 +5,7 @@ import { usePlayerStore } from '../stores/playerStore';
 import { useAppStore } from '../stores/appStore';
 import { useFavoritesStore } from '../stores/favoritesStore';
 import { getWatchProgress } from '../services/channel-service';
+import { cn } from '../utils/cn';
 
 interface MovieDetailProps {
   movie: Channel;
@@ -52,62 +53,68 @@ export default function MovieDetail({ movie }: MovieDetailProps) {
   const title = info?.name || movie.name;
 
   return (
-    <div className="movie-detail">
-      <button className="movie-detail__back" onClick={goBack}>
+    <div className="p-4 lg:p-6 lg:px-8 overflow-y-auto h-full outline-none">
+      <button className="inline-flex items-center gap-1.5 py-2 px-4 bg-white/[0.08] border-none rounded-lg text-[#ccc] text-sm mb-4 tap-none active:bg-white/[0.16] lg:hidden" onClick={goBack}>
         {'\u2190'} Back
       </button>
 
-      <div className="movie-detail__header">
-        <div className="movie-detail__poster">
+      <div className="flex flex-col items-center gap-4 lg:flex-row lg:items-start lg:gap-7 lg:mb-7">
+        <div className="w-[200px] h-[300px] rounded-xl overflow-hidden bg-surface-border flex-shrink-0 lg:w-[220px] lg:min-w-[220px] lg:h-[320px] lg:rounded-[10px]">
           {cover ? (
-            <img src={cover} alt={title} />
+            <img className="w-full h-full object-cover" src={cover} alt={title} />
           ) : (
-            <div className="movie-detail__poster-fallback">
+            <div className="w-full h-full flex items-center justify-center text-64 font-bold text-white bg-gradient-to-br from-[#6c5ce7] to-[#e84393]">
               {title.charAt(0).toUpperCase()}
             </div>
           )}
         </div>
-        <div className="movie-detail__info">
-          <h1 className="movie-detail__title">{title}</h1>
-          {info?.genre && <span className="movie-detail__genre">{info.genre}</span>}
-          <div className="movie-detail__meta">
-            {info?.rating && <span className="movie-detail__rating">{info.rating}</span>}
-            {info?.releaseDate && <span className="movie-detail__year">{info.releaseDate}</span>}
-            {info?.duration && <span className="movie-detail__duration">{info.duration}</span>}
+        <div className="flex flex-col gap-2 text-center w-full lg:text-left lg:flex-1 lg:min-w-0">
+          <h1 className="text-22 lg:text-32 font-bold text-white leading-tight">{title}</h1>
+          {info?.genre && <span className="text-sm lg:text-15 text-[#9ca3af]">{info.genre}</span>}
+          <div className="flex gap-3 justify-center flex-wrap lg:justify-start lg:gap-4">
+            {info?.rating && <span className="text-sm lg:text-15 text-rating font-semibold">{info.rating}</span>}
+            {info?.releaseDate && <span className="text-sm lg:text-15 text-[#9ca3af]">{info.releaseDate}</span>}
+            {info?.duration && <span className="text-sm lg:text-15 text-[#9ca3af]">{info.duration}</span>}
           </div>
-          {info?.plot && <p className="movie-detail__plot">{info.plot}</p>}
-          {info?.cast && <p className="movie-detail__cast">Cast: {info.cast}</p>}
-          {info?.director && <p className="movie-detail__director">Director: {info.director}</p>}
+          {info?.plot && <p className="text-sm lg:text-15 text-[#b0b8c4] leading-relaxed text-left lg:mt-1">{info.plot}</p>}
+          {info?.cast && <p className="text-13 text-[#7a8290] text-left">Cast: {info.cast}</p>}
+          {info?.director && <p className="text-13 text-[#7a8290] text-left">Director: {info.director}</p>}
           {!info && !loading && (
-            <p className="movie-detail__group">{movie.group}</p>
+            <p className="text-sm lg:text-15 text-[#555]">{movie.group}</p>
           )}
 
-          <div className="movie-detail__actions">
-            <button className="movie-detail__play-btn" onClick={handlePlay}>
+          <div className="flex gap-2.5 justify-center flex-wrap mt-2 lg:justify-start lg:gap-3 lg:mt-3">
+            <button className="py-3 px-8 bg-brand-red text-white border-none rounded-lg text-base lg:text-18 font-semibold tap-none active:opacity-80 hover:bg-brand-red-hover focus:bg-brand-red-hover focus:outline-none" onClick={handlePlay}>
               {pct > 0 && pct < 95 ? `Resume (${pct}%)` : 'Play'}
             </button>
             <button
-              className={`movie-detail__fav-btn${isFavorite ? ' movie-detail__fav-btn--active' : ''}`}
+              className={cn(
+                'py-3 px-5 lg:px-6 bg-white/[0.08] border border-white/[0.15] rounded-lg text-sm lg:text-base tap-none hover:border-favorite hover:text-favorite',
+                isFavorite ? 'text-favorite border-favorite' : 'text-[#ccc]'
+              )}
               onClick={() => toggleFavorite(movie.id)}
             >
               {isFavorite ? '\u2605 Favorited' : '\u2606 Favorite'}
             </button>
             {lists.length > 0 && (
-              <div className="movie-detail__list-menu-wrap">
+              <div className="relative">
                 <button
-                  className="movie-detail__list-btn"
+                  className="py-3 px-5 lg:px-6 bg-white/[0.08] text-[#ccc] border border-white/[0.15] rounded-lg text-sm lg:text-base tap-none hover:border-accent"
                   onClick={() => setShowListMenu(!showListMenu)}
                 >
                   + Add to List
                 </button>
                 {showListMenu && (
-                  <div className="movie-detail__list-menu">
+                  <div className="absolute bottom-[calc(100%+8px)] left-1/2 lg:left-0 -translate-x-1/2 lg:translate-x-0 bg-surface-border border border-white/10 rounded-[10px] p-1.5 min-w-[180px] lg:min-w-[200px] z-20 shadow-[0_8px_24px_rgba(0,0,0,0.5)]">
                     {lists.map(list => {
                       const inList = list.channelIds.includes(movie.id);
                       return (
                         <button
                           key={list.id}
-                          className={`movie-detail__list-item${inList ? ' movie-detail__list-item--active' : ''}`}
+                          className={cn(
+                            'block w-full py-2.5 px-3.5 bg-transparent border-none rounded-md text-left text-sm lg:text-15 tap-none active:bg-white/[0.08] hover:bg-white/[0.08]',
+                            inList ? 'text-success' : 'text-[#ccc]'
+                          )}
                           onClick={() => {
                             if (inList) removeFromList(list.id, movie.id);
                             else addToList(list.id, movie.id);
@@ -124,14 +131,14 @@ export default function MovieDetail({ movie }: MovieDetailProps) {
           </div>
 
           {pct > 0 && pct < 95 && (
-            <div className="movie-detail__progress-bar">
-              <div className="movie-detail__progress-fill" style={{ width: `${pct}%` }} />
+            <div className="h-1 bg-white/[0.15] rounded-sm mt-2 lg:mt-3 lg:max-w-[400px]">
+              <div className="h-full bg-brand-red rounded-sm" style={{ width: `${pct}%` }} />
             </div>
           )}
         </div>
       </div>
 
-      {loading && <div className="movie-detail__loading">Loading movie info...</div>}
+      {loading && <div className="text-center p-5 lg:p-10 text-[#888] text-sm lg:text-18">Loading movie info...</div>}
     </div>
   );
 }

@@ -30,7 +30,7 @@ function ChannelLogoInner({ src, name }: ChannelLogoProps) {
   if (!src) {
     return (
       <div
-        className="channel-logo__fallback"
+        className="w-10 h-10 rounded-full flex items-center justify-center text-24 font-bold text-white"
         style={{ backgroundColor: getColorForName(name) }}
       >
         {name.charAt(0).toUpperCase()}
@@ -42,7 +42,7 @@ function ChannelLogoInner({ src, name }: ChannelLogoProps) {
     <>
       <img
         ref={imgRef}
-        className="channel-logo__img"
+        className="max-w-[64px] max-h-[48px] object-contain"
         src={src}
         alt=""
         width={64}
@@ -53,7 +53,7 @@ function ChannelLogoInner({ src, name }: ChannelLogoProps) {
       />
       <div
         ref={fallbackRef}
-        className="channel-logo__fallback"
+        className="w-10 h-10 rounded-full flex items-center justify-center text-24 font-bold text-white"
         style={{ display: 'none', backgroundColor: getColorForName(name) }}
       >
         {name.charAt(0).toUpperCase()}

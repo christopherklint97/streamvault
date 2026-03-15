@@ -3,6 +3,7 @@ import type { Channel, View } from '../types';
 import { useChannelStore } from '../stores/channelStore';
 import { useFavoritesStore } from '../stores/favoritesStore';
 import { isMobile } from '../utils/platform';
+import { cn } from '../utils/cn';
 
 const MOBILE = isMobile();
 import { usePlayerStore } from '../stores/playerStore';
@@ -179,12 +180,12 @@ export default function Home() {
   const hasContent = typeCounts.livetv > 0 || typeCounts.movies > 0 || typeCounts.series > 0 || channelMap.size > 0;
   if (!hasContent) {
     return (
-      <div className="home home--empty" ref={containerRef} onKeyDown={handleKeyDown}>
-        <div className="home__welcome">
-          <h1>Welcome to StreamVault</h1>
-          <p>Go to Settings to add a playlist URL and start watching.</p>
+      <div className={cn('flex flex-col gap-5 lg:gap-7 outline-none animate-fade-in', 'justify-center items-center min-h-[60dvh] lg:h-full')} ref={containerRef} onKeyDown={handleKeyDown}>
+        <div className="text-center">
+          <h1 className="text-22 lg:text-32 mb-3">Welcome to StreamVault</h1>
+          <p className="text-sm lg:text-18 text-[#888] mb-6">Go to Settings to add a playlist URL and start watching.</p>
           <button
-            className="home__welcome-btn"
+            className="py-3 px-7 lg:py-3.5 lg:px-9 bg-transparent text-accent text-base lg:text-18 font-bold border-2 border-accent rounded-lg transition-all duration-150 focus:border-white focus:scale-[1.04]"
             data-focusable
             tabIndex={0}
             onClick={() => navigate('settings')}
@@ -197,12 +198,12 @@ export default function Home() {
   }
 
   return (
-    <div className="home" ref={containerRef} onKeyDown={handleKeyDown}>
+    <div className="flex flex-col gap-5 lg:gap-7 outline-none animate-fade-in" ref={containerRef} onKeyDown={handleKeyDown}>
       {/* Continue Watching */}
       {continueWatchingChannels.length > 0 && (
-        <div className="home__section">
-          <h2 className="home__section-title">Continue Watching</h2>
-          <div className="home__continue-watching">
+        <div className="flex flex-col [contain:layout_style]">
+          <h2 className="text-base lg:text-22 font-bold mb-2 lg:mb-3 text-[#ccc]">Continue Watching</h2>
+          <div className="flex gap-2.5 lg:gap-4 overflow-x-auto py-2 px-1 [contain:content] [will-change:scroll-position] [-webkit-overflow-scrolling:touch]">
             {continueWatchingChannels.map((ch) => {
               const progress = getWatchProgress(ch.id);
               const pct = progress && progress.duration > 0
@@ -211,26 +212,26 @@ export default function Home() {
               return (
                 <div
                   key={ch.id}
-                  className="home__cw-card"
+                  className="w-[140px] lg:w-[220px] flex-shrink-0 bg-surface border-2 border-transparent rounded-lg overflow-hidden cursor-pointer transition-all duration-180 tap-none active:scale-[0.97] lg:active:scale-100 focus:border-accent focus:scale-[1.06] focus:z-[2]"
                   data-focusable
                   tabIndex={-1}
                   onClick={() => handleSelectChannel(ch)}
                 >
-                  <div className="home__cw-logo">
+                  <div className="w-full h-14 lg:h-20 flex items-center justify-center bg-dark-deep overflow-hidden">
                     {ch.logo ? (
-                      <img src={ch.logo} alt={ch.name} width={64} height={48} loading="lazy" decoding="async" />
+                      <img className="max-w-12 lg:max-w-16 max-h-9 lg:max-h-12 object-contain" src={ch.logo} alt={ch.name} width={64} height={48} loading="lazy" decoding="async" />
                     ) : (
-                      <div className="home__cw-letter">
+                      <div className="w-12 h-12 rounded-full flex items-center justify-center bg-[#222] text-22 font-bold">
                         {ch.name.charAt(0).toUpperCase()}
                       </div>
                     )}
                   </div>
-                  <div className="home__cw-info">
-                    <span className="home__cw-name">{ch.name}</span>
-                    <span className="home__cw-group">{ch.group}</span>
+                  <div className="p-2 lg:p-2.5">
+                    <span className="text-12 lg:text-base font-semibold block whitespace-nowrap overflow-hidden text-ellipsis">{ch.name}</span>
+                    <span className="text-11 lg:text-13 text-[#555]">{ch.group}</span>
                   </div>
-                  <div className="home__cw-progress-bar">
-                    <div className="home__cw-progress-fill" style={{ width: `${pct}%` }} />
+                  <div className="h-[3px] bg-surface-border">
+                    <div className="h-full bg-accent" style={{ width: `${pct}%` }} />
                   </div>
                 </div>
               );
@@ -241,27 +242,27 @@ export default function Home() {
 
       {/* Last Watched */}
       {lastWatchedChannel && (
-        <div className="home__section">
-          <h2 className="home__section-title">Pick Up Where You Left Off</h2>
+        <div className="flex flex-col [contain:layout_style]">
+          <h2 className="text-base lg:text-22 font-bold mb-2 lg:mb-3 text-[#ccc]">Pick Up Where You Left Off</h2>
           <div
-            className="home__hero-card"
+            className="flex gap-3 lg:gap-5 p-3 lg:p-5 bg-surface border-2 border-transparent rounded-[10px] cursor-pointer transition-all duration-180 tap-none active:scale-[0.98] lg:active:scale-100 focus:border-accent focus:scale-[1.02]"
             data-focusable
             tabIndex={-1}
             onClick={() => handleSelectChannel(lastWatchedChannel)}
           >
-            <div className="home__hero-logo">
+            <div className="w-12 h-12 lg:w-[72px] lg:h-[72px] flex-shrink-0 flex items-center justify-center bg-dark-deep rounded-md lg:rounded-lg overflow-hidden">
               {lastWatchedChannel.logo ? (
-                <img src={lastWatchedChannel.logo} alt={lastWatchedChannel.name} width={56} height={48} loading="lazy" decoding="async" />
+                <img className="max-w-10 lg:max-w-14 max-h-9 lg:max-h-12 object-contain" src={lastWatchedChannel.logo} alt={lastWatchedChannel.name} width={56} height={48} loading="lazy" decoding="async" />
               ) : (
-                <div className="home__hero-letter">
+                <div className="text-36 font-bold text-[#555]">
                   {lastWatchedChannel.name.charAt(0).toUpperCase()}
                 </div>
               )}
             </div>
-            <div className="home__hero-info">
-              <h3>{lastWatchedChannel.name}</h3>
-              {lastWatchedProgram && <p>{lastWatchedProgram.title}</p>}
-              <span className="home__hero-group">{lastWatchedChannel.group}</span>
+            <div>
+              <h3 className="text-base lg:text-22 font-bold">{lastWatchedChannel.name}</h3>
+              {lastWatchedProgram && <p className="text-13 lg:text-17 text-[#aaa] mt-1">{lastWatchedProgram.title}</p>}
+              <span className="text-12 lg:text-15 text-[#555] mt-1 block">{lastWatchedChannel.group}</span>
             </div>
           </div>
         </div>
@@ -269,7 +270,7 @@ export default function Home() {
 
       {/* Favorites */}
       {favoriteChannels.length > 0 && (
-        <div className="home__section">
+        <div className="flex flex-col [contain:layout_style]">
           <HorizontalRow
             title="Favorites"
             channels={favoriteChannels}
@@ -283,10 +284,10 @@ export default function Home() {
         const listChannels = list.channelIds.map(id => channelMap.get(id)).filter(Boolean) as Channel[];
         if (listChannels.length === 0) return null;
         return (
-          <div key={list.id} className="home__section">
-            <div className="home__list-header">
+          <div key={list.id} className="flex flex-col [contain:layout_style]">
+            <div className="flex items-center gap-2 mb-2">
               {editingListId === list.id ? (
-                <form className="home__list-rename" onSubmit={(e) => {
+                <form className="flex-1" onSubmit={(e) => {
                   e.preventDefault();
                   if (editingListName.trim()) {
                     renameList(list.id, editingListName.trim());
@@ -294,7 +295,7 @@ export default function Home() {
                   setEditingListId(null);
                 }}>
                   <input
-                    className="home__list-rename-input"
+                    className="w-full py-1.5 px-2.5 bg-surface border border-accent rounded-md text-white text-base font-bold"
                     value={editingListName}
                     onChange={(e) => setEditingListName(e.target.value)}
                     autoFocus
@@ -303,7 +304,7 @@ export default function Home() {
                 </form>
               ) : (
                 <h2
-                  className="home__section-title"
+                  className="text-base lg:text-22 font-bold mb-2 lg:mb-3 text-[#ccc]"
                   onClick={MOBILE ? () => { setEditingListId(list.id); setEditingListName(list.name); } : undefined}
                 >
                   {list.name}
@@ -311,7 +312,7 @@ export default function Home() {
               )}
               {MOBILE && (
                 <button
-                  className="home__list-delete"
+                  className="w-7 h-7 rounded-full bg-white/[0.08] border-none text-12 text-[#888] flex items-center justify-center tap-none"
                   onClick={() => deleteList(list.id)}
                 >
                   {'\u2715'}
@@ -329,8 +330,8 @@ export default function Home() {
 
       {/* Create New List */}
       {MOBILE && (
-        <div className="home__section">
-          <form className="home__new-list" onSubmit={(e) => {
+        <div className="flex flex-col [contain:layout_style]">
+          <form className="flex gap-2 items-center" onSubmit={(e) => {
             e.preventDefault();
             if (newListName.trim()) {
               createList(newListName.trim());
@@ -338,14 +339,14 @@ export default function Home() {
             }
           }}>
             <input
-              className="home__new-list-input"
+              className="flex-1 py-2.5 px-3.5 bg-surface border border-white/10 rounded-lg text-[#e8eaed] text-sm placeholder:text-[#444] focus:border-accent"
               type="text"
               placeholder="Create new list..."
               value={newListName}
               onChange={(e) => setNewListName(e.target.value)}
             />
             {newListName.trim() && (
-              <button className="home__new-list-btn" type="submit">Create</button>
+              <button className="py-2.5 px-4 bg-accent text-black border-none rounded-lg text-sm font-semibold tap-none" type="submit">Create</button>
             )}
           </form>
         </div>
@@ -353,7 +354,7 @@ export default function Home() {
 
       {/* Recently Watched */}
       {recentChannels.length > 0 && (
-        <div className="home__section">
+        <div className="flex flex-col [contain:layout_style]">
           <HorizontalRow
             title="Recently Watched"
             channels={recentChannels}
@@ -363,9 +364,9 @@ export default function Home() {
       )}
 
       {/* Browse by Type */}
-      <div className="home__section">
-        <h2 className="home__section-title">Browse</h2>
-        <div className="home__categories">
+      <div className="flex flex-col [contain:layout_style]">
+        <h2 className="text-base lg:text-22 font-bold mb-2 lg:mb-3 text-[#ccc]">Browse</h2>
+        <div className="flex gap-2 lg:gap-4 flex-wrap">
           {([
             { label: 'Live TV', view: 'channels' as View, count: typeCounts.livetv },
             { label: 'Movies', view: 'movies' as View, count: typeCounts.movies },
@@ -373,7 +374,7 @@ export default function Home() {
           ]).map((item) => (
             <button
               key={item.view}
-              className="home__category-tile"
+              className="py-3.5 px-4 lg:py-5 lg:px-8 bg-surface border-2 border-transparent rounded-[10px] text-sm lg:text-18 font-semibold text-[#999] cursor-pointer transition-all duration-180 flex-1 text-center min-w-[90px] lg:min-w-0 lg:flex-none tap-none active:scale-[0.97] lg:active:scale-100 focus:border-accent focus:text-white focus:bg-surface-hover focus:scale-[1.04]"
               data-focusable
               tabIndex={-1}
               onClick={() => navigate(item.view)}

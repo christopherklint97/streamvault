@@ -1,5 +1,6 @@
 import { useRef, useEffect, useCallback, type ReactNode } from 'react';
 import { KEY_CODES } from '../utils/keys';
+import { cn } from '../utils/cn';
 
 type Direction = 'up' | 'down' | 'left' | 'right';
 
@@ -222,10 +223,9 @@ export default function FocusZone({ children, className, onEnter }: FocusZonePro
     <div
       ref={ref}
       tabIndex={0}
-      className={className}
+      className={cn('outline-none', className)}
       onFocus={handleFocus}
       onKeyDown={handleKeyDown}
-      style={{ outline: 'none' }}
     >
       {children}
     </div>

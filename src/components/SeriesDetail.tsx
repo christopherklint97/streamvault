@@ -6,6 +6,7 @@ import { useAppStore } from '../stores/appStore';
 import { getWatchProgress } from '../services/channel-service';
 import { KEY_CODES } from '../utils/keys';
 import { isMobile } from '../utils/platform';
+import { cn } from '../utils/cn';
 
 const MOBILE = isMobile();
 
@@ -131,17 +132,17 @@ export default function SeriesDetail({ series }: SeriesDetailProps) {
 
   if (loading) {
     return (
-      <div className="series-detail" onKeyDown={handleKeyDown}>
-        <div className="series-detail__loading">Loading series info...</div>
+      <div className="p-4 lg:p-6 lg:px-8 overflow-y-auto h-full outline-none" onKeyDown={handleKeyDown}>
+        <div className="flex items-center justify-center h-[300px] text-20 text-[#888]">Loading series info...</div>
       </div>
     );
   }
 
   if (error || !info) {
     return (
-      <div className="series-detail" onKeyDown={handleKeyDown}>
-        <div className="series-detail__error">{error || 'Series not found'}</div>
-        <button className="series-detail__back-btn" onClick={goBack}>Go Back</button>
+      <div className="p-4 lg:p-6 lg:px-8 overflow-y-auto h-full outline-none" onKeyDown={handleKeyDown}>
+        <div className="flex items-center justify-center h-[300px] text-20 text-[#888]">{error || 'Series not found'}</div>
+        <button className="block mx-auto my-5 py-2.5 px-6 bg-[#333] text-white border-none rounded-md text-base cursor-pointer" onClick={goBack}>Go Back</button>
       </div>
     );
   }
@@ -159,29 +160,29 @@ export default function SeriesDetail({ series }: SeriesDetailProps) {
   }
 
   return (
-    <div className="series-detail" onKeyDown={handleKeyDown} tabIndex={-1}>
+    <div className="p-4 lg:p-6 lg:px-8 overflow-y-auto h-full outline-none" onKeyDown={handleKeyDown} tabIndex={-1}>
       {/* Header */}
-      <div className="series-detail__header">
-        <div className="series-detail__poster">
+      <div className="flex flex-col gap-4 lg:flex-row lg:gap-7 lg:mb-7">
+        <div className="w-full max-w-[200px] h-[280px] mx-auto lg:w-[220px] lg:min-w-[220px] lg:h-[320px] lg:max-w-none lg:mx-0 rounded-[10px] overflow-hidden bg-surface-border">
           {(info.cover || series.logo) ? (
-            <img src={info.cover || series.logo} alt={info.name} />
+            <img className="w-full h-full object-cover" src={info.cover || series.logo} alt={info.name} />
           ) : (
-            <div className="series-detail__poster-fallback">
+            <div className="w-full h-full flex items-center justify-center text-64 font-bold text-white bg-gradient-to-br from-[#6c5ce7] to-[#e84393]">
               {info.name.charAt(0).toUpperCase()}
             </div>
           )}
         </div>
-        <div className="series-detail__info">
-          <h1 className="series-detail__title">{info.name || series.name}</h1>
-          {info.genre && <span className="series-detail__genre">{info.genre}</span>}
-          {info.rating && <span className="series-detail__rating">Rating: {info.rating}</span>}
-          {info.releaseDate && <span className="series-detail__year">{info.releaseDate}</span>}
-          {info.plot && <p className="series-detail__plot">{info.plot}</p>}
-          {info.cast && <p className="series-detail__cast">Cast: {info.cast}</p>}
-          {info.director && <p className="series-detail__director">Director: {info.director}</p>}
+        <div className="flex flex-col gap-2 text-center lg:text-left lg:flex-1 lg:min-w-0">
+          <h1 className="text-22 lg:text-32 font-bold text-white leading-tight">{info.name || series.name}</h1>
+          {info.genre && <span className="text-15 text-[#9ca3af]">{info.genre}</span>}
+          {info.rating && <span className="text-15 text-rating">Rating: {info.rating}</span>}
+          {info.releaseDate && <span className="text-15 text-[#9ca3af]">{info.releaseDate}</span>}
+          {info.plot && <p className="text-13 line-clamp-4 lg:text-15 lg:line-clamp-5 text-[#b0b8c4] leading-relaxed mt-1">{info.plot}</p>}
+          {info.cast && <p className="text-13 text-[#7a8290]">Cast: {info.cast}</p>}
+          {info.director && <p className="text-13 text-[#7a8290]">Director: {info.director}</p>}
           {nextUpEpisode && (
             <button
-              className="series-detail__play-btn"
+              className="mt-3 py-2.5 px-6 lg:py-3 lg:px-8 bg-brand-red text-white border-none rounded-md text-15 lg:text-18 font-semibold cursor-pointer self-start transition-colors duration-150 hover:bg-brand-red-hover focus:bg-brand-red-hover focus:outline-none"
               data-focusable
               tabIndex={0}
               onClick={() => handlePlayEpisode(nextUpEpisode!)}
@@ -196,11 +197,14 @@ export default function SeriesDetail({ series }: SeriesDetailProps) {
       </div>
 
       {/* Season tabs */}
-      <div className="series-detail__seasons">
+      <div className="flex gap-2 lg:gap-2.5 mb-5 overflow-x-auto pb-1 flex-wrap lg:flex-nowrap">
         {seasonNumbers.map(sn => (
           <button
             key={sn}
-            className={`series-detail__season-tab${sn === selectedSeason ? ' series-detail__season-tab--active' : ''}`}
+            className={cn(
+              'py-1.5 px-3.5 lg:py-2 lg:px-[18px] text-[#b0b8c4] border-2 border-transparent rounded-lg text-13 lg:text-15 cursor-pointer whitespace-nowrap transition-all duration-150 hover:bg-[#252542] hover:text-white',
+              sn === selectedSeason ? 'bg-[#252542] text-white border-brand-red' : 'bg-surface-border'
+            )}
             onClick={() => { setSelectedSeason(sn); setFocusIndex(0); }}
             tabIndex={MOBILE ? 0 : -1}
           >
@@ -210,9 +214,9 @@ export default function SeriesDetail({ series }: SeriesDetailProps) {
       </div>
 
       {/* Episode list */}
-      <div className="series-detail__episodes" ref={episodeListRef}>
+      <div className="flex flex-col gap-1.5" ref={episodeListRef}>
         {currentEpisodes.length === 0 ? (
-          <div className="series-detail__no-episodes">No episodes available for this season.</div>
+          <div className="p-10 text-center text-[#666] text-base">No episodes available for this season.</div>
         ) : (
           currentEpisodes.map((ep, idx) => {
             const progress = getWatchProgress(`episode_${ep.id}`);
@@ -224,33 +228,37 @@ export default function SeriesDetail({ series }: SeriesDetailProps) {
             return (
               <div
                 key={ep.id}
-                className={`series-detail__episode${focusIndex === idx && !MOBILE ? ' series-detail__episode--focused' : ''}${isWatched ? ' series-detail__episode--watched' : ''}`}
+                className={cn(
+                  'flex flex-col p-0 gap-0 overflow-hidden lg:flex-row lg:items-center lg:gap-4 lg:p-3 lg:px-4 bg-surface-episode rounded-lg cursor-pointer transition-all duration-150 outline-2 outline-transparent hover:bg-surface-episode-hover',
+                  focusIndex === idx && !MOBILE && 'bg-surface-episode-hover outline-brand-red',
+                  isWatched && 'opacity-60'
+                )}
                 data-focusable
                 data-ep-idx={idx}
                 tabIndex={MOBILE ? 0 : -1}
                 onClick={() => handlePlayEpisode(ep)}
               >
-                <div className="series-detail__ep-thumb">
+                <div className="w-full min-w-full h-[160px] rounded-t-lg rounded-b-none lg:w-[160px] lg:min-w-[160px] lg:h-[90px] lg:rounded-md overflow-hidden bg-surface-border relative">
                   {ep.image ? (
-                    <img src={ep.image} alt={ep.title} loading="lazy" decoding="async" />
+                    <img className="w-full h-full object-cover" src={ep.image} alt={ep.title} loading="lazy" decoding="async" />
                   ) : (
-                    <div className="series-detail__ep-thumb-fallback">
+                    <div className="w-full h-full flex items-center justify-center text-24 font-bold text-[#666]">
                       E{ep.episodeNum}
                     </div>
                   )}
                   {pct > 0 && !isWatched && (
-                    <div className="series-detail__ep-progress">
-                      <div className="series-detail__ep-progress-fill" style={{ width: `${pct}%` }} />
+                    <div className="absolute bottom-0 left-0 right-0 h-1 bg-white/20">
+                      <div className="h-full bg-brand-red rounded-sm" style={{ width: `${pct}%` }} />
                     </div>
                   )}
                 </div>
-                <div className="series-detail__ep-info">
-                  <span className="series-detail__ep-number">E{ep.episodeNum}</span>
-                  <span className="series-detail__ep-title">{ep.title}</span>
-                  {ep.duration && <span className="series-detail__ep-duration">{ep.duration}</span>}
-                  {ep.plot && <p className="series-detail__ep-plot">{ep.plot}</p>}
+                <div className="p-2.5 px-3 pb-3 lg:p-0 flex-1 min-w-0 flex flex-col gap-1">
+                  <span className="text-13 text-[#9ca3af] font-semibold">E{ep.episodeNum}</span>
+                  <span className="text-sm whitespace-normal lg:text-17 text-white font-medium lg:whitespace-nowrap overflow-hidden text-ellipsis">{ep.title}</span>
+                  {ep.duration && <span className="text-13 text-[#7a8290]">{ep.duration}</span>}
+                  {ep.plot && <p className="text-12 lg:text-13 text-[#7a8290] leading-snug line-clamp-2">{ep.plot}</p>}
                 </div>
-                {isWatched && <span className="series-detail__ep-check">{'\u2713'}</span>}
+                {isWatched && <span className="text-22 text-success ml-auto pr-2">{'\u2713'}</span>}
               </div>
             );
           })

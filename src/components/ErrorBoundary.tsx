@@ -32,14 +32,14 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
   render(): ReactNode {
     if (this.state.hasError) {
       return (
-        <div className="error-boundary">
-          <div className="error-boundary__content">
-            <h1 className="error-boundary__title">Something went wrong</h1>
-            <p className="error-boundary__message">
+        <div className="flex flex-col items-center justify-center h-full gap-4">
+          <div>
+            <h1 className="text-22 lg:text-28 font-bold text-[#ff4757]">Something went wrong</h1>
+            <p className="text-15 lg:text-18 text-[#888] max-w-full lg:max-w-[600px] text-center px-4 lg:px-0">
               {this.state.error?.message || 'An unexpected error occurred.'}
             </p>
             <button
-              className="error-boundary__btn"
+              className="py-3 px-7 bg-surface-border border-2 border-transparent rounded-lg text-15 lg:text-18 transition-all duration-150 focus:border-accent focus:scale-[1.03]"
               data-focusable
               tabIndex={0}
               onClick={this.handleReload}
