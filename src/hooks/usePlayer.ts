@@ -11,7 +11,7 @@ import { clientLogger as log } from '../utils/logger';
 const PROGRESS_SAVE_INTERVAL = 10_000; // Save progress every 10 seconds
 
 /** Build a proxied stream URL that goes through our server */
-function getStreamUrl(channelId: string, directUrl?: string): string {
+export function getStreamUrl(channelId: string, directUrl?: string): string {
   const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
   let url = `${apiBaseUrl}/api/stream/${encodeURIComponent(channelId)}`;
   // For episodes not in DB, pass URL and type as query params

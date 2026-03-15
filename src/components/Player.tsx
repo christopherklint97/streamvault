@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { usePlayer } from '../hooks/usePlayer';
+import { usePlayer, getStreamUrl } from '../hooks/usePlayer';
 import { usePlayerStore } from '../stores/playerStore';
 import { useChannelStore } from '../stores/channelStore';
 import { useAppStore } from '../stores/appStore';
 import { useRecordingStore } from '../stores/recordingStore';
 import { getCurrentProgram } from '../services/epg-service';
 import { KEY_CODES } from '../utils/keys';
-import { isMobile } from '../utils/platform';
+import { isMobile, openInNativePlayer } from '../utils/platform';
 
 const OSD_TIMEOUT = 5000;
 const MOBILE = isMobile();
@@ -225,6 +225,17 @@ export default function Player() {
       }
     } catch { /* PiP not supported */ }
   }, [getVideoElement]);
+
+  const handleNativePlayer = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!currentChannel) return;
+    const streamUrl = getStreamUrl(currentChannel.id, currentChannel.url);
+    // Make URL absolute for native player
+    const absoluteUrl = streamUrl.startsWith('http')
+      ? streamUrl
+      : `${window.location.origin}${streamUrl}`;
+    openInNativePlayer(absoluteUrl);
+  }, [currentChannel]);
 
   const handleRecord = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -461,6 +472,16 @@ export default function Player() {
                 title={isRecording ? 'Recording...' : 'Record'}
               >
                 ⏺
+              </button>
+            )}
+            {MOBILE && (
+              <button className="player__native-btn" onClick={handleNativePlayer} title="Open in native player">
+                {/* External player icon */}
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                  <polyline points="15 3 21 3 21 9" />
+                  <line x1="10" y1="14" x2="21" y2="3" />
+                </svg>
               </button>
             )}
             {MOBILE && pipSupported && (
