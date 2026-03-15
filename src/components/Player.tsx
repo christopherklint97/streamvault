@@ -261,17 +261,20 @@ export default function Player() {
 
     // iPhone fires these events on the video element instead
     const video = getVideoElement();
-    const onWebkitFs = () => {
-      setIsFullscreen(!!(video as HTMLVideoElement & { webkitDisplayingFullscreen?: boolean })?.webkitDisplayingFullscreen);
+    const onWebkitBegin = () => setIsFullscreen(true);
+    const onWebkitEnd = () => {
+      setIsFullscreen(false);
+      // iOS pauses the video when exiting native fullscreen — resume it
+      if (video && video.paused) video.play().catch(() => {});
     };
-    video?.addEventListener('webkitbeginfullscreen', onWebkitFs);
-    video?.addEventListener('webkitendfullscreen', onWebkitFs);
+    video?.addEventListener('webkitbeginfullscreen', onWebkitBegin);
+    video?.addEventListener('webkitendfullscreen', onWebkitEnd);
 
     return () => {
       document.removeEventListener('fullscreenchange', onFsChange);
       document.removeEventListener('webkitfullscreenchange', onFsChange);
-      video?.removeEventListener('webkitbeginfullscreen', onWebkitFs);
-      video?.removeEventListener('webkitendfullscreen', onWebkitFs);
+      video?.removeEventListener('webkitbeginfullscreen', onWebkitBegin);
+      video?.removeEventListener('webkitendfullscreen', onWebkitEnd);
     };
   }, [getVideoElement]);
 
