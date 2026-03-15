@@ -21,12 +21,6 @@ function formatTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-/** Check if a touch event target is inside a clickable OSD element */
-function isOsdControl(target: EventTarget | null): boolean {
-  if (!(target instanceof Element)) return false;
-  return !!target.closest('button, input, [data-player-controls]');
-}
-
 export default function Player() {
   const { play, stop, retry, togglePlay, seek, getVideoElement, playerState, subtitleTracks, currentSubtitleIndex, subtitleText, cycleSubtitles } = usePlayer();
   const currentChannel = usePlayerStore((s) => s.currentChannel);
@@ -279,9 +273,8 @@ export default function Player() {
     resetOSDTimer();
   }, [currentChannel, currentProgram, isRecording, createRecording, showToast, resetOSDTimer]);
 
-  // Tap to toggle OSD — skip if target is an OSD button/control
-  const handleTap = useCallback((e: React.MouseEvent) => {
-    if (isOsdControl(e.target)) return;
+  // Tap empty area to toggle OSD (dedicated layer behind controls)
+  const handleTapZone = useCallback(() => {
     if (showOSD) {
       setShowOSD(false);
       if (osdTimerRef.current) clearTimeout(osdTimerRef.current);
@@ -336,7 +329,6 @@ export default function Player() {
       className="w-full h-dvh lg:w-tv lg:h-tv relative bg-black fixed lg:static top-0 left-0 right-0 bottom-0"
       tabIndex={0}
       onKeyDown={handleKeyDown}
-      onClick={MOBILE ? handleTap : undefined}
     >
       {/* Video container */}
       <div className="w-full h-full">
@@ -376,14 +368,19 @@ export default function Player() {
         </div>
       )}
 
-      {/* Controls OSD */}
+      {/* Tap zone — sits above video, below controls; toggles OSD on tap */}
+      {MOBILE && (
+        <div className="absolute inset-0 z-[2]" onClick={handleTapZone} />
+      )}
+
+      {/* Controls OSD — wrapper is always pointer-events-none, individual bars opt in */}
       {currentChannel && playerState.status !== 'error' && (
         <div className={cn(
           'absolute inset-0 flex flex-col justify-between opacity-0 transition-opacity duration-300 pointer-events-none z-[3] player-osd-portrait',
-          showOSD && 'opacity-100 pointer-events-auto'
+          showOSD && 'opacity-100'
         )}>
           {/* Top bar */}
-          <div className="flex items-center gap-3 pt-[calc(12px+env(safe-area-inset-top,0px))] pb-8 px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] bg-gradient-to-b from-black/[0.85] to-transparent lg:gap-3 lg:pt-6 lg:px-10 lg:pb-10">
+          <div className="pointer-events-auto flex items-center gap-3 pt-[calc(12px+env(safe-area-inset-top,0px))] pb-8 px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] bg-gradient-to-b from-black/[0.85] to-transparent lg:gap-3 lg:pt-6 lg:px-10 lg:pb-10">
             {MOBILE && (
               <button
                 className="flex items-center justify-center w-10 h-10 bg-transparent border-none text-white shrink-0 tap-none active:opacity-60"
@@ -457,7 +454,7 @@ export default function Player() {
 
           {/* Center play/skip controls */}
           {MOBILE && (
-            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-10" data-player-controls>
+            <div className="pointer-events-auto absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-10" data-player-controls>
               {!isLive && (
                 <button
                   className="flex items-center justify-center w-12 h-12 rounded-full border-none bg-transparent text-white tap-none cursor-pointer active:opacity-60"
@@ -496,7 +493,7 @@ export default function Player() {
           )}
 
           {/* Bottom bar: progress + time */}
-          <div className="relative px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] pt-8 pb-[calc(12px+env(safe-area-inset-bottom,0px))] lg:px-10 lg:pt-10 lg:pb-6 bg-gradient-to-t from-black/90 to-transparent">
+          <div className="pointer-events-auto relative px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] pt-8 pb-[calc(12px+env(safe-area-inset-bottom,0px))] lg:px-10 lg:pt-10 lg:pb-6 bg-gradient-to-t from-black/90 to-transparent">
             {/* Seek bar for VOD */}
             {!isLive && hasDuration && (
               <div data-player-controls>
