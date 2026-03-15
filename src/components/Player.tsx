@@ -51,6 +51,7 @@ export default function Player() {
   const [seekValue, setSeekValue] = useState(0);
   const seekBarRef = useRef<HTMLInputElement | null>(null);
   const timeUpdateRef = useRef<number>(0);
+  const containerRef = useRef<HTMLDivElement | null>(null);
 
   // Swipe-to-scrub state
   const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
@@ -150,14 +151,11 @@ export default function Player() {
   }, []);
 
   // Auto-PIP when leaving the app
-  // Chrome: use autoPictureInPicture attribute (requestPictureInPicture blocked without gesture)
-  // Safari: use visibilitychange + requestPictureInPicture (Safari allows it without gesture)
   useEffect(() => {
     if (!MOBILE || !document.pictureInPictureEnabled) return;
     const video = getVideoElement();
     if (!video) return;
 
-    // Chrome/Android: native auto-PiP attribute
     if ('autoPictureInPicture' in video) {
       (video as HTMLVideoElement & { autoPictureInPicture: boolean }).autoPictureInPicture = true;
       return () => {
@@ -167,7 +165,6 @@ export default function Player() {
       };
     }
 
-    // Safari fallback: requestPictureInPicture from visibilitychange works
     const handleVisibilityChange = () => {
       if (document.hidden && playerState.status === 'playing' && !document.pictureInPictureElement) {
         video.requestPictureInPicture().catch(() => {});
@@ -178,7 +175,6 @@ export default function Player() {
   }, [getVideoElement, playerState.status]);
 
   const handleBack = useCallback(() => {
-    // Exit PIP if active
     if (document.pictureInPictureElement) {
       document.exitPictureInPicture().catch(() => {});
     }
@@ -229,29 +225,43 @@ export default function Player() {
 
   const [isFullscreen, setIsFullscreen] = useState(false);
 
+  // Fullscreen: use the container element so custom controls remain visible
   const handleFullscreen = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
+    const container = containerRef.current;
+    if (!container) return;
+
     const doc = document as Document & {
       webkitFullscreenElement?: Element | null;
       webkitExitFullscreen?: () => Promise<void>;
     };
+    const el = container as HTMLElement & {
+      webkitRequestFullscreen?: () => Promise<void>;
+    };
     const isFs = !!(doc.fullscreenElement || doc.webkitFullscreenElement);
+
     if (isFs) {
       if (doc.exitFullscreen) doc.exitFullscreen();
       else if (doc.webkitExitFullscreen) doc.webkitExitFullscreen();
+      // Unlock orientation when exiting fullscreen
+      try { screen.orientation.unlock(); } catch { /* ignore */ }
     } else {
-      // Use video element for iOS Safari compatibility (documentElement fullscreen not supported)
-      const video = getVideoElement() as (HTMLVideoElement & {
-        webkitRequestFullscreen?: () => Promise<void>;
-        webkitEnterFullscreen?: () => void;
-      }) | null;
-      if (video) {
-        if (video.requestFullscreen) video.requestFullscreen();
-        else if (video.webkitRequestFullscreen) video.webkitRequestFullscreen();
-        else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
+      const goFs = el.requestFullscreen
+        ? el.requestFullscreen()
+        : el.webkitRequestFullscreen
+          ? el.webkitRequestFullscreen()
+          : Promise.resolve();
+      // Try to lock to landscape in fullscreen
+      if (goFs) {
+        (goFs as Promise<void>).then(() => {
+          try {
+            const orientation = screen.orientation as ScreenOrientation & { lock?: (o: string) => Promise<void> };
+            orientation.lock?.('landscape')?.catch(() => {});
+          } catch { /* ignore */ }
+        }).catch(() => {});
       }
     }
-  }, [getVideoElement]);
+  }, []);
 
   useEffect(() => {
     const onFsChange = () => {
@@ -273,7 +283,6 @@ export default function Player() {
     e.stopPropagation();
     if (!currentChannel || isRecording) return;
     const now = Date.now();
-    // If we have a current program, record until it ends; otherwise record for 2 hours
     const endTime = currentProgram
       ? currentProgram.stop.getTime()
       : now + 2 * 60 * 60 * 1000;
@@ -323,7 +332,6 @@ export default function Player() {
     const dx = touch.clientX - touchStartRef.current.x;
     const dy = touch.clientY - touchStartRef.current.y;
 
-    // Ignore vertical swipes
     if (!swipeActiveRef.current && Math.abs(dy) > Math.abs(dx)) {
       touchStartRef.current = null;
       return;
@@ -340,11 +348,9 @@ export default function Player() {
   }, [isLive, hasDuration, duration, swipeSeeking, resetOSDTimer]);
 
   const handleTouchEnd = useCallback((e: React.TouchEvent) => {
-    // Skip if touch was on an OSD control (let click handler handle it)
     if (isOsdControl(e.target)) return;
 
     if (swipeActiveRef.current && swipeSeeking) {
-      // Commit the scrub
       seek(swipePreview);
       setSwipeSeeking(false);
       swipeActiveRef.current = false;
@@ -352,7 +358,6 @@ export default function Player() {
       return;
     }
 
-    // Not a swipe — check for tap / double-tap
     touchStartRef.current = null;
     swipeActiveRef.current = false;
     if (swipeSeeking) { setSwipeSeeking(false); return; }
@@ -362,13 +367,11 @@ export default function Player() {
     const lastTap = lastTapRef.current;
 
     if (now - lastTap.time < DOUBLE_TAP_MS && Math.abs(tapX - lastTap.x) < 100) {
-      // Double-tap detected
       if (tapTimerRef.current) { clearTimeout(tapTimerRef.current); tapTimerRef.current = null; }
       const screenMid = window.innerWidth / 2;
       handleDoubleTap(tapX > screenMid ? 'right' : 'left');
       lastTapRef.current = { time: 0, x: 0 };
     } else {
-      // Potential single tap — wait to see if another tap comes
       lastTapRef.current = { time: now, x: tapX };
       if (tapTimerRef.current) clearTimeout(tapTimerRef.current);
       tapTimerRef.current = setTimeout(() => {
@@ -416,9 +419,11 @@ export default function Player() {
 
   const seekDisplay = isSeeking ? seekValue : currentTime;
   const pipSupported = typeof document !== 'undefined' && document.pictureInPictureEnabled === true;
+  const remaining = hasDuration ? duration - seekDisplay : 0;
 
   return (
     <div
+      ref={containerRef}
       className="w-full h-dvh lg:w-tv lg:h-tv relative bg-black fixed lg:static top-0 left-0 right-0 bottom-0"
       tabIndex={0}
       onKeyDown={handleKeyDown}
@@ -491,70 +496,127 @@ export default function Player() {
           'absolute inset-0 flex flex-col justify-between opacity-0 transition-opacity duration-300 pointer-events-none z-[3] player-osd-portrait',
           showOSD && 'opacity-100 pointer-events-auto'
         )}>
-          {/* Top bar: back + title */}
-          <div className="flex items-start gap-3 pt-[calc(12px+env(safe-area-inset-top,0px))] pb-8 px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] bg-gradient-to-b from-black/[0.85] to-transparent lg:gap-3 lg:pt-6 lg:px-10 lg:pb-10">
+          {/* Top bar */}
+          <div className="flex items-center gap-3 pt-[calc(12px+env(safe-area-inset-top,0px))] pb-8 px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] bg-gradient-to-b from-black/[0.85] to-transparent lg:gap-3 lg:pt-6 lg:px-10 lg:pb-10">
             {MOBILE && (
-              <button className="flex items-center justify-center w-9 h-9 bg-white/[0.12] border-none rounded-full text-white text-18 shrink-0 tap-none active:bg-white/[0.24]" onClick={(e) => { e.stopPropagation(); handleBack(); }}>
-                {'\u2190'}
+              <button
+                className="flex items-center justify-center w-10 h-10 bg-transparent border-none text-white shrink-0 tap-none active:opacity-60"
+                onClick={(e) => { e.stopPropagation(); handleBack(); }}
+              >
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M18 6L6 18M6 6l12 12" />
+                </svg>
               </button>
             )}
             <div className="flex-1 min-w-0">
               <span className="text-base lg:text-28 font-bold block whitespace-nowrap overflow-hidden text-ellipsis">{currentChannel.name}</span>
               {currentProgram && (
-                <span className="text-12 lg:text-18 text-[#aaa] mt-1 block">{currentProgram.title}</span>
+                <span className="text-12 lg:text-18 text-[#aaa] mt-0.5 block">{currentProgram.title}</span>
               )}
             </div>
-            {MOBILE && isLive && (
-              <button
-                className={cn(
-                  'w-9 h-9 flex items-center justify-center text-20 text-white opacity-80 transition-opacity duration-150 hover:opacity-100',
-                  isRecording && 'text-[#ef4444] opacity-100 animate-pulse-record'
-                )}
-                onClick={handleRecord}
-                title={isRecording ? 'Recording...' : 'Record'}
-              >
-                ⏺
-              </button>
-            )}
-            {MOBILE && pipSupported && (
-              <button className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-white/[0.12] text-white shrink-0 tap-none cursor-pointer active:bg-white/[0.24]" onClick={handlePiP} title="Picture-in-Picture">
-                {/* PiP icon */}
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="2" y="3" width="20" height="14" rx="2" />
-                  <rect x="12" y="9" width="8" height="6" rx="1" fill="currentColor" opacity="0.4" />
-                </svg>
-              </button>
-            )}
-            {MOBILE && (
-              <button className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-white/[0.12] text-white shrink-0 tap-none cursor-pointer active:bg-white/[0.24]" onClick={handleFullscreen} title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
-                {isFullscreen ? (
-                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M8 3v3a2 2 0 0 1-2 2H3" />
-                    <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
-                    <path d="M3 16h3a2 2 0 0 1 2 2v3" />
-                    <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+            {/* Top-right action buttons */}
+            <div className="flex items-center gap-1" data-player-controls>
+              {MOBILE && isLive && (
+                <button
+                  className={cn(
+                    'flex items-center justify-center w-10 h-10 rounded-lg border-none bg-transparent text-white shrink-0 tap-none cursor-pointer active:opacity-60',
+                    isRecording && 'text-[#ef4444] animate-pulse-record'
+                  )}
+                  onClick={handleRecord}
+                  title={isRecording ? 'Recording...' : 'Record'}
+                >
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="9" />
+                    <circle cx="12" cy="12" r="4" fill={isRecording ? 'currentColor' : 'none'} />
                   </svg>
-                ) : (
+                </button>
+              )}
+              {MOBILE && pipSupported && (
+                <button
+                  className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-transparent text-white shrink-0 tap-none cursor-pointer active:opacity-60"
+                  onClick={handlePiP}
+                  title="Picture-in-Picture"
+                >
                   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M8 3H5a2 2 0 0 0-2 2v3" />
-                    <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
-                    <path d="M3 16v3a2 2 0 0 0 2 2h3" />
-                    <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+                    <rect x="2" y="3" width="20" height="14" rx="2" />
+                    <rect x="12" y="9" width="8" height="6" rx="1" fill="currentColor" opacity="0.4" />
                   </svg>
-                )}
-              </button>
-            )}
+                </button>
+              )}
+              {MOBILE && (
+                <button
+                  className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-transparent text-white shrink-0 tap-none cursor-pointer active:opacity-60"
+                  onClick={handleFullscreen}
+                  title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+                >
+                  {isFullscreen ? (
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+                      <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+                      <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+                      <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+                    </svg>
+                  ) : (
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+                      <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+                      <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+                      <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+                    </svg>
+                  )}
+                </button>
+              )}
+            </div>
           </div>
 
-          {/* Bottom bar: controls */}
+          {/* Center play/skip controls */}
+          {MOBILE && (
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-10" data-player-controls>
+              {!isLive && (
+                <button
+                  className="flex items-center justify-center w-12 h-12 rounded-full border-none bg-transparent text-white tap-none cursor-pointer active:opacity-60"
+                  onClick={(e) => { e.stopPropagation(); handleSkip(-10); }}
+                  title="Back 10s"
+                >
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12.5 3C7.26 3 3.03 7.03 3 12.13L1 10.1 0 11.18l3.5 3.5 3.5-3.5-1-1.07L4 12.13C4.03 7.59 7.59 4 12.5 4c4.14 0 7.5 3.36 7.5 7.5S16.64 19 12.5 19c-2.95 0-5.5-1.71-6.71-4.19l-.91.39C6.17 17.89 9.09 20 12.5 20c4.69 0 8.5-3.81 8.5-8.5S17.19 3 12.5 3z" />
+                    <text x="9" y="15" fontSize="7" fontWeight="bold" fill="currentColor">10</text>
+                  </svg>
+                </button>
+              )}
+              <button
+                className="flex items-center justify-center w-16 h-16 rounded-full border-2 border-white/30 bg-black/30 text-white tap-none cursor-pointer active:opacity-60"
+                onClick={handleTogglePlay}
+              >
+                {isPaused ? (
+                  <svg width="36" height="36" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+                ) : (
+                  <svg width="36" height="36" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
+                )}
+              </button>
+              {!isLive && (
+                <button
+                  className="flex items-center justify-center w-12 h-12 rounded-full border-none bg-transparent text-white tap-none cursor-pointer active:opacity-60"
+                  onClick={(e) => { e.stopPropagation(); handleSkip(10); }}
+                  title="Forward 10s"
+                >
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M11.5 3C16.74 3 20.97 7.03 21 12.13L23 10.1l1 1.07-3.5 3.5-3.5-3.5 1-1.07 2 2.02C19.97 7.59 16.41 4 11.5 4 7.36 4 4 7.36 4 11.5S7.36 19 11.5 19c2.95 0 5.5-1.71 6.71-4.19l.91.39C17.83 17.89 14.91 20 11.5 20 6.81 20 3 16.19 3 11.5S6.81 3 11.5 3z" />
+                    <text x="8" y="15" fontSize="7" fontWeight="bold" fill="currentColor">10</text>
+                  </svg>
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Bottom bar: progress + time */}
           <div className="relative px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] pt-8 pb-[calc(12px+env(safe-area-inset-bottom,0px))] lg:px-10 lg:pt-10 lg:pb-6 bg-gradient-to-t from-black/90 to-transparent">
             {/* Seek bar for VOD */}
             {!isLive && hasDuration && (
-              <div className="flex items-center gap-3 mb-2" data-player-controls>
-                <span className="text-sm text-[#aaa] tabular-nums min-w-[48px] text-center">{formatTime(seekDisplay)}</span>
+              <div data-player-controls>
                 <input
                   ref={seekBarRef}
-                  className="seek-bar flex-1 h-1.5 lg:h-1 rounded-sm"
+                  className="seek-bar w-full h-1 rounded-sm mb-2"
                   type="range"
                   min={0}
                   max={duration}
@@ -567,7 +629,10 @@ export default function Player() {
                   onTouchEnd={handleSeekEnd}
                   onClick={(e) => e.stopPropagation()}
                 />
-                <span className="text-sm text-[#aaa] tabular-nums min-w-[48px] text-center">{formatTime(duration)}</span>
+                <div className="flex items-center justify-between">
+                  <span className="text-12 text-[#aaa] tabular-nums">{formatTime(seekDisplay)}</span>
+                  <span className="text-12 text-[#aaa] tabular-nums">-{formatTime(remaining)}</span>
+                </div>
               </div>
             )}
 
@@ -583,35 +648,6 @@ export default function Player() {
                   {' - '}
                   {currentProgram.stop.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 </span>
-              </div>
-            )}
-
-            {/* Playback buttons */}
-            {MOBILE && (
-              <div className="flex items-center justify-center gap-6 mt-1" data-player-controls>
-                {!isLive && (
-                  <button className="flex items-center justify-center w-11 h-11 rounded-full border-none bg-white/[0.12] text-white tap-none cursor-pointer active:bg-white/[0.24]" onClick={(e) => { e.stopPropagation(); handleSkip(-10); }} title="Back 10s">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M12.5 3C7.26 3 3.03 7.03 3 12.13L1 10.1 0 11.18l3.5 3.5 3.5-3.5-1-1.07L4 12.13C4.03 7.59 7.59 4 12.5 4c4.14 0 7.5 3.36 7.5 7.5S16.64 19 12.5 19c-2.95 0-5.5-1.71-6.71-4.19l-.91.39C6.17 17.89 9.09 20 12.5 20c4.69 0 8.5-3.81 8.5-8.5S17.19 3 12.5 3z" />
-                      <text x="9" y="15" fontSize="7" fontWeight="bold" fill="currentColor">10</text>
-                    </svg>
-                  </button>
-                )}
-                <button className="flex items-center justify-center w-14 h-14 rounded-full border-none bg-white/[0.18] text-white tap-none cursor-pointer active:bg-white/[0.24]" onClick={handleTogglePlay}>
-                  {isPaused ? (
-                    <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
-                  ) : (
-                    <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
-                  )}
-                </button>
-                {!isLive && (
-                  <button className="flex items-center justify-center w-11 h-11 rounded-full border-none bg-white/[0.12] text-white tap-none cursor-pointer active:bg-white/[0.24]" onClick={(e) => { e.stopPropagation(); handleSkip(10); }} title="Forward 10s">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M11.5 3C16.74 3 20.97 7.03 21 12.13L23 10.1l1 1.07-3.5 3.5-3.5-3.5 1-1.07 2 2.02C19.97 7.59 16.41 4 11.5 4 7.36 4 4 7.36 4 11.5S7.36 19 11.5 19c2.95 0 5.5-1.71 6.71-4.19l.91.39C17.83 17.89 14.91 20 11.5 20 6.81 20 3 16.19 3 11.5S6.81 3 11.5 3z" />
-                      <text x="8" y="15" fontSize="7" fontWeight="bold" fill="currentColor">10</text>
-                    </svg>
-                  </button>
-                )}
               </div>
             )}
 

@@ -115,7 +115,7 @@ function AppContent() {
   };
 
   return (
-    <div className="flex flex-col-reverse w-full h-dvh lg:flex-row lg:w-tv lg:h-tv overflow-hidden">
+    <div className="flex flex-col w-full h-dvh lg:flex-row lg:w-tv lg:h-tv overflow-hidden">
       {!isOnline && (
         <div className="fixed top-0 left-0 right-0 z-[9999] p-2 lg:p-2.5 bg-[#c0392b] text-white text-center text-sm lg:text-18">
           No network connection. Some features may be unavailable.
