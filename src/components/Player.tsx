@@ -29,7 +29,7 @@ function formatTime(seconds: number): string {
 
 /** Check if a touch event target is inside a clickable OSD element */
 function isOsdControl(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
+  if (!(target instanceof Element)) return false;
   return !!target.closest('button, input, [data-player-controls]');
 }
 
