@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { usePlayer, getStreamUrl } from '../hooks/usePlayer';
+import { usePlayer } from '../hooks/usePlayer';
 import { usePlayerStore } from '../stores/playerStore';
 import { useChannelStore } from '../stores/channelStore';
 import { useAppStore } from '../stores/appStore';
 import { useRecordingStore } from '../stores/recordingStore';
 import { getCurrentProgram } from '../services/epg-service';
 import { KEY_CODES } from '../utils/keys';
-import { isMobile, openInNativePlayer } from '../utils/platform';
+import { isMobile } from '../utils/platform';
 
 const OSD_TIMEOUT = 5000;
 const MOBILE = isMobile();
@@ -226,27 +226,47 @@ export default function Player() {
     } catch { /* PiP not supported */ }
   }, [getVideoElement]);
 
-  const handleNativePlayer = useCallback((e: React.MouseEvent) => {
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  const handleFullscreen = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!currentChannel) return;
-    const streamUrl = getStreamUrl(currentChannel.id, currentChannel.url);
-    // Make URL absolute for native player
-    const absoluteUrl = streamUrl.startsWith('http')
-      ? streamUrl
-      : `${window.location.origin}${streamUrl}`;
-    // Build player page URL for iOS (serves HTML with <video> element)
-    const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
-    let playerPageUrl = `${apiBaseUrl}/api/player/${encodeURIComponent(currentChannel.id)}`;
-    if (currentChannel.url && currentChannel.id.startsWith('episode_')) {
-      playerPageUrl += `?url=${encodeURIComponent(currentChannel.url)}&type=series`;
+    const el = document.documentElement as HTMLElement & {
+      webkitRequestFullscreen?: () => Promise<void>;
+      msRequestFullscreen?: () => void;
+    };
+    const doc = document as Document & {
+      webkitFullscreenElement?: Element | null;
+      msFullscreenElement?: Element | null;
+      webkitExitFullscreen?: () => Promise<void>;
+      msExitFullscreen?: () => void;
+    };
+    const isFs = !!(doc.fullscreenElement || doc.webkitFullscreenElement || doc.msFullscreenElement);
+    if (isFs) {
+      if (doc.exitFullscreen) doc.exitFullscreen();
+      else if (doc.webkitExitFullscreen) doc.webkitExitFullscreen();
+      else if (doc.msExitFullscreen) doc.msExitFullscreen();
+    } else {
+      if (el.requestFullscreen) el.requestFullscreen();
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      else if (el.msRequestFullscreen) el.msRequestFullscreen();
     }
-    const absolutePlayerUrl = playerPageUrl.startsWith('http')
-      ? playerPageUrl
-      : `${window.location.origin}${playerPageUrl}`;
-    // Stop the web player first so it doesn't hold the stream
-    stop();
-    openInNativePlayer(absoluteUrl, absolutePlayerUrl);
-  }, [currentChannel, stop]);
+  }, []);
+
+  useEffect(() => {
+    const onFsChange = () => {
+      const doc = document as Document & {
+        webkitFullscreenElement?: Element | null;
+        msFullscreenElement?: Element | null;
+      };
+      setIsFullscreen(!!(doc.fullscreenElement || doc.webkitFullscreenElement || doc.msFullscreenElement));
+    };
+    document.addEventListener('fullscreenchange', onFsChange);
+    document.addEventListener('webkitfullscreenchange', onFsChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', onFsChange);
+      document.removeEventListener('webkitfullscreenchange', onFsChange);
+    };
+  }, []);
 
   const handleRecord = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -485,16 +505,6 @@ export default function Player() {
                 ⏺
               </button>
             )}
-            {MOBILE && (
-              <button className="player__native-btn" onClick={handleNativePlayer} title="Open in native player">
-                {/* External player icon */}
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-                  <polyline points="15 3 21 3 21 9" />
-                  <line x1="10" y1="14" x2="21" y2="3" />
-                </svg>
-              </button>
-            )}
             {MOBILE && pipSupported && (
               <button className="player__pip-btn" onClick={handlePiP} title="Picture-in-Picture">
                 {/* PiP icon */}
@@ -580,6 +590,27 @@ export default function Player() {
               <span className="player__osd-subtitle-indicator">
                 {currentSubtitleIndex === -1 ? 'Subs: Off' : `Subs: ${subtitleTracks[currentSubtitleIndex]?.label || 'On'}`}
               </span>
+            )}
+
+            {/* Fullscreen button (bottom right) */}
+            {MOBILE && (
+              <button className="player__fullscreen-btn" onClick={handleFullscreen} title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+                {isFullscreen ? (
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M8 3v3a2 2 0 0 1-2 2H3" />
+                    <path d="M21 8h-3a2 2 0 0 1-2-2V3" />
+                    <path d="M3 16h3a2 2 0 0 1 2 2v3" />
+                    <path d="M16 21v-3a2 2 0 0 1 2-2h3" />
+                  </svg>
+                ) : (
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+                    <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+                    <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+                    <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+                  </svg>
+                )}
+              </button>
             )}
           </div>
         </div>

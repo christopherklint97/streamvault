@@ -748,6 +748,7 @@ img { display: block; }
 
 /* Bottom controls area */
 .player__controls {
+  position: relative;
   padding: 40px 40px 24px;
   background: linear-gradient(transparent, rgba(0, 0, 0, 0.9));
 }
@@ -862,7 +863,10 @@ img { display: block; }
   background: rgba(255, 255, 255, 0.18);
 }
 
-.player__native-btn {
+.player__fullscreen-btn {
+  position: absolute;
+  bottom: 12px;
+  right: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -876,7 +880,7 @@ img { display: block; }
   -webkit-tap-highlight-color: transparent;
   cursor: pointer;
 }
-.player__native-btn:active { background: rgba(255, 255, 255, 0.24); }
+.player__fullscreen-btn:active { background: rgba(255, 255, 255, 0.24); }
 
 .player__pip-btn {
   display: flex;
