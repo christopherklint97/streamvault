@@ -295,75 +295,42 @@ export function getChannelsByContentTypeCursor(contentType: string, limit: numbe
   return db.prepare('SELECT * FROM channels WHERE content_type = ? ORDER BY name LIMIT ?').all(contentType, limit) as DBChannel[];
 }
 
-// --- Trigram fuzzy search ---
-
-function trigrams(s: string): Set<string> {
-  const t = new Set<string>();
-  const low = s.toLowerCase();
-  for (let i = 0; i <= low.length - 3; i++) {
-    t.add(low.slice(i, i + 3));
-  }
-  return t;
-}
-
-function trigramScore(query: string, target: string): number {
-  const qt = trigrams(query);
-  const tt = trigrams(target);
-  if (qt.size === 0) return 0;
-  let overlap = 0;
-  for (const t of qt) {
-    if (tt.has(t)) overlap++;
-  }
-  return overlap / qt.size;
-}
+// --- Direct substring search ---
 
 export function searchChannelsByName(query: string, contentType?: string, group?: string): DBChannel[] {
-  // Phase 1: broad SQL candidate fetch using LIKE for each word
   const words = query.trim().toLowerCase().split(/\s+/).filter(w => w.length > 0);
   if (words.length === 0) return [];
 
-  // Build SQL: match using short prefixes (3+ chars) for broad candidate net
-  // This catches typos since we only need partial substring overlap
-  let sql = 'SELECT * FROM channels WHERE (';
+  // All words must appear in the name (AND logic)
+  let sql = 'SELECT * FROM channels WHERE ';
   const params: (string | number)[] = [];
   const likeClauses: string[] = [];
   for (const word of words) {
-    if (word.length >= 4) {
-      // Use 4-char prefix for broad match — catches typos later in the word
-      likeClauses.push('name LIKE ?');
-      params.push(`%${word.slice(0, 4)}%`);
-    } else {
-      likeClauses.push('name LIKE ?');
-      params.push(`%${word}%`);
-    }
+    likeClauses.push('name LIKE ? COLLATE NOCASE');
+    params.push(`%${word}%`);
   }
-  sql += likeClauses.join(' OR ') + ')';
+  sql += likeClauses.join(' AND ');
   if (contentType) { sql += ' AND content_type = ?'; params.push(contentType); }
   if (group) { sql += ' AND grp = ?'; params.push(group); }
-  sql += ' LIMIT 1000'; // broad candidate pool for fuzzy scoring
+  sql += ' LIMIT 200';
 
-  const candidates = db.prepare(sql).all(...params) as DBChannel[];
+  const results = db.prepare(sql).all(...params) as DBChannel[];
 
-  // Phase 2: score candidates with trigram similarity
-  const queryLower = query.toLowerCase();
-  const scored = candidates.map(ch => ({
-    channel: ch,
-    score: trigramScore(queryLower, ch.name.toLowerCase()),
-    exact: ch.name.toLowerCase().includes(queryLower) ? 1 : 0,
-  }));
-
-  // Filter: require at least some trigram overlap (0.15 threshold allows typos)
-  const MIN_SCORE = 0.15;
-  const filtered = scored.filter(s => s.score >= MIN_SCORE || s.exact);
-
-  // Sort: exact matches first, then by trigram score desc, then alphabetical
-  filtered.sort((a, b) => {
-    if (a.exact !== b.exact) return b.exact - a.exact;
-    if (Math.abs(a.score - b.score) > 0.01) return b.score - a.score;
-    return a.channel.name.localeCompare(b.channel.name);
+  // Sort: exact full-query match first, then starts-with, then alphabetical
+  const queryLower = query.trim().toLowerCase();
+  results.sort((a, b) => {
+    const aName = a.name.toLowerCase();
+    const bName = b.name.toLowerCase();
+    const aExact = aName === queryLower ? 2 : aName.includes(queryLower) ? 1 : 0;
+    const bExact = bName === queryLower ? 2 : bName.includes(queryLower) ? 1 : 0;
+    if (aExact !== bExact) return bExact - aExact;
+    const aStarts = aName.startsWith(queryLower) ? 1 : 0;
+    const bStarts = bName.startsWith(queryLower) ? 1 : 0;
+    if (aStarts !== bStarts) return bStarts - aStarts;
+    return aName.localeCompare(bName);
   });
 
-  return filtered.slice(0, 50).map(s => s.channel);
+  return results.slice(0, 50);
 }
 
 export function getChannelCountByContentType(contentType: string): number {
