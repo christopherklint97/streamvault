@@ -4,6 +4,7 @@ import {
   saveChannels, savePrograms, saveCategories,
   getConfig, setConfig,
   getChannelCount, getProgramCount, getCategoryCount,
+  getCategories, getContentTypeCounts,
   saveChannelsForCategory, markCategoryFetched,
   saveProgramsForChannels,
 } from './db.js';
@@ -44,9 +45,9 @@ const state: SyncState = {
 let abortController: AbortController | null = null;
 let crawlAbortController: AbortController | null = null;
 let syncTimer: ReturnType<typeof setTimeout> | null = null;
-let nightlyCrawlTimer: ReturnType<typeof setTimeout> | null = null;
+let scheduledCrawlTimer: ReturnType<typeof setTimeout> | null = null;
 
-export function getStatus(): SyncState & { crawlAvailable: boolean } {
+export function getStatus(): SyncState & { crawlAvailable: boolean; contentTypeCounts: Record<string, number> } {
   if (!state.isSyncing) {
     state.channelCount = getChannelCount();
     state.programCount = getProgramCount();
@@ -54,7 +55,19 @@ export function getStatus(): SyncState & { crawlAvailable: boolean } {
     state.lastSyncTime = parseInt(getConfig('last_sync_time', '0'), 10);
     state.lastCrawlTime = parseInt(getConfig('last_crawl_time', '0'), 10);
   }
-  return { ...state, crawlAvailable: !state.isCrawling && !!getXtreamConfig() };
+
+  // Compute content type counts for homepage browse section
+  const inputMode = getConfig('input_mode', 'xtream');
+  const contentTypeCounts: Record<string, number> = {};
+  if (inputMode === 'xtream') {
+    for (const c of getCategories()) {
+      contentTypeCounts[c.content_type] = (contentTypeCounts[c.content_type] || 0) + 1;
+    }
+  } else {
+    Object.assign(contentTypeCounts, getContentTypeCounts());
+  }
+
+  return { ...state, crawlAvailable: !state.isCrawling && !!getXtreamConfig(), contentTypeCounts };
 }
 
 // ---------- Xtream sync (categories only — fast) ----------
@@ -189,7 +202,7 @@ export async function startCrawl(): Promise<void> {
   } finally {
     state.isCrawling = false;
     crawlAbortController = null;
-    scheduleNightlyCrawl();
+    scheduleNextCrawl();
   }
 }
 
@@ -203,29 +216,43 @@ export function cancelCrawl(): void {
   logger.info('Crawl cancelled');
 }
 
-/** Schedule nightly crawl at 3 AM local time */
-function scheduleNightlyCrawl(): void {
-  if (nightlyCrawlTimer) { clearTimeout(nightlyCrawlTimer); nightlyCrawlTimer = null; }
+/** Schedule crawl 3 times a day at 3 AM, 11 AM, 7 PM (every 8 hours) */
+function scheduleNextCrawl(): void {
+  if (scheduledCrawlTimer) { clearTimeout(scheduledCrawlTimer); scheduledCrawlTimer = null; }
 
   const inputMode = getConfig('input_mode', 'manual');
   if (inputMode !== 'xtream') return;
   if (!getXtreamConfig()) return;
 
+  const crawlHours = [3, 11, 19]; // 3 AM, 11 AM, 7 PM
   const now = new Date();
-  const next3AM = new Date(now);
-  next3AM.setHours(3, 0, 0, 0);
-  if (next3AM.getTime() <= now.getTime()) {
-    next3AM.setDate(next3AM.getDate() + 1);
+  let nextCrawl: Date | null = null;
+
+  // Find the next crawl time today or tomorrow
+  for (const hour of crawlHours) {
+    const candidate = new Date(now);
+    candidate.setHours(hour, 0, 0, 0);
+    if (candidate.getTime() > now.getTime()) {
+      nextCrawl = candidate;
+      break;
+    }
   }
-  const msUntil = next3AM.getTime() - now.getTime();
+  if (!nextCrawl) {
+    // All today's slots have passed, schedule first slot tomorrow
+    nextCrawl = new Date(now);
+    nextCrawl.setDate(nextCrawl.getDate() + 1);
+    nextCrawl.setHours(crawlHours[0], 0, 0, 0);
+  }
+
+  const msUntil = nextCrawl.getTime() - now.getTime();
   const hoursUntil = (msUntil / 3600000).toFixed(1);
 
-  nightlyCrawlTimer = setTimeout(() => {
-    logger.info('Nightly crawl triggered');
+  scheduledCrawlTimer = setTimeout(() => {
+    logger.info('Scheduled crawl triggered');
     startCrawl();
   }, msUntil);
 
-  logger.info(`Nightly crawl scheduled in ${hoursUntil}h (at ${next3AM.toLocaleTimeString()})`);
+  logger.info(`Next crawl scheduled in ${hoursUntil}h (at ${nextCrawl.toLocaleTimeString()})`);
 }
 
 // ---------- Manual M3U/EPG sync ----------
@@ -449,13 +476,13 @@ export function startupSync(): void {
   if (inputMode === 'xtream') {
     const lastCrawl = parseInt(getConfig('last_crawl_time', '0'), 10);
     const channelCount = getChannelCount();
-    if (channelCount === 0 || (now - lastCrawl) > 24 * 60 * 60 * 1000) {
+    if (channelCount === 0 || (now - lastCrawl) > 8 * 60 * 60 * 1000) {
       // No streams cached or crawl is stale — start background crawl
       logger.info('Starting background stream crawl (no cached streams or crawl stale)...');
       setTimeout(() => startCrawl(), 5000); // Delay 5s to let startup finish
     } else {
       logger.info(`Streams cached (${channelCount}), last crawl ${((now - lastCrawl) / 3600000).toFixed(1)}h ago`);
     }
-    scheduleNightlyCrawl();
+    scheduleNextCrawl();
   }
 }

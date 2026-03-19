@@ -13,48 +13,47 @@ interface NavItem {
   icon: React.ReactNode;
 }
 
+// Smaller icons for bottom tab bar
+function icon(size: number, children: React.ReactNode) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{children}</svg>;
+}
+
 // SVG icons for nav items
 const NAV_ITEMS: NavItem[] = [
   {
     label: 'Home', view: 'home',
-    icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><polyline points="9 22 9 12 15 12 15 22" /></svg>,
+    icon: icon(22, <><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><polyline points="9 22 9 12 15 12 15 22" /></>),
   },
   {
     label: 'Live TV', view: 'channels',
-    icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="7" width="20" height="15" rx="2" ry="2" /><polyline points="17 2 12 7 7 2" /></svg>,
+    icon: icon(22, <><rect x="2" y="7" width="20" height="15" rx="2" ry="2" /><polyline points="17 2 12 7 7 2" /></>),
   },
   {
     label: 'Guide', view: 'guide',
-    icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" /></svg>,
+    icon: icon(22, <><rect x="3" y="4" width="18" height="18" rx="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" /></>),
   },
   {
     label: 'Movies', view: 'movies',
-    icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" /><line x1="7" y1="2" x2="7" y2="22" /><line x1="17" y1="2" x2="17" y2="22" /><line x1="2" y1="12" x2="22" y2="12" /><line x1="2" y1="7" x2="7" y2="7" /><line x1="2" y1="17" x2="7" y2="17" /><line x1="17" y1="17" x2="22" y2="17" /><line x1="17" y1="7" x2="22" y2="7" /></svg>,
+    icon: icon(22, <><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" /><line x1="7" y1="2" x2="7" y2="22" /><line x1="17" y1="2" x2="17" y2="22" /><line x1="2" y1="12" x2="22" y2="12" /><line x1="2" y1="7" x2="7" y2="7" /><line x1="2" y1="17" x2="7" y2="17" /><line x1="17" y1="17" x2="22" y2="17" /><line x1="17" y1="7" x2="22" y2="7" /></>),
   },
   {
     label: 'Series', view: 'series',
-    icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /></svg>,
+    icon: icon(22, <><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /></>),
   },
   {
     label: 'DVR', view: 'recordings',
-    icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="4" /></svg>,
+    icon: icon(22, <><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="4" /></>),
   },
   {
     label: 'Settings', view: 'settings',
-    icon: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>,
+    icon: icon(22, <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" /></>),
   },
 ];
 
-/** Hamburger menu icon */
-function MenuIcon() {
-  return (
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <line x1="3" y1="6" x2="21" y2="6" />
-      <line x1="3" y1="12" x2="21" y2="12" />
-      <line x1="3" y1="18" x2="21" y2="18" />
-    </svg>
-  );
-}
+/** Primary tabs shown in bottom bar */
+const PRIMARY_TABS: View[] = ['home', 'channels', 'movies', 'series'];
+/** Items behind the "More" menu */
+const MORE_VIEWS: View[] = ['guide', 'recordings', 'settings'];
 
 export default function Sidebar() {
   const currentView = useAppStore((s) => s.currentView);
@@ -94,65 +93,72 @@ export default function Sidebar() {
     setDrawerOpen(false);
   }, [navigate]);
 
-  // Mobile: hamburger button + slide-out drawer
+  // Mobile: fixed bottom tab bar
   if (MOBILE) {
+    const moreItems = NAV_ITEMS.filter((item) => MORE_VIEWS.includes(item.view));
+    const primaryItems = NAV_ITEMS.filter((item) => PRIMARY_TABS.includes(item.view));
+    const isMoreActive = MORE_VIEWS.includes(currentView);
+
     return (
       <>
-        {/* Hamburger button - fixed top-left */}
-        <button
-          className="fixed top-[calc(12px+env(safe-area-inset-top,0px))] left-3 z-[200] flex items-center justify-center w-10 h-10 rounded-full bg-dark-sidebar/80 backdrop-blur-sm border border-white/[0.08] text-white tap-none active:bg-white/[0.12]"
-          onClick={() => setDrawerOpen(true)}
-          aria-label="Open menu"
-        >
-          <MenuIcon />
-        </button>
-
-        {/* Backdrop */}
+        {/* More menu popup */}
         {drawerOpen && (
-          <div
-            className="fixed inset-0 z-[998] bg-black/60 animate-fade-in-fast"
-            onClick={() => setDrawerOpen(false)}
-          />
-        )}
-
-        {/* Drawer */}
-        <nav
-          className={cn(
-            'fixed top-0 left-0 bottom-0 z-[999] w-64 bg-dark-sidebar border-r border-white/[0.08] pt-[calc(16px+env(safe-area-inset-top,0px))] pb-[env(safe-area-inset-bottom,0px)] transition-transform duration-250 ease-out',
-            drawerOpen ? 'translate-x-0' : '-translate-x-full'
-          )}
-        >
-          {/* Drawer header */}
-          <div className="flex items-center gap-3 px-5 pb-5 mb-2 border-b border-white/[0.06]">
-            <span className="text-20 font-bold text-accent">StreamVault</span>
-            <button
-              className="ml-auto flex items-center justify-center w-9 h-9 rounded-full text-white/60 tap-none active:text-white"
+          <>
+            <div
+              className="fixed inset-0 z-[997] tap-none"
               onClick={() => setDrawerOpen(false)}
-              aria-label="Close menu"
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M18 6L6 18M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-
-          {/* Nav items */}
-          <ul className="flex flex-col gap-0.5 px-3 list-none">
-            {NAV_ITEMS.map((item) => (
-              <li key={item.view}>
+            />
+            <div className="fixed bottom-[calc(56px+env(safe-area-inset-bottom,0px))] right-2 z-[998] bg-dark-sidebar border border-white/[0.1] rounded-xl shadow-2xl overflow-hidden animate-fade-in-fast">
+              {moreItems.map((item) => (
                 <button
+                  key={item.view}
                   className={cn(
-                    'flex items-center gap-3 w-full py-3 px-3 rounded-lg text-[15px] text-[#888] tap-none transition-colors duration-150 active:bg-white/[0.06]',
-                    currentView === item.view && 'text-accent bg-accent/[0.08]'
+                    'flex items-center gap-3 w-full py-3 px-5 text-[15px] text-[#999] tap-none transition-colors duration-150 active:bg-white/[0.06]',
+                    currentView === item.view && 'text-accent'
                   )}
                   onClick={() => handleMobileNav(item.view)}
                 >
-                  <span className={cn('opacity-60', currentView === item.view && 'opacity-100 text-accent')}>{item.icon}</span>
+                  <span className={cn('opacity-50', currentView === item.view && 'opacity-100')}>{item.icon}</span>
                   <span>{item.label}</span>
                 </button>
-              </li>
-            ))}
-          </ul>
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* Bottom tab bar */}
+        <nav className="fixed bottom-0 left-0 right-0 z-[200] bg-dark-sidebar/95 backdrop-blur-md border-t border-white/[0.08] pb-[env(safe-area-inset-bottom,0px)]">
+          <div className="flex items-stretch justify-around h-14">
+            {primaryItems.map((item) => {
+              const active = currentView === item.view;
+              return (
+                <button
+                  key={item.view}
+                  className={cn(
+                    'flex-1 flex flex-col items-center justify-center gap-0.5 tap-none transition-colors duration-150',
+                    active ? 'text-accent' : 'text-[#666] active:text-[#999]'
+                  )}
+                  onClick={() => { navigate(item.view); setDrawerOpen(false); }}
+                >
+                  <span className={cn('transition-opacity', active ? 'opacity-100' : 'opacity-50')}>{item.icon}</span>
+                  <span className="text-[10px] font-medium">{item.label}</span>
+                </button>
+              );
+            })}
+            {/* More button */}
+            <button
+              className={cn(
+                'flex-1 flex flex-col items-center justify-center gap-0.5 tap-none transition-colors duration-150',
+                isMoreActive ? 'text-accent' : 'text-[#666] active:text-[#999]'
+              )}
+              onClick={() => setDrawerOpen((o) => !o)}
+            >
+              <span className={cn('transition-opacity', isMoreActive ? 'opacity-100' : 'opacity-50')}>
+                {icon(22, <><circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" /><circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none" /></>)}
+              </span>
+              <span className="text-[10px] font-medium">More</span>
+            </button>
+          </div>
         </nav>
       </>
     );

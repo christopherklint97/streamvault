@@ -594,7 +594,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
   if (MOBILE) {
     return (
       <div className="flex flex-col gap-3 lg:gap-4 animate-fade-in">
-        <div className="sticky top-[calc(-16px-env(safe-area-inset-top,0px))] z-10 bg-dark px-4 pt-[calc(8px+env(safe-area-inset-top,0px))] pb-0 -mx-4 -mt-[calc(16px+env(safe-area-inset-top,0px))] flex flex-col gap-2 lg:static lg:p-0 lg:m-0 lg:z-auto lg:bg-transparent">
+        <div className="sticky top-[calc(-8px-env(safe-area-inset-top,0px))] z-10 bg-dark px-4 pt-[calc(4px+env(safe-area-inset-top,0px))] pb-0 -mx-4 -mt-[calc(8px+env(safe-area-inset-top,0px))] flex flex-col gap-2 lg:static lg:p-0 lg:m-0 lg:z-auto lg:bg-transparent">
           <h1 className="text-20 lg:text-28 font-bold">{label}</h1>
           <div className="flex flex-col lg:flex-row gap-2 lg:gap-3 items-stretch lg:items-start">
             <div className="flex gap-2.5 flex-1">

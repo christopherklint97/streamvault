@@ -511,6 +511,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
         isCrawling: status.isCrawling,
         crawlProgress: status.crawlProgress || '',
         lastCrawlTime: status.lastCrawlTime || 0,
+        contentTypeCounts: status.contentTypeCounts || {},
         _hydrated: true,
       });
 
