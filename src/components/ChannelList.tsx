@@ -561,12 +561,13 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     }
   }, [focusZone, focusIndex, channels, scrollOffset, handleSelect]);
 
-  // Auto-focus search on mount
+  // Re-focus search when this view becomes active (including first mount)
+  const isActiveView = useAppStore((s) => s.currentView) === viewName;
   useEffect(() => {
-    if (!MOBILE) {
+    if (!MOBILE && isActiveView) {
       requestAnimationFrame(() => searchRef.current?.focus({ preventScroll: true }));
     }
-  }, []);
+  }, [isActiveView]);
 
   const label = contentType === 'livetv' ? 'Live TV' : contentType === 'movies' ? 'Movies' : 'Series';
 

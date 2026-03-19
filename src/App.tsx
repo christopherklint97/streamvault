@@ -20,10 +20,18 @@ import Recordings from './pages/Recordings';
 
 const Settings = lazy(() => import('./pages/Settings'));
 
+/** Browse views that stay mounted once visited to preserve search/scroll state */
+const BROWSE_VIEWS = [
+  { view: 'channels' as const, contentType: 'livetv' as const },
+  { view: 'movies' as const, contentType: 'movies' as const },
+  { view: 'series' as const, contentType: 'series' as const },
+] as const;
+
 function AppContent() {
   const currentView = useAppStore((s) => s.currentView);
   const selectedSeries = useAppStore((s) => s.selectedSeries);
   const selectedMovie = useAppStore((s) => s.selectedMovie);
+  const visitedViews = useAppStore((s) => s.visitedViews);
   const isLoading = useChannelStore((s) => s.isLoading);
   const loadingMessage = useChannelStore((s) => s.loadingMessage);
   const loadingPhase = useChannelStore((s) => s.loadingPhase);
@@ -87,20 +95,20 @@ function AppContent() {
     }
   }, []);
 
+  const isBrowseView = currentView === 'channels' || currentView === 'movies' || currentView === 'series';
+
   const renderView = () => {
     switch (currentView) {
       case 'home':
         return <Home />;
       case 'channels':
-        return <ChannelList contentType="livetv" />;
       case 'movies':
-        return <ChannelList contentType="movies" />;
       case 'series':
-        return <ChannelList contentType="series" />;
+        return null; // Rendered persistently below
       case 'seriesDetail':
-        return selectedSeries ? <SeriesDetail series={selectedSeries} /> : <ChannelList contentType="series" />;
+        return selectedSeries ? <SeriesDetail series={selectedSeries} /> : null;
       case 'movieDetail':
-        return selectedMovie ? <MovieDetail movie={selectedMovie} /> : <ChannelList contentType="movies" />;
+        return selectedMovie ? <MovieDetail movie={selectedMovie} /> : null;
       case 'guide':
         return <EpgGuide />;
       case 'recordings':
@@ -155,7 +163,16 @@ function AppContent() {
         )}
         onKeyDown={currentView !== 'player' ? handleMainKeyDown : undefined}
       >
-        {renderView()}
+        {/* Persistent browse views — stay mounted once visited to preserve state */}
+        {BROWSE_VIEWS.map(({ view, contentType }) => (
+          (currentView === view || visitedViews[view]) ? (
+            <div key={view} style={{ display: currentView === view ? undefined : 'none' }}>
+              <ChannelList contentType={contentType} />
+            </div>
+          ) : null
+        ))}
+        {/* Non-persistent views render conditionally */}
+        {!isBrowseView && renderView()}
       </main>
       <Toast />
       <ExitDialog />

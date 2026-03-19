@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { View, Channel } from '../types';
+import { updateUrl, parseUrl } from '../utils/url-state';
 
 /** Persisted search/filter state for each content-type browse view */
 export interface BrowseState {
@@ -18,6 +19,8 @@ interface AppState {
   toastMessage: string;
   /** Search/filter state keyed by view name (channels, movies, series) */
   browseStates: Record<string, BrowseState>;
+  /** Views that have been visited and should stay mounted */
+  visitedViews: Record<string, boolean>;
 }
 
 interface AppActions {
@@ -40,8 +43,18 @@ function pushState(view: View, group?: string | null) {
   history.pushState({ view, group: group || null }, '');
 }
 
+// Parse URL on startup to restore view + search state
+const initialUrl = parseUrl();
+const initialBrowse: Record<string, BrowseState> = {};
+if (initialUrl.searchQuery || initialUrl.selectedGroup) {
+  initialBrowse[initialUrl.view] = {
+    searchQuery: initialUrl.searchQuery,
+    selectedGroup: initialUrl.selectedGroup,
+  };
+}
+
 export const useAppStore = create<AppState & AppActions>()((set, get) => ({
-  currentView: 'home',
+  currentView: initialUrl.view,
   viewStack: [],
   selectedGroup: null,
   selectedSeries: null,
@@ -49,7 +62,8 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
   showExitDialog: false,
   showToast: false,
   toastMessage: '',
-  browseStates: {},
+  browseStates: initialBrowse,
+  visitedViews: initialUrl.view !== 'home' ? { [initialUrl.view]: true } : {},
 
   navigate: (view: View) => {
     const { currentView, viewStack } = get();
@@ -57,6 +71,7 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
     set({
       viewStack: [...viewStack, currentView],
       currentView: view,
+      visitedViews: { ...get().visitedViews, [view]: true },
       selectedGroup: null,
       showExitDialog: false,
     });
@@ -163,3 +178,10 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
     });
   },
 }));
+
+// Sync URL whenever the active view or its browse state changes
+useAppStore.subscribe((state, prevState) => {
+  if (state.currentView !== prevState.currentView || state.browseStates !== prevState.browseStates) {
+    updateUrl(state.currentView, state.browseStates[state.currentView]);
+  }
+});
