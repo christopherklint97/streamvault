@@ -1,4 +1,4 @@
-import { useEffect, useCallback, lazy, Suspense } from 'react';
+import { useEffect, useCallback } from 'react';
 import { useAppStore } from './stores/appStore';
 import { useChannelStore } from './stores/channelStore';
 import { useRemoteKeys } from './hooks/useRemoteKeys';
@@ -18,12 +18,7 @@ import Home from './pages/Home';
 import EpgGuide from './components/EpgGuide';
 import Recordings from './pages/Recordings';
 
-const Settings = lazy(() =>
-  import('./pages/Settings').catch(() => {
-    window.location.reload();
-    return { default: () => null } as never;
-  })
-);
+import Settings from './pages/Settings';
 
 /** Browse views that stay mounted once visited to preserve search/scroll state */
 const BROWSE_VIEWS = [
@@ -121,7 +116,7 @@ function AppContent() {
       case 'player':
         return <Player />;
       case 'settings':
-        return <Suspense fallback={null}><Settings /></Suspense>;
+        return <Settings />;
       default:
         return <Home />;
     }
