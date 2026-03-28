@@ -18,7 +18,12 @@ import Home from './pages/Home';
 import EpgGuide from './components/EpgGuide';
 import Recordings from './pages/Recordings';
 
-const Settings = lazy(() => import('./pages/Settings'));
+const Settings = lazy(() =>
+  import('./pages/Settings').catch(() => {
+    window.location.reload();
+    return { default: () => null } as never;
+  })
+);
 
 /** Browse views that stay mounted once visited to preserve search/scroll state */
 const BROWSE_VIEWS = [

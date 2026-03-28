@@ -989,8 +989,15 @@ app.use(express.static(FRONTEND_DIR, {
   },
 }));
 
-// SPA fallback: serve index.html with no-cache so deploys are picked up immediately
-app.get('/{*path}', (_req, res) => {
+// SPA fallback: serve index.html for navigation requests only.
+// Requests for missing assets (old JS/CSS chunks after deploy) get a 404
+// instead of index.html, which would cause "text/html is not a valid JS MIME type" errors.
+app.get('/{*path}', (req, res) => {
+  const ext = path.extname(req.path);
+  if (ext && ext !== '.html') {
+    res.status(404).end();
+    return;
+  }
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.sendFile(path.join(FRONTEND_DIR, 'index.html'));
 });
