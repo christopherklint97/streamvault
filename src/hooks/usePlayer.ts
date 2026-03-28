@@ -233,8 +233,11 @@ export function usePlayer(): {
       };
 
       const isLiveTs = channel.contentType === 'livetv';
-      // All streams go through proxy (handles redirects, VLC UA, CDN tokens)
-      const playUrl = getStreamUrl(channel.id, channel.url);
+      const isRecording = channel.id.startsWith('recording_');
+      // Recordings have a direct server URL; live/VOD go through stream proxy
+      const playUrl = isRecording
+        ? `${useChannelStore.getState().apiBaseUrl}${channel.url}`
+        : getStreamUrl(channel.id, channel.url);
       log.info(`HTML5: playUrl=${playUrl}, contentType=${channel.contentType}`);
 
       if (isLiveTs) {

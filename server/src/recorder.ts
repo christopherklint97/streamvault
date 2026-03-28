@@ -94,7 +94,7 @@ export async function startRecording(id: string): Promise<void> {
   );
   fs.mkdirSync(dateDir, { recursive: true });
 
-  const outputFile = path.join(dateDir, `${id}.ts`);
+  const outputFile = path.join(dateDir, `${id}.mp4`);
   const relPath = path.relative(recordingsDir, outputFile);
 
   let streamUrl: string;
@@ -120,8 +120,14 @@ export async function startRecording(id: string): Promise<void> {
     '-reconnect_delay_max', '30',
     ...headerArgs,
     '-i', streamUrl,
-    '-c', 'copy',
-    '-f', 'mpegts',
+    // H.264 CRF 23 (visually transparent) with medium preset for quality/speed balance
+    '-c:v', 'libx264',
+    '-crf', '23',
+    '-preset', 'medium',
+    // Copy audio as-is (already compressed AAC/MP3)
+    '-c:a', 'copy',
+    '-f', 'mp4',
+    '-movflags', '+frag_keyframe+empty_moov',
     '-y',
     outputFile,
   ], {

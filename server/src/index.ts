@@ -836,6 +836,7 @@ app.get('/api/recordings/:id/stream', (req, res) => {
   const stat = fs.statSync(filePath);
   const fileSize = stat.size;
   const range = req.headers.range;
+  const contentType = filePath.endsWith('.ts') ? 'video/mp2t' : 'video/mp4';
 
   if (range) {
     const parts = range.replace(/bytes=/, '').split('-');
@@ -847,13 +848,13 @@ app.get('/api/recordings/:id/stream', (req, res) => {
       'Content-Range': `bytes ${start}-${end}/${fileSize}`,
       'Accept-Ranges': 'bytes',
       'Content-Length': chunkSize,
-      'Content-Type': 'video/mp2t',
+      'Content-Type': contentType,
     });
     fs.createReadStream(filePath, { start, end }).pipe(res);
   } else {
     res.writeHead(200, {
       'Content-Length': fileSize,
-      'Content-Type': 'video/mp2t',
+      'Content-Type': contentType,
       'Accept-Ranges': 'bytes',
     });
     fs.createReadStream(filePath).pipe(res);

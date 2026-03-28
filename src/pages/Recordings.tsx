@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useCallback, useState } from 'react';
+import { useEffect, useMemo, useCallback, useState, useRef } from 'react';
 import { useRecordingStore } from '../stores/recordingStore';
 import { usePlayerStore } from '../stores/playerStore';
 import { useAppStore } from '../stores/appStore';
-import type { Recording, RecordingRule } from '../types';
+import { useChannelStore, SAME_ORIGIN } from '../stores/channelStore';
+import type { Recording, RecordingRule, Channel } from '../types';
 import { cn } from '../utils/cn';
 
 function formatBytes(bytes: number): string {
@@ -119,6 +120,166 @@ function RuleCard({ rule, onToggle, onDelete }: {
   );
 }
 
+function toLocalDatetime(date: Date): string {
+  const y = date.getFullYear();
+  const mo = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  const h = String(date.getHours()).padStart(2, '0');
+  const mi = String(date.getMinutes()).padStart(2, '0');
+  return `${y}-${mo}-${d}T${h}:${mi}`;
+}
+
+function ScheduleForm({ onCreated }: { onCreated: () => void }) {
+  const createRecording = useRecordingStore((s) => s.createRecording);
+  const apiBaseUrl = useChannelStore((s) => s.apiBaseUrl);
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<Channel[]>([]);
+  const [selectedChannel, setSelectedChannel] = useState<Channel | null>(null);
+  const [title, setTitle] = useState('');
+  const [startTime, setStartTime] = useState(() => {
+    const d = new Date();
+    d.setMinutes(d.getMinutes() + 5);
+    d.setSeconds(0, 0);
+    return toLocalDatetime(d);
+  });
+  const [endTime, setEndTime] = useState(() => {
+    const d = new Date();
+    d.setHours(d.getHours() + 1, d.getMinutes() + 5);
+    d.setSeconds(0, 0);
+    return toLocalDatetime(d);
+  });
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleSearch = useCallback((q: string) => {
+    setQuery(q);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    if (q.trim().length < 2) {
+      setResults([]);
+      return;
+    }
+    searchTimer.current = setTimeout(async () => {
+      try {
+        const base = SAME_ORIGIN ? '' : apiBaseUrl;
+        const resp = await fetch(`${base}/api/search?q=${encodeURIComponent(q)}&type=livetv`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        setResults((data.channels || []).slice(0, 20));
+      } catch {
+        // ignore
+      }
+    }, 300);
+  }, [apiBaseUrl]);
+
+  const handleSelectChannel = useCallback((ch: Channel) => {
+    setSelectedChannel(ch);
+    setQuery(ch.name);
+    setResults([]);
+    if (!title) setTitle(ch.name);
+  }, [title]);
+
+  const handleSubmit = useCallback(async () => {
+    if (!selectedChannel) { setError('Select a channel'); return; }
+    const start = new Date(startTime).getTime();
+    const end = new Date(endTime).getTime();
+    if (isNaN(start) || isNaN(end)) { setError('Invalid date/time'); return; }
+    if (end <= start) { setError('End time must be after start time'); return; }
+    if (!title.trim()) { setError('Title is required'); return; }
+
+    setSubmitting(true);
+    setError('');
+    const rec = await createRecording(selectedChannel.id, title.trim(), start, end);
+    setSubmitting(false);
+    if (rec) {
+      setSelectedChannel(null);
+      setQuery('');
+      setTitle('');
+      onCreated();
+    } else {
+      setError('Failed to create recording');
+    }
+  }, [selectedChannel, title, startTime, endTime, createRecording, onCreated]);
+
+  return (
+    <div className="bg-surface-border rounded-[10px] p-4 mb-6">
+      <h3 className="text-15 font-semibold mb-3 text-[#d1d5db]">Schedule Recording</h3>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        {/* Channel search */}
+        <div className="relative">
+          <label className="block text-12 text-[#9ca3af] mb-1">Channel</label>
+          <input
+            className="w-full py-2 px-3 rounded bg-[#1a1a2e] border border-[#333] text-white text-14 outline-none focus:border-[#3b82f6]"
+            placeholder="Search live TV channels..."
+            value={query}
+            onChange={(e) => { handleSearch(e.target.value); if (selectedChannel) setSelectedChannel(null); }}
+          />
+          {results.length > 0 && (
+            <div className="absolute z-10 top-full left-0 right-0 mt-1 max-h-48 overflow-y-auto bg-[#1a1a2e] border border-[#333] rounded shadow-lg">
+              {results.map((ch) => (
+                <button
+                  key={ch.id}
+                  className="block w-full text-left py-2 px-3 text-14 text-white hover:bg-[#2a2a3e] transition-colors"
+                  onClick={() => handleSelectChannel(ch)}
+                >
+                  <span className="font-medium">{ch.name}</span>
+                  {ch.group && <span className="text-12 text-[#6b7280] ml-2">{ch.group}</span>}
+                </button>
+              ))}
+            </div>
+          )}
+          {selectedChannel && (
+            <div className="mt-1 text-12 text-[#22c55e]">Selected: {selectedChannel.name}</div>
+          )}
+        </div>
+
+        {/* Title */}
+        <div>
+          <label className="block text-12 text-[#9ca3af] mb-1">Title</label>
+          <input
+            className="w-full py-2 px-3 rounded bg-[#1a1a2e] border border-[#333] text-white text-14 outline-none focus:border-[#3b82f6]"
+            placeholder="Recording title"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+          />
+        </div>
+
+        {/* Start time */}
+        <div>
+          <label className="block text-12 text-[#9ca3af] mb-1">Start Time</label>
+          <input
+            type="datetime-local"
+            className="w-full py-2 px-3 rounded bg-[#1a1a2e] border border-[#333] text-white text-14 outline-none focus:border-[#3b82f6] [color-scheme:dark]"
+            value={startTime}
+            onChange={(e) => setStartTime(e.target.value)}
+          />
+        </div>
+
+        {/* End time */}
+        <div>
+          <label className="block text-12 text-[#9ca3af] mb-1">End Time</label>
+          <input
+            type="datetime-local"
+            className="w-full py-2 px-3 rounded bg-[#1a1a2e] border border-[#333] text-white text-14 outline-none focus:border-[#3b82f6] [color-scheme:dark]"
+            value={endTime}
+            onChange={(e) => setEndTime(e.target.value)}
+          />
+        </div>
+      </div>
+
+      {error && <div className="text-12 text-[#f59e0b] mt-2">{error}</div>}
+
+      <button
+        className="mt-3 py-2 px-5 rounded text-14 font-semibold bg-[#1d4ed8] text-white transition-colors duration-150 hover:bg-[#2563eb] disabled:opacity-50"
+        disabled={submitting || !selectedChannel}
+        onClick={handleSubmit}
+      >
+        {submitting ? 'Scheduling...' : 'Schedule'}
+      </button>
+    </div>
+  );
+}
+
 type Tab = 'recordings' | 'rules';
 
 export default function Recordings() {
@@ -211,6 +372,8 @@ export default function Recordings() {
 
       {tab === 'recordings' && (
         <div className="pb-8">
+          <ScheduleForm onCreated={() => fetchRecordings()} />
+
           {inProgress.length > 0 && (
             <section className="mb-6">
               <h2 className="text-18 font-semibold mb-3 text-[#d1d5db]">In Progress</h2>
