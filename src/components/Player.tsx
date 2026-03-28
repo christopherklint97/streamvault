@@ -194,9 +194,17 @@ export default function Player() {
       if (document.pictureInPictureElement) {
         await document.exitPictureInPicture();
       } else {
+        // Ensure video has loaded enough data for PiP
+        if (video.readyState < 2) {
+          await new Promise<void>((resolve) => {
+            video.addEventListener('loadeddata', () => resolve(), { once: true });
+          });
+        }
         await video.requestPictureInPicture();
       }
-    } catch { /* PiP not supported */ }
+    } catch (err) {
+      console.warn('PiP failed:', err);
+    }
   }, [getVideoElement]);
 
   const [isFullscreen, setIsFullscreen] = useState(false);
