@@ -353,7 +353,7 @@ export default function Player() {
   return (
     <div
       ref={containerRef}
-      className="w-full h-dvh lg:w-tv lg:h-tv relative bg-black fixed lg:static top-0 left-0 right-0 bottom-0 z-[999]"
+      className="w-full h-dvh lg:w-tv lg:h-tv relative fixed lg:static top-0 left-0 right-0 bottom-0 z-[999]"
       tabIndex={0}
       onKeyDown={handleKeyDown}
     >
