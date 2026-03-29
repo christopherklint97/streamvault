@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { usePlayer } from '../hooks/usePlayer';
+import { usePlayer, getStreamUrl } from '../hooks/usePlayer';
 import { usePlayerStore } from '../stores/playerStore';
 import { useChannelStore } from '../stores/channelStore';
 import { useAppStore } from '../stores/appStore';
@@ -143,20 +143,20 @@ export default function Player() {
 
     const handleVisibilityChange = () => {
       if (document.hidden && playerState.status === 'playing' && !document.pictureInPictureElement) {
-        video.requestPictureInPicture().catch(() => {});
+        video.requestPictureInPicture().catch((err) => showToast(`Auto-PiP failed: ${err}`));
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [getVideoElement, playerState.status]);
+  }, [getVideoElement, playerState.status, showToast]);
 
   const handleBack = useCallback(() => {
     if (document.pictureInPictureElement) {
-      document.exitPictureInPicture().catch(() => {});
+      document.exitPictureInPicture().catch((err) => showToast(`Exit PiP failed: ${err}`));
     }
     stop();
     goBack();
-  }, [stop, goBack]);
+  }, [stop, goBack, showToast]);
 
   const handleTogglePlay = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -186,26 +186,16 @@ export default function Player() {
     }
   }, [getVideoElement, seek, resetOSDTimer]);
 
-  const handlePiP = useCallback(async (e: React.MouseEvent) => {
+  const handleExternalPlayer = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-    const video = getVideoElement();
-    if (!video) return;
-    try {
-      if (document.pictureInPictureElement) {
-        await document.exitPictureInPicture();
-      } else {
-        // Ensure video has loaded enough data for PiP
-        if (video.readyState < 2) {
-          await new Promise<void>((resolve) => {
-            video.addEventListener('loadeddata', () => resolve(), { once: true });
-          });
-        }
-        await video.requestPictureInPicture();
-      }
-    } catch (err) {
-      console.warn('PiP failed:', err);
-    }
-  }, [getVideoElement]);
+    if (!currentChannel) return;
+    const streamUrl = getStreamUrl(currentChannel.id, currentChannel.url);
+    // Absolute URL for external app
+    const absoluteUrl = streamUrl.startsWith('http') ? streamUrl : `${window.location.origin}${streamUrl}`;
+    // Android intent — opens in VLC, MX Player, or any video handler
+    const intentUrl = `intent:${absoluteUrl}#Intent;type=video/*;end`;
+    window.location.href = intentUrl;
+  }, [currentChannel]);
 
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -243,7 +233,7 @@ export default function Player() {
     if (doc.fullscreenElement || doc.webkitFullscreenElement) {
       if (doc.exitFullscreen) doc.exitFullscreen();
       else if (doc.webkitExitFullscreen) doc.webkitExitFullscreen();
-      try { screen.orientation.unlock(); } catch { /* ignore */ }
+      try { screen.orientation.unlock(); } catch (err) { showToast(`Orientation unlock failed: ${err}`); }
     } else {
       const goFs = el.requestFullscreen
         ? el.requestFullscreen()
@@ -253,27 +243,31 @@ export default function Player() {
       (goFs as Promise<void>).then(() => {
         try {
           const orientation = screen.orientation as ScreenOrientation & { lock?: (o: string) => Promise<void> };
-          orientation.lock?.('landscape')?.catch(() => {});
-        } catch { /* ignore */ }
-      }).catch(() => {});
+          orientation.lock?.('landscape')?.catch((err) => showToast(`Orientation lock failed: ${err}`));
+        } catch (err) { showToast(`Orientation lock failed: ${err}`); }
+      }).catch((err) => showToast(`Fullscreen failed: ${err}`));
     }
-  }, [getVideoElement]);
+  }, [getVideoElement, showToast]);
 
   useEffect(() => {
+    const video = getVideoElement();
     const onFsChange = () => {
       const doc = document as Document & { webkitFullscreenElement?: Element | null };
-      setIsFullscreen(!!(doc.fullscreenElement || doc.webkitFullscreenElement));
+      const isFs = !!(doc.fullscreenElement || doc.webkitFullscreenElement);
+      setIsFullscreen(isFs);
+      // Browsers may pause video when exiting fullscreen — resume it
+      if (!isFs && video && video.paused) {
+        video.play().catch((err) => showToast(`Resume failed: ${err}`));
+      }
     };
     document.addEventListener('fullscreenchange', onFsChange);
     document.addEventListener('webkitfullscreenchange', onFsChange);
 
     // iPhone fires these events on the video element instead
-    const video = getVideoElement();
     const onWebkitBegin = () => setIsFullscreen(true);
     const onWebkitEnd = () => {
       setIsFullscreen(false);
-      // iOS pauses the video when exiting native fullscreen — resume it
-      if (video && video.paused) video.play().catch(() => {});
+      if (video && video.paused) video.play().catch((err) => showToast(`Resume failed: ${err}`));
     };
     video?.addEventListener('webkitbeginfullscreen', onWebkitBegin);
     video?.addEventListener('webkitendfullscreen', onWebkitEnd);
@@ -284,7 +278,7 @@ export default function Player() {
       video?.removeEventListener('webkitbeginfullscreen', onWebkitBegin);
       video?.removeEventListener('webkitendfullscreen', onWebkitEnd);
     };
-  }, [getVideoElement]);
+  }, [getVideoElement, showToast]);
 
   const handleRecord = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -351,7 +345,7 @@ export default function Player() {
   );
 
   const seekDisplay = isSeeking ? seekValue : currentTime;
-  const pipSupported = typeof document !== 'undefined' && document.pictureInPictureEnabled === true;
+  const isAndroid = /Android/i.test(navigator.userAgent);
   const remaining = hasDuration ? duration - seekDisplay : 0;
 
   return (
@@ -366,7 +360,7 @@ export default function Player() {
         {typeof webapis !== 'undefined' && webapis.avplay ? (
           <div id="av-player" className="player__av-object" />
         ) : (
-          <video id="av-player" className="w-full h-full bg-black object-contain object-[center_top] lg:object-center" autoPlay playsInline />
+          <video id="av-player" className="w-full h-full bg-black object-contain object-center" autoPlay playsInline />
         )}
       </div>
 
@@ -407,7 +401,7 @@ export default function Player() {
       {/* Controls OSD — wrapper is always pointer-events-none, individual bars opt in */}
       {currentChannel && playerState.status !== 'error' && (
         <div className={cn(
-          'absolute inset-0 flex flex-col justify-between opacity-0 transition-opacity duration-300 pointer-events-none z-[3] player-osd-portrait',
+          'absolute inset-0 flex flex-col justify-between opacity-0 transition-opacity duration-300 pointer-events-none z-[3]',
           showOSD && 'opacity-100'
         )}>
           {/* Top bar */}
@@ -445,15 +439,16 @@ export default function Player() {
                   </svg>
                 </button>
               )}
-              {MOBILE && pipSupported && (
+              {MOBILE && isAndroid && (
                 <button
                   className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-transparent text-white shrink-0 tap-none cursor-pointer active:opacity-60"
-                  onClick={handlePiP}
-                  title="Picture-in-Picture"
+                  onClick={handleExternalPlayer}
+                  title="Open in external player"
                 >
                   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="2" y="3" width="20" height="14" rx="2" />
-                    <rect x="12" y="9" width="8" height="6" rx="1" fill="currentColor" opacity="0.4" />
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                    <polyline points="15 3 21 3 21 9" />
+                    <line x1="10" y1="14" x2="21" y2="3" />
                   </svg>
                 </button>
               )}
