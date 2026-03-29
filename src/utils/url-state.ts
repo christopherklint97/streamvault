@@ -16,7 +16,7 @@ export function updateUrl(view: string, browseState?: { searchQuery?: string; se
   history.replaceState(history.state, '', search ? `?${search}` : window.location.pathname);
 }
 
-export function parseUrl(): { view: View; searchQuery: string; selectedGroup: string | null } {
+export function parseUrl(): { view: View; searchQuery: string; selectedGroup: string | null; playChannelId: string | null; playUrl: string | null } {
   const params = new URLSearchParams(window.location.search);
   const rawView = params.get('view') || 'home';
   const view = (URL_VIEWS.has(rawView) ? rawView : 'home') as View;
@@ -24,5 +24,7 @@ export function parseUrl(): { view: View; searchQuery: string; selectedGroup: st
     view,
     searchQuery: params.get('q') || '',
     selectedGroup: params.get('group') || null,
+    playChannelId: params.get('play') || null,
+    playUrl: params.get('url') || null,
   };
 }

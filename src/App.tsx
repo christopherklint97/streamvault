@@ -1,11 +1,13 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useRef } from 'react';
 import { useAppStore } from './stores/appStore';
 import { useChannelStore } from './stores/channelStore';
+import { usePlayerStore } from './stores/playerStore';
 import { useRemoteKeys } from './hooks/useRemoteKeys';
 import { useNetworkStatus } from './hooks/useNetworkStatus';
 import { KEY_CODES } from './utils/keys';
 import { cn } from './utils/cn';
 import { markTTI, startFPSMonitor, stopFPSMonitor } from './utils/perf-monitor';
+import { parseUrl } from './utils/url-state';
 import ErrorBoundary from './components/ErrorBoundary';
 import Sidebar from './components/Sidebar';
 import Toast from './components/Toast';
@@ -84,6 +86,31 @@ function AppContent() {
   useEffect(() => {
     hydrate();
   }, [hydrate]);
+
+  // Deep-link: ?play=channelId auto-starts playback (used by "Open in Safari" for PiP)
+  const deepLinkHandled = useRef(false);
+  useEffect(() => {
+    if (deepLinkHandled.current) return;
+    const { playChannelId, playUrl } = parseUrl();
+    if (!playChannelId) return;
+    deepLinkHandled.current = true;
+
+    // Clean the URL so refresh doesn't re-trigger
+    const cleanUrl = window.location.pathname;
+    history.replaceState(null, '', cleanUrl);
+
+    // Fetch the channel and start playback
+    const { fetchChannelsByIds } = useChannelStore.getState();
+    fetchChannelsByIds([playChannelId]).then(channels => {
+      if (channels.length > 0) {
+        const channel = playUrl
+          ? { ...channels[0], url: playUrl }
+          : channels[0];
+        usePlayerStore.getState().setChannel(channel);
+        useAppStore.getState().navigate('player');
+      }
+    });
+  }, []);
 
   // Handle LEFT key on main content to return focus to sidebar
   const handleMainKeyDown = useCallback((e: React.KeyboardEvent) => {

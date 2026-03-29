@@ -187,14 +187,19 @@ export default function Player() {
     window.location.href = intentUrl;
   }, [currentChannel]);
 
-  // Open stream in Safari for PiP / background playback (iPhone PWA workaround)
+  // Open app in Safari for PiP / background playback (iPhone PWA workaround).
+  // Opens the same app URL with ?play=channelId so Safari loads the full player with PiP support.
   const handleOpenInSafari = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     if (!currentChannel) return;
-    const streamUrl = getStreamUrl(currentChannel.id, currentChannel.url);
-    const absoluteUrl = streamUrl.startsWith('http') ? streamUrl : `${window.location.origin}${streamUrl}`;
+    const params = new URLSearchParams({ play: currentChannel.id });
+    // For episodes not in DB, pass the direct URL
+    if (currentChannel.url && currentChannel.id.startsWith('episode_')) {
+      params.set('url', currentChannel.url);
+    }
+    const safariUrl = `${window.location.origin}${window.location.pathname}?${params}`;
     // window.open in standalone PWA opens Safari on iOS
-    window.open(absoluteUrl, '_blank');
+    window.open(safariUrl, '_blank');
   }, [currentChannel]);
 
   const showSafariButton = MOBILE && isIPhone() && isStandalonePWA();
