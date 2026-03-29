@@ -1,6 +1,9 @@
 import { create } from 'zustand';
 import type { Channel, Program, Category, SeriesInfo, MovieInfo } from '../types';
 import { getItem, setItem } from '../utils/storage';
+import { useAppStore } from './appStore';
+
+const toast = (msg: string) => useAppStore.getState().showToastMessage(msg);
 
 export type InputMode = 'xtream' | 'manual';
 export type SyncInterval = 'startup' | '6h' | '12h' | '24h' | 'manual';
@@ -205,7 +208,8 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
         body: JSON.stringify({ ids }),
       });
       return (data.channels ?? []) as Channel[];
-    } catch {
+    } catch (err) {
+      toast(`Failed to fetch channels: ${err}`);
       return [];
     }
   },
@@ -295,7 +299,8 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
       }
       set({ programsByChannel: newIndex });
       return programs;
-    } catch {
+    } catch (err) {
+      toast(`Failed to fetch EPG: ${err}`);
       return [];
     }
   },
@@ -309,7 +314,8 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
       if (group) params.set('group', group);
       const data = await apiFetch(apiBaseUrl, `/api/search?${params}`);
       return data.channels as Channel[];
-    } catch {
+    } catch (err) {
+      toast(`Search failed: ${err}`);
       return [];
     }
   },
@@ -320,7 +326,8 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     try {
       const data = await apiFetch(apiBaseUrl, `/api/series/${seriesId}`);
       return data as SeriesInfo;
-    } catch {
+    } catch (err) {
+      toast(`Failed to load series: ${err}`);
       return null;
     }
   },
@@ -331,7 +338,8 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     try {
       const data = await apiFetch(apiBaseUrl, `/api/vod/${vodId}`);
       return data as MovieInfo;
-    } catch {
+    } catch (err) {
+      toast(`Failed to load movie: ${err}`);
       return null;
     }
   },
@@ -352,8 +360,8 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
         },
         syncInterval: data.syncInterval || '24h',
       });
-    } catch {
-      // Config fetch failure is non-critical
+    } catch (err) {
+      toast(`Failed to fetch config: ${err}`);
     }
   },
 
@@ -417,7 +425,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     const { apiBaseUrl } = get();
     if (!hasApi(apiBaseUrl)) return;
     stopPolling();
-    apiFetch(apiBaseUrl, '/api/sync/cancel', { method: 'POST' }).catch(() => {});
+    apiFetch(apiBaseUrl, '/api/sync/cancel', { method: 'POST' }).catch((err) => toast(`Failed to cancel sync: ${err}`));
     set({ isLoading: false, loadingPhase: 'idle', loadingMessage: 'Sync cancelled' });
   },
 
@@ -436,7 +444,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
   cancelCrawl: () => {
     const { apiBaseUrl } = get();
     if (!hasApi(apiBaseUrl)) return;
-    apiFetch(apiBaseUrl, '/api/crawl/cancel', { method: 'POST' }).catch(() => {});
+    apiFetch(apiBaseUrl, '/api/crawl/cancel', { method: 'POST' }).catch((err) => toast(`Failed to cancel crawl: ${err}`));
     set({ isCrawling: false, crawlProgress: 'Crawl cancelled' });
   },
 
@@ -463,7 +471,8 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
           await Promise.all([get().fetchChannels(), get().fetchPrograms()]);
         }
       }
-    } catch {
+    } catch (err) {
+      toast(`Status poll failed: ${err}`);
       stopPolling();
       set({ isLoading: false, loadingPhase: 'idle' });
     }

@@ -3,6 +3,9 @@
  * TizenPlayer uses the webapis.avplay API available on Samsung Tizen TVs.
  * HTML5Player uses a standard HTMLVideoElement for browser-based development.
  */
+import { useAppStore } from '../stores/appStore';
+
+const toast = (msg: string) => useAppStore.getState().showToastMessage(msg);
 
 export interface SubtitleTrack {
   index: number;
@@ -135,8 +138,8 @@ export class TizenPlayer implements PlayerBackend {
   close(): void {
     try {
       this.stop();
-    } catch {
-      // Ignore stop errors during close
+    } catch (err) {
+      toast(`Player stop error: ${err}`);
     }
     try {
       webapis.avplay.close();
@@ -168,7 +171,8 @@ export class TizenPlayer implements PlayerBackend {
         return webapis.avplay.getDuration();
       }
       return 0;
-    } catch {
+    } catch (err) {
+      toast(`getDuration failed: ${err}`);
       return 0;
     }
   }
@@ -179,7 +183,8 @@ export class TizenPlayer implements PlayerBackend {
         return webapis.avplay.getCurrentTime();
       }
       return 0;
-    } catch {
+    } catch (err) {
+      toast(`getCurrentTime failed: ${err}`);
       return 0;
     }
   }
@@ -208,8 +213,8 @@ export class TizenPlayer implements PlayerBackend {
               .SCREEN_SAVER_ON;
         webapis.appcommon.setScreenSaverState(state);
       }
-    } catch {
-      // Screen saver API may not be available in all environments
+    } catch (err) {
+      toast(`Screen saver control failed: ${err}`);
     }
   }
 }
@@ -263,9 +268,7 @@ export class HTML5Player implements PlayerBackend {
   }
 
   play(): void {
-    this.video.play().catch(() => {
-      // Autoplay may be blocked by browser policy
-    });
+    this.video.play().catch((err) => toast(`Autoplay blocked: ${err}`));
   }
 
   pause(): void {

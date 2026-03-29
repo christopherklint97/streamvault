@@ -132,6 +132,7 @@ function toLocalDatetime(date: Date): string {
 function ScheduleForm({ onCreated }: { onCreated: () => void }) {
   const createRecording = useRecordingStore((s) => s.createRecording);
   const apiBaseUrl = useChannelStore((s) => s.apiBaseUrl);
+  const showToast = useAppStore((s) => s.showToastMessage);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Channel[]>([]);
   const [selectedChannel, setSelectedChannel] = useState<Channel | null>(null);
@@ -166,11 +167,11 @@ function ScheduleForm({ onCreated }: { onCreated: () => void }) {
         if (!resp.ok) return;
         const data = await resp.json();
         setResults((data.channels || []).slice(0, 20));
-      } catch {
-        // ignore
+      } catch (err) {
+        showToast(`Search failed: ${err}`);
       }
     }, 300);
-  }, [apiBaseUrl]);
+  }, [apiBaseUrl, showToast]);
 
   const handleSelectChannel = useCallback((ch: Channel) => {
     setSelectedChannel(ch);

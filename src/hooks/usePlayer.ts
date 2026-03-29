@@ -7,8 +7,127 @@ import type { SubtitleTrack } from '../services/avplay';
 import { TizenPlayer } from '../services/avplay';
 import { saveWatchProgress, getWatchProgress } from '../services/channel-service';
 import { clientLogger as log } from '../utils/logger';
+import { useAppStore } from '../stores/appStore';
+
+const toast = (msg: string) => useAppStore.getState().showToastMessage(msg);
 
 const PROGRESS_SAVE_INTERVAL = 10_000; // Save progress every 10 seconds
+
+// ---------------------------------------------------------------------------
+// Module-level state — persists across Player mount/unmount so background
+// playback keeps working even after the user navigates away.
+// ---------------------------------------------------------------------------
+
+let activeMpegtsPlayer: MpegtsType.Player | null = null;
+let bgProgressInterval: ReturnType<typeof setInterval> | null = null;
+let bgBufferTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Save watch progress using the current video/avplay state */
+function saveProgressNow() {
+  const channel = usePlayerStore.getState().currentChannel;
+  if (!channel || channel.contentType === 'livetv') return;
+
+  if (typeof webapis !== 'undefined' && webapis.avplay) {
+    try {
+      const position = webapis.avplay.getCurrentTime() / 1000;
+      const duration = webapis.avplay.getDuration() / 1000;
+      if (duration > 0) saveWatchProgress(channel.id, position, duration, channel.contentType);
+    } catch { /* ignore */ }
+  } else {
+    const video = document.getElementById('av-player') as HTMLVideoElement | null;
+    if (video && video.duration > 0 && isFinite(video.duration)) {
+      saveWatchProgress(channel.id, video.currentTime, video.duration, channel.contentType);
+    }
+  }
+}
+
+function startBgProgressTracking() {
+  if (bgProgressInterval) clearInterval(bgProgressInterval);
+  bgProgressInterval = setInterval(saveProgressNow, PROGRESS_SAVE_INTERVAL);
+}
+
+function stopBgProgressTracking() {
+  if (bgProgressInterval) {
+    clearInterval(bgProgressInterval);
+    bgProgressInterval = null;
+  }
+  saveProgressNow();
+}
+
+/** Set up Media Session API so the user gets notification-center controls */
+function setupMediaSession(channelName: string) {
+  if (!('mediaSession' in navigator)) return;
+
+  navigator.mediaSession.metadata = new MediaMetadata({ title: channelName });
+  navigator.mediaSession.playbackState = 'playing';
+
+  const getVideo = () => document.getElementById('av-player') as HTMLVideoElement | null;
+
+  navigator.mediaSession.setActionHandler('play', () => {
+    getVideo()?.play().catch(() => {});
+    navigator.mediaSession.playbackState = 'playing';
+  });
+  navigator.mediaSession.setActionHandler('pause', () => {
+    getVideo()?.pause();
+    navigator.mediaSession.playbackState = 'paused';
+  });
+  navigator.mediaSession.setActionHandler('stop', () => {
+    stopPlayback();
+  });
+  navigator.mediaSession.setActionHandler('seekbackward', () => {
+    const v = getVideo();
+    if (v) v.currentTime = Math.max(0, v.currentTime - 10);
+  });
+  navigator.mediaSession.setActionHandler('seekforward', () => {
+    const v = getVideo();
+    if (v) v.currentTime = Math.min(v.duration || Infinity, v.currentTime + 10);
+  });
+}
+
+function clearMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  navigator.mediaSession.metadata = null;
+  navigator.mediaSession.playbackState = 'none';
+  for (const action of ['play', 'pause', 'stop', 'seekbackward', 'seekforward'] as MediaSessionAction[]) {
+    try { navigator.mediaSession.setActionHandler(action, null); } catch { /* unsupported */ }
+  }
+}
+
+/** Fully stop playback — called from hook stop() and Media Session stop handler */
+function stopPlayback() {
+  log.info('⏹ stopPlayback()');
+
+  stopBgProgressTracking();
+
+  if (bgBufferTimer) { clearTimeout(bgBufferTimer); bgBufferTimer = null; }
+
+  if (activeMpegtsPlayer) {
+    log.info('Destroying mpegts.js player');
+    activeMpegtsPlayer.destroy();
+    activeMpegtsPlayer = null;
+  }
+
+  if (typeof webapis !== 'undefined' && webapis.avplay) {
+    try {
+      webapis.avplay.stop();
+      webapis.avplay.close();
+    } catch (err) {
+      toast(`Player cleanup error: ${err}`);
+    }
+  } else {
+    const v = document.getElementById('av-player') as HTMLVideoElement | null;
+    if (v) {
+      v.pause();
+      v.removeAttribute('src');
+      v.load();
+    }
+  }
+
+  clearMediaSession();
+  usePlayerStore.getState().setStatus('idle');
+}
+
+// ---------------------------------------------------------------------------
 
 /** Build a proxied stream URL that goes through our server */
 export function getStreamUrl(channelId: string, directUrl?: string): string {
@@ -34,56 +153,11 @@ export function usePlayer(): {
   subtitleText: string;
   cycleSubtitles: () => void;
 } {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const mpegtsRef = useRef<MpegtsType.Player | null>(null);
-  const bufferTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const store = usePlayerStore();
   const [subtitleTracks, setSubtitleTracks] = useState<SubtitleTrack[]>([]);
   const [currentSubtitleIndex, setCurrentSubtitleIndex] = useState(-1);
   const [subtitleText, setSubtitleText] = useState('');
   const playerRef = useRef<TizenPlayer | null>(null);
-  const progressIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const saveCurrentProgress = useCallback(() => {
-    const channel = usePlayerStore.getState().currentChannel;
-    if (!channel) return;
-
-    // Don't track progress for live TV
-    if (channel.contentType === 'livetv') return;
-
-    if (typeof webapis !== 'undefined' && webapis.avplay) {
-      try {
-        const position = webapis.avplay.getCurrentTime() / 1000;
-        const duration = webapis.avplay.getDuration() / 1000;
-        if (duration > 0) {
-          saveWatchProgress(channel.id, position, duration, channel.contentType);
-        }
-      } catch {
-        // Player may not be in a valid state
-      }
-    } else if (videoRef.current) {
-      const video = videoRef.current;
-      const position = video.currentTime;
-      const duration = video.duration;
-      if (duration > 0 && isFinite(duration)) {
-        saveWatchProgress(channel.id, position, duration, channel.contentType);
-      }
-    }
-  }, []);
-
-  const startProgressTracking = useCallback(() => {
-    if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
-    progressIntervalRef.current = setInterval(saveCurrentProgress, PROGRESS_SAVE_INTERVAL);
-  }, [saveCurrentProgress]);
-
-  const stopProgressTracking = useCallback(() => {
-    if (progressIntervalRef.current) {
-      clearInterval(progressIntervalRef.current);
-      progressIntervalRef.current = null;
-    }
-    // Final save on stop
-    saveCurrentProgress();
-  }, [saveCurrentProgress]);
 
   const play = useCallback(() => {
     const channel = usePlayerStore.getState().currentChannel;
@@ -134,7 +208,7 @@ export function usePlayer(): {
           },
           onstreamcompleted: () => {
             log.info('AVPlay: stream completed');
-            saveCurrentProgress();
+            saveProgressNow();
             setStatus('idle');
           },
           ondrmevent: () => {},
@@ -148,7 +222,8 @@ export function usePlayer(): {
             avplay.play();
             setStatus('playing');
             setSubtitleTracks(tizenPlayer.getSubtitleTracks());
-            startProgressTracking();
+            startBgProgressTracking();
+            setupMediaSession(channel.name);
           },
           () => { log.error('AVPlay: prepare failed'); setError('Failed to prepare stream'); }
         );
@@ -168,14 +243,20 @@ export function usePlayer(): {
       }
 
       log.info(`HTML5: found video element, readyState=${video.readyState}, networkState=${video.networkState}`);
-      videoRef.current = video;
 
       // Clean up any previous mpegts instance
-      if (mpegtsRef.current) {
+      if (activeMpegtsPlayer) {
         log.info('HTML5: destroying previous mpegts.js instance');
-        mpegtsRef.current.destroy();
-        mpegtsRef.current = null;
+        activeMpegtsPlayer.destroy();
+        activeMpegtsPlayer = null;
       }
+
+      // Enable auto-PiP for background playback (Safari-only, may not work in PWA standalone)
+      try {
+        if ('autoPictureInPicture' in video) {
+          (video as HTMLVideoElement & { autoPictureInPicture: boolean }).autoPictureInPicture = true;
+        }
+      } catch { /* ignore */ }
 
       const setupEvents = () => {
         video.onloadstart = () => log.debug('HTML5 event: loadstart');
@@ -185,7 +266,7 @@ export function usePlayer(): {
           if (resumePosition > 0) {
             video.currentTime = resumePosition;
           }
-          startProgressTracking();
+          startBgProgressTracking();
         };
         video.oncanplay = () => {
           log.info('HTML5 event: canplay — attempting play()');
@@ -200,13 +281,14 @@ export function usePlayer(): {
         video.onwaiting = () => {
           log.debug('HTML5 event: waiting');
           // Delay showing loading spinner to avoid flashing during brief rebuffers
-          if (bufferTimerRef.current) clearTimeout(bufferTimerRef.current);
-          bufferTimerRef.current = setTimeout(() => setStatus('loading'), 1500);
+          if (bgBufferTimer) clearTimeout(bgBufferTimer);
+          bgBufferTimer = setTimeout(() => setStatus('loading'), 1500);
         };
         video.onplaying = () => {
           log.info('HTML5 event: playing');
-          if (bufferTimerRef.current) { clearTimeout(bufferTimerRef.current); bufferTimerRef.current = null; }
+          if (bgBufferTimer) { clearTimeout(bgBufferTimer); bgBufferTimer = null; }
           setStatus('playing');
+          setupMediaSession(channel.name);
         };
         video.onstalled = () => log.warn('HTML5 event: stalled');
         video.onsuspend = () => log.debug('HTML5 event: suspend');
@@ -219,8 +301,9 @@ export function usePlayer(): {
         video.onabort = () => log.warn('HTML5 event: abort');
         video.onended = () => {
           log.info('HTML5 event: ended');
-          saveCurrentProgress();
+          saveProgressNow();
           setStatus('idle');
+          clearMediaSession();
         };
         video.textTracks.addEventListener('addtrack', () => {
           const tracks: SubtitleTrack[] = [];
@@ -264,7 +347,7 @@ export function usePlayer(): {
             autoCleanupMinBackwardDuration: 30,
             liveBufferLatencyChasing: false,     // Disable — hard seeks cause jumpy playback on start
           });
-          mpegtsRef.current = player;
+          activeMpegtsPlayer = player;
 
           // Register all event handlers BEFORE attaching/loading
           player.on(mpegts.Events.ERROR, (type: string, detail: string, info: unknown) => {
@@ -299,40 +382,15 @@ export function usePlayer(): {
         video.load();
       }
     }
-  }, [saveCurrentProgress, startProgressTracking]);
+  }, []);
 
   const stop = useCallback(() => {
-    log.info('⏹ stop() called');
-    const setStatus = usePlayerStore.getState().setStatus;
-
-    stopProgressTracking();
-    if (bufferTimerRef.current) { clearTimeout(bufferTimerRef.current); bufferTimerRef.current = null; }
-
-    if (mpegtsRef.current) {
-      log.info('Destroying mpegts.js player');
-      mpegtsRef.current.destroy();
-      mpegtsRef.current = null;
-    }
-
-    if (typeof webapis !== 'undefined' && webapis.avplay) {
-      try {
-        webapis.avplay.stop();
-        webapis.avplay.close();
-      } catch {
-        // Ignore cleanup errors
-      }
-    } else if (videoRef.current) {
-      videoRef.current.pause();
-      videoRef.current.removeAttribute('src');
-      videoRef.current.load();
-    }
-
     playerRef.current = null;
     setSubtitleTracks([]);
     setCurrentSubtitleIndex(-1);
     setSubtitleText('');
-    setStatus('idle');
-  }, [stopProgressTracking]);
+    stopPlayback();
+  }, []);
 
   const retry = useCallback(() => {
     log.info('🔄 retry() called');
@@ -361,31 +419,49 @@ export function usePlayer(): {
         const state = webapis.avplay.getState();
         if (state === 'PLAYING') webapis.avplay.pause();
         else if (state === 'PAUSED') webapis.avplay.play();
-      } catch { /* ignore */ }
-    } else if (videoRef.current) {
-      if (videoRef.current.paused) {
-        videoRef.current.play().catch(() => {});
-      } else {
-        videoRef.current.pause();
+      } catch (err) { toast(`Toggle play failed: ${err}`); }
+    } else {
+      const video = document.getElementById('av-player') as HTMLVideoElement | null;
+      if (video) {
+        if (video.paused) {
+          video.play().catch((err) => toast(`Play failed: ${err}`));
+        } else {
+          video.pause();
+        }
       }
     }
   }, []);
 
   const seek = useCallback((time: number) => {
     if (typeof webapis !== 'undefined' && webapis.avplay) {
-      try { webapis.avplay.seekTo(time * 1000); } catch { /* ignore */ }
-    } else if (videoRef.current) {
-      videoRef.current.currentTime = time;
+      try { webapis.avplay.seekTo(time * 1000); } catch (err) { toast(`Seek failed: ${err}`); }
+    } else {
+      const video = document.getElementById('av-player') as HTMLVideoElement | null;
+      if (video) video.currentTime = time;
     }
   }, []);
 
-  const getVideoElement = useCallback(() => videoRef.current, []);
+  const getVideoElement = useCallback(() => {
+    return document.getElementById('av-player') as HTMLVideoElement | null;
+  }, []);
 
+  // No auto-cleanup on unmount — video keeps playing in background.
+  // Playback is only stopped by explicit stop() call (back button, Media Session, etc.)
+
+  // Sync media session playback state with video pause/play
   useEffect(() => {
+    const video = document.getElementById('av-player') as HTMLVideoElement | null;
+    if (!video || !('mediaSession' in navigator)) return;
+
+    const onPause = () => { navigator.mediaSession.playbackState = 'paused'; };
+    const onPlay = () => { navigator.mediaSession.playbackState = 'playing'; };
+    video.addEventListener('pause', onPause);
+    video.addEventListener('play', onPlay);
     return () => {
-      stop();
+      video.removeEventListener('pause', onPause);
+      video.removeEventListener('play', onPlay);
     };
-  }, [stop]);
+  }, []);
 
   return {
     play,

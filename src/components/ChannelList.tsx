@@ -333,6 +333,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
   const navigate = useAppStore((s) => s.navigate);
   const navigateToSeries = useAppStore((s) => s.navigateToSeries);
   const navigateToMovie = useAppStore((s) => s.navigateToMovie);
+  const showToast = useAppStore((s) => s.showToastMessage);
 
   const gridRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -361,12 +362,13 @@ export default function ChannelList({ contentType }: ChannelListProps) {
       setInitialLoading(false);
       setFocusIndex(0);
       setScrollOffset(0);
-    }).catch(() => {
+    }).catch((err) => {
       if (cancelled || fetchIdRef.current !== id) return;
+      showToast(`Failed to load channels: ${err}`);
       setInitialLoading(false);
     });
     return () => { cancelled = true; };
-  }, [contentType, selectedGroup, categories]);
+  }, [contentType, selectedGroup, categories, showToast]);
 
   // Debounce search
   useEffect(() => {
@@ -470,9 +472,9 @@ export default function ChannelList({ contentType }: ChannelListProps) {
       setChannels(prev => [...prev, ...data.channels]);
       setTotalCount(data.total);
       setNextCursor(data.nextCursor);
-    } catch { /* ignore */ }
+    } catch (err) { showToast(`Failed to load more: ${err}`); }
     setLoadingMore(false);
-  }, [loadingMore, nextCursor, selectedGroup, contentType]);
+  }, [loadingMore, nextCursor, selectedGroup, contentType, showToast]);
 
   const handleGroupSelect = useCallback((groupName: string) => {
     setSelectedGroup(groupName);

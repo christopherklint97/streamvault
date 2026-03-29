@@ -1,6 +1,9 @@
 import { create } from 'zustand';
 import type { Recording, RecordingRule, RecordingStatusInfo } from '../types';
 import { useChannelStore, SAME_ORIGIN } from './channelStore';
+import { useAppStore } from './appStore';
+
+const toast = (msg: string) => useAppStore.getState().showToastMessage(msg);
 
 interface RecordingState {
   recordings: Recording[];
@@ -48,8 +51,8 @@ export const useRecordingStore = create<RecordingState & RecordingActions>()((se
       const params = status ? `?status=${encodeURIComponent(status)}` : '';
       const data = await apiFetch(`/api/recordings${params}`);
       set({ recordings: data.recordings || [] });
-    } catch {
-      // non-critical
+    } catch (err) {
+      toast(`Failed to fetch recordings: ${err}`);
     } finally {
       set({ loading: false });
     }
@@ -59,8 +62,8 @@ export const useRecordingStore = create<RecordingState & RecordingActions>()((se
     try {
       const data = await apiFetch('/api/recording-rules');
       set({ rules: data.rules || [] });
-    } catch {
-      // non-critical
+    } catch (err) {
+      toast(`Failed to fetch rules: ${err}`);
     }
   },
 
@@ -68,8 +71,8 @@ export const useRecordingStore = create<RecordingState & RecordingActions>()((se
     try {
       const data = await apiFetch('/api/recording-status');
       set({ status: data });
-    } catch {
-      // non-critical
+    } catch (err) {
+      toast(`Failed to fetch recording status: ${err}`);
     }
   },
 
@@ -82,7 +85,8 @@ export const useRecordingStore = create<RecordingState & RecordingActions>()((se
       });
       await get().fetchRecordings();
       return data.recording;
-    } catch {
+    } catch (err) {
+      toast(`Failed to create recording: ${err}`);
       return null;
     }
   },
@@ -96,7 +100,8 @@ export const useRecordingStore = create<RecordingState & RecordingActions>()((se
       });
       await get().fetchRecordings();
       return data.recording;
-    } catch {
+    } catch (err) {
+      toast(`Failed to create recording: ${err}`);
       return null;
     }
   },
@@ -105,8 +110,8 @@ export const useRecordingStore = create<RecordingState & RecordingActions>()((se
     try {
       await apiFetch(`/api/recordings/${id}/cancel`, { method: 'POST' });
       await get().fetchRecordings();
-    } catch {
-      // non-critical
+    } catch (err) {
+      toast(`Failed to cancel recording: ${err}`);
     }
   },
 
@@ -114,8 +119,8 @@ export const useRecordingStore = create<RecordingState & RecordingActions>()((se
     try {
       await apiFetch(`/api/recordings/${id}/stop`, { method: 'POST' });
       await get().fetchRecordings();
-    } catch {
-      // non-critical
+    } catch (err) {
+      toast(`Failed to stop recording: ${err}`);
     }
   },
 
@@ -123,8 +128,8 @@ export const useRecordingStore = create<RecordingState & RecordingActions>()((se
     try {
       await apiFetch(`/api/recordings/${id}`, { method: 'DELETE' });
       set({ recordings: get().recordings.filter(r => r.id !== id) });
-    } catch {
-      // non-critical
+    } catch (err) {
+      toast(`Failed to delete recording: ${err}`);
     }
   },
 
@@ -137,7 +142,8 @@ export const useRecordingStore = create<RecordingState & RecordingActions>()((se
       });
       await get().fetchRules();
       return data.rule;
-    } catch {
+    } catch (err) {
+      toast(`Failed to create rule: ${err}`);
       return null;
     }
   },
@@ -150,8 +156,8 @@ export const useRecordingStore = create<RecordingState & RecordingActions>()((se
         body: JSON.stringify(updates),
       });
       await get().fetchRules();
-    } catch {
-      // non-critical
+    } catch (err) {
+      toast(`Failed to update rule: ${err}`);
     }
   },
 
@@ -159,8 +165,8 @@ export const useRecordingStore = create<RecordingState & RecordingActions>()((se
     try {
       await apiFetch(`/api/recording-rules/${id}`, { method: 'DELETE' });
       set({ rules: get().rules.filter(r => r.id !== id) });
-    } catch {
-      // non-critical
+    } catch (err) {
+      toast(`Failed to delete rule: ${err}`);
     }
   },
 }));

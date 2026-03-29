@@ -127,7 +127,7 @@ export default function Sidebar() {
         )}
 
         {/* Bottom tab bar */}
-        <nav className="fixed bottom-0 left-0 right-0 z-[200] bg-dark-sidebar/95 backdrop-blur-md border-t border-white/[0.08] pb-[env(safe-area-inset-bottom,0px)]">
+        <nav className="fixed bottom-0 left-0 right-0 z-[200] bg-dark-sidebar/95 backdrop-blur-md border-t border-white/[0.08]">
           <div className="flex items-stretch justify-around h-14">
             {primaryItems.map((item) => {
               const active = currentView === item.view;

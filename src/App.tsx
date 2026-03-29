@@ -174,6 +174,20 @@ function AppContent() {
         {/* Non-persistent views render conditionally */}
         {!isBrowseView && renderView()}
       </main>
+      {/* Persistent video element — stays in the DOM across view changes so
+          playback continues in the background when navigating away from the player */}
+      {!(typeof webapis !== 'undefined' && webapis.avplay) && (
+        <video
+          id="av-player"
+          playsInline
+          className={cn(
+            'fixed top-0 left-0 bg-black object-contain object-center',
+            currentView === 'player'
+              ? 'w-full h-dvh z-[1000]'
+              : 'w-px h-px -z-10 opacity-0 pointer-events-none'
+          )}
+        />
+      )}
       <Toast />
       <ExitDialog />
     </div>

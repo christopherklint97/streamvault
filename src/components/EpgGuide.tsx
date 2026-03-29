@@ -210,12 +210,13 @@ export default function EpgGuide() {
       setTotalCount(data.total);
       setNextCursor(data.nextCursor);
       setLoading(false);
-    }).catch(() => {
+    }).catch((err) => {
       if (cancelled || fetchIdRef.current !== id) return;
+      showToast(`Failed to load channels: ${err}`);
       setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [selectedGroup]);
+  }, [selectedGroup, showToast]);
 
   // Fetch EPG when channels or time window changes
   useEffect(() => {
@@ -275,9 +276,9 @@ export default function EpgGuide() {
       setChannels(prev => [...prev, ...data.channels]);
       setTotalCount(data.total);
       setNextCursor(data.nextCursor);
-    } catch { /* ignore */ }
+    } catch (err) { showToast(`Failed to load more: ${err}`); }
     setLoadingMore(false);
-  }, [loadingMore, nextCursor, selectedGroup]);
+  }, [loadingMore, nextCursor, selectedGroup, showToast]);
 
   const [now, setNow] = useState(() => Date.now());
   // Update "now" every 60 seconds for the now-line

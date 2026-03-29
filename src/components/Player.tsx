@@ -6,7 +6,7 @@ import { useAppStore } from '../stores/appStore';
 import { useRecordingStore } from '../stores/recordingStore';
 import { getCurrentProgram } from '../services/epg-service';
 import { KEY_CODES } from '../utils/keys';
-import { isMobile, isIPhone } from '../utils/platform';
+import { isMobile, isIPhone, canPiP, isInPiP, enterPiP } from '../utils/platform';
 import { cn } from '../utils/cn';
 
 const OSD_TIMEOUT = 5000;
@@ -108,15 +108,17 @@ export default function Player() {
     osdTimerRef.current = setTimeout(() => setShowOSD(false), OSD_TIMEOUT);
   }, []);
 
-  // Start playback when channel changes
+  // Start playback when channel changes (skip if already playing same channel)
   useEffect(() => {
     if (channelId) {
-      play();
+      const video = document.getElementById('av-player') as HTMLVideoElement | null;
+      const isAlreadyPlaying = video && !video.paused && video.readyState > 0;
+      if (!isAlreadyPlaying) {
+        play();
+      }
     }
-    return () => {
-      stop();
-    };
-  }, [channelId, play, stop]);
+    // Don't stop on unmount — video keeps playing in background
+  }, [channelId, play]);
 
   // Show OSD initially, auto-hide after timeout
   useEffect(() => {
@@ -126,37 +128,33 @@ export default function Player() {
     };
   }, []);
 
-  // Auto-PIP when leaving the app
+  // Auto-PiP when the app is backgrounded (home button, app switcher).
+  // Uses visibilitychange since autoPictureInPicture is not reliable on iPhone PWAs.
   useEffect(() => {
-    if (!MOBILE || !document.pictureInPictureEnabled) return;
-    const video = getVideoElement();
-    if (!video) return;
-
-    if ('autoPictureInPicture' in video) {
-      (video as HTMLVideoElement & { autoPictureInPicture: boolean }).autoPictureInPicture = true;
-      return () => {
-        if (video && 'autoPictureInPicture' in video) {
-          (video as HTMLVideoElement & { autoPictureInPicture: boolean }).autoPictureInPicture = false;
-        }
-      };
-    }
+    if (!MOBILE) return;
 
     const handleVisibilityChange = () => {
-      if (document.hidden && playerState.status === 'playing' && !document.pictureInPictureElement) {
-        video.requestPictureInPicture().catch((err) => showToast(`Auto-PiP failed: ${err}`));
-      }
+      if (!document.hidden) return;
+      const v = document.getElementById('av-player') as HTMLVideoElement | null;
+      if (!v || v.paused || !canPiP(v) || isInPiP(v)) return;
+      enterPiP(v).catch(() => {});
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [getVideoElement, playerState.status, showToast]);
+  }, []);
 
-  const handleBack = useCallback(() => {
-    if (document.pictureInPictureElement) {
-      document.exitPictureInPicture().catch((err) => showToast(`Exit PiP failed: ${err}`));
+  const handleBack = useCallback(async () => {
+    // Don't stop — let video keep playing in background / PiP
+    const video = document.getElementById('av-player') as HTMLVideoElement | null;
+    if (MOBILE && video && !video.paused && canPiP(video) && !isInPiP(video)) {
+      try {
+        await enterPiP(video);
+      } catch (err) {
+        showToast(`PiP: ${err}`);
+      }
     }
-    stop();
     goBack();
-  }, [stop, goBack, showToast]);
+  }, [goBack, showToast]);
 
   const handleTogglePlay = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -355,14 +353,13 @@ export default function Player() {
       tabIndex={0}
       onKeyDown={handleKeyDown}
     >
-      {/* Video container */}
-      <div className="w-full h-full">
-        {typeof webapis !== 'undefined' && webapis.avplay ? (
+      {/* Video container — on Tizen, AVPlay needs its own object div.
+          On HTML5, the persistent <video> in App.tsx is shown via z-index. */}
+      {typeof webapis !== 'undefined' && webapis.avplay && (
+        <div className="w-full h-full">
           <div id="av-player" className="player__av-object" />
-        ) : (
-          <video id="av-player" className="w-full h-full bg-black object-contain object-center" autoPlay playsInline />
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Loading spinner */}
       {playerState.status === 'loading' && (
