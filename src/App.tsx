@@ -183,7 +183,7 @@ function AppContent() {
           className={cn(
             'fixed top-0 left-0 bg-black object-contain object-center',
             currentView === 'player'
-              ? 'w-full h-dvh z-[1000]'
+              ? 'w-full h-dvh z-[998]'
               : 'w-px h-px -z-10 opacity-0 pointer-events-none'
           )}
         />

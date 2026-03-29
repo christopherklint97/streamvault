@@ -17,6 +17,12 @@ export function isTizen(): boolean {
   return typeof webapis !== 'undefined' && typeof webapis.avplay !== 'undefined';
 }
 
+/** Check if running as a standalone PWA (added to home screen) */
+export function isStandalonePWA(): boolean {
+  return window.matchMedia('(display-mode: standalone)').matches
+    || (navigator as Navigator & { standalone?: boolean }).standalone === true;
+}
+
 // ---------------------------------------------------------------------------
 // Picture-in-Picture helpers (standard + webkit/Safari fallback for iPhone)
 // ---------------------------------------------------------------------------

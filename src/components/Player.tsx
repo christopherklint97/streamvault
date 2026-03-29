@@ -6,7 +6,7 @@ import { useAppStore } from '../stores/appStore';
 import { useRecordingStore } from '../stores/recordingStore';
 import { getCurrentProgram } from '../services/epg-service';
 import { KEY_CODES } from '../utils/keys';
-import { isMobile, isIPhone, canPiP, isInPiP, enterPiP } from '../utils/platform';
+import { isMobile, isIPhone, isStandalonePWA, canPiP, isInPiP, enterPiP } from '../utils/platform';
 import { cn } from '../utils/cn';
 
 const OSD_TIMEOUT = 5000;
@@ -143,18 +143,10 @@ export default function Player() {
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, []);
 
-  const handleBack = useCallback(async () => {
-    // Don't stop — let video keep playing in background / PiP
-    const video = document.getElementById('av-player') as HTMLVideoElement | null;
-    if (MOBILE && video && !video.paused && canPiP(video) && !isInPiP(video)) {
-      try {
-        await enterPiP(video);
-      } catch (err) {
-        showToast(`PiP: ${err}`);
-      }
-    }
+  const handleBack = useCallback(() => {
+    stop();
     goBack();
-  }, [goBack, showToast]);
+  }, [stop, goBack]);
 
   const handleTogglePlay = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -194,6 +186,18 @@ export default function Player() {
     const intentUrl = `intent:${absoluteUrl}#Intent;type=video/*;end`;
     window.location.href = intentUrl;
   }, [currentChannel]);
+
+  // Open stream in Safari for PiP / background playback (iPhone PWA workaround)
+  const handleOpenInSafari = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!currentChannel) return;
+    const streamUrl = getStreamUrl(currentChannel.id, currentChannel.url);
+    const absoluteUrl = streamUrl.startsWith('http') ? streamUrl : `${window.location.origin}${streamUrl}`;
+    // window.open in standalone PWA opens Safari on iOS
+    window.open(absoluteUrl, '_blank');
+  }, [currentChannel]);
+
+  const showSafariButton = MOBILE && isIPhone() && isStandalonePWA();
 
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -349,7 +353,7 @@ export default function Player() {
   return (
     <div
       ref={containerRef}
-      className="w-full h-dvh lg:w-tv lg:h-tv relative bg-black fixed lg:static top-0 left-0 right-0 bottom-0"
+      className="w-full h-dvh lg:w-tv lg:h-tv relative bg-black fixed lg:static top-0 left-0 right-0 bottom-0 z-[999]"
       tabIndex={0}
       onKeyDown={handleKeyDown}
     >
@@ -446,6 +450,18 @@ export default function Player() {
                     <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
                     <polyline points="15 3 21 3 21 9" />
                     <line x1="10" y1="14" x2="21" y2="3" />
+                  </svg>
+                </button>
+              )}
+              {showSafariButton && (
+                <button
+                  className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-transparent text-white shrink-0 tap-none cursor-pointer active:opacity-60"
+                  onClick={handleOpenInSafari}
+                  title="Open in Safari (background play)"
+                >
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10" />
+                    <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76" />
                   </svg>
                 </button>
               )}
