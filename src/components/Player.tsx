@@ -625,29 +625,6 @@ export default function Player() {
                     </svg>
                   </button>
                 )}
-                {canShowPortraitList && (
-                  <button
-                    className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-transparent text-white shrink-0 tap-none cursor-pointer active:opacity-60"
-                    onClick={(e) => { e.stopPropagation(); setChannelListVisible(v => !v); resetOSDTimer(); }}
-                    title={channelListVisible ? 'Hide channels' : 'Show channels'}
-                  >
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      {channelListVisible ? (
-                        <>
-                          <rect x="2" y="3" width="20" height="18" rx="2" />
-                          <line x1="2" y1="9" x2="22" y2="9" />
-                        </>
-                      ) : (
-                        <>
-                          <rect x="2" y="3" width="20" height="18" rx="2" />
-                          <line x1="2" y1="9" x2="22" y2="9" />
-                          <line x1="8" y1="13" x2="16" y2="13" />
-                          <line x1="8" y1="17" x2="16" y2="17" />
-                        </>
-                      )}
-                    </svg>
-                  </button>
-                )}
                 {MOBILE && (
                   <button
                     className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-transparent text-white shrink-0 tap-none cursor-pointer active:opacity-60"
@@ -765,6 +742,21 @@ export default function Player() {
 
             </div>
           </div>
+        )}
+        {/* Persistent channel list toggle — always visible outside OSD */}
+        {canShowPortraitList && (
+          <button
+            className="absolute bottom-2 right-2 z-[4] flex items-center justify-center w-9 h-9 rounded-full bg-black/60 border border-white/20 text-white tap-none cursor-pointer active:opacity-60"
+            onClick={(e) => { e.stopPropagation(); setChannelListVisible(v => !v); }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              {channelListVisible ? (
+                <><path d="M6 9l6 6 6-6" /></>
+              ) : (
+                <><path d="M18 15l-6-6-6 6" /></>
+              )}
+            </svg>
+          </button>
         )}
       </div>
 

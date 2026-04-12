@@ -244,12 +244,16 @@ export function usePlayer(): {
 
       log.info(`HTML5: found video element, readyState=${video.readyState}, networkState=${video.networkState}`);
 
-      // Clean up any previous mpegts instance
+      // Clean up any previous playback state
       if (activeMpegtsPlayer) {
         log.info('HTML5: destroying previous mpegts.js instance');
         activeMpegtsPlayer.destroy();
         activeMpegtsPlayer = null;
       }
+      // Reset the video element so the new source can attach cleanly
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
 
       // Enable auto-PiP for background playback (Safari-only, may not work in PWA standalone)
       try {
