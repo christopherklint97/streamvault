@@ -7,6 +7,7 @@ interface PlayerStoreState extends PlayerState {
   volume: number;
   groupChannels: Channel[];
   groupChannelsLoading: boolean;
+  channelListVisible: boolean;
 }
 
 interface PlayerStoreActions {
@@ -17,6 +18,7 @@ interface PlayerStoreActions {
   fetchGroupChannels: (group: string) => Promise<void>;
   switchToChannel: (channel: Channel) => void;
   switchByOffset: (offset: number) => void;
+  toggleChannelList: () => void;
 }
 
 export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((set, get) => ({
@@ -26,6 +28,7 @@ export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((s
   volume: 100,
   groupChannels: [],
   groupChannelsLoading: false,
+  channelListVisible: true,
 
   setChannel: (channel: Channel) => {
     set({
@@ -94,5 +97,9 @@ export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((s
       errorMessage: '',
     });
     trackWatch(next);
+  },
+
+  toggleChannelList: () => {
+    set((s) => ({ channelListVisible: !s.channelListVisible }));
   },
 }));

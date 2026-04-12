@@ -36,6 +36,7 @@ const MOBILE_APP = isMobile();
 function AvPlayerVideo({ currentView }: { currentView: string }) {
   const currentChannel = usePlayerStore((s) => s.currentChannel);
   const groupChannels = usePlayerStore((s) => s.groupChannels);
+  const channelListVisible = usePlayerStore((s) => s.channelListVisible);
   const isLive = currentChannel?.contentType === 'livetv';
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -52,7 +53,7 @@ function AvPlayerVideo({ currentView }: { currentView: string }) {
     };
   }, []);
 
-  const isPortraitLive = MOBILE_APP && isLive && !isFullscreen && groupChannels.length > 0;
+  const isPortraitLive = MOBILE_APP && isLive && !isFullscreen && channelListVisible && groupChannels.length > 0;
 
   return (
     <video
