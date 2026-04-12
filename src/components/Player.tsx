@@ -484,10 +484,11 @@ export default function Player() {
       tabIndex={0}
       onKeyDown={handleKeyDown}
     >
-      {/* Video section — in portrait live mode this is aspect-video, otherwise full */}
+      {/* Video section — in portrait live mode this is aspect-video, otherwise full.
+          No bg-black in portrait: the persistent <video> at z-998 provides the background. */}
       <div className={cn(
-        'relative bg-black',
-        showPortraitList ? 'w-full aspect-video shrink-0' : 'w-full h-full'
+        'relative',
+        showPortraitList ? 'w-full aspect-video shrink-0' : 'w-full h-full bg-black'
       )}>
         {/* Video container — on Tizen, AVPlay needs its own object div.
             On HTML5, the persistent <video> in App.tsx is shown via z-index. */}
@@ -549,14 +550,14 @@ export default function Player() {
           />
         )}
 
-        {/* Controls OSD — wrapper is always pointer-events-none, individual bars opt in */}
+        {/* Controls OSD — pointer-events only enabled when visible so hidden controls don't eat taps */}
         {currentChannel && playerState.status !== 'error' && (
           <div className={cn(
             'absolute inset-0 flex flex-col justify-between opacity-0 transition-opacity duration-300 pointer-events-none z-[3]',
             showOSD && 'opacity-100'
           )}>
             {/* Top bar */}
-            <div className="pointer-events-auto flex items-center gap-3 pt-[calc(12px+env(safe-area-inset-top,0px))] pb-8 px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] bg-gradient-to-b from-black/[0.85] to-transparent lg:gap-3 lg:pt-6 lg:px-10 lg:pb-10">
+            <div className={cn('flex items-center gap-3 pt-[calc(12px+env(safe-area-inset-top,0px))] pb-8 px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] bg-gradient-to-b from-black/[0.85] to-transparent lg:gap-3 lg:pt-6 lg:px-10 lg:pb-10', showOSD && 'pointer-events-auto')}>
               {MOBILE && (
                 <button
                   className="flex items-center justify-center w-10 h-10 bg-transparent border-none text-white shrink-0 tap-none active:opacity-60"
@@ -643,7 +644,7 @@ export default function Player() {
 
             {/* Center play/skip controls */}
             {MOBILE && (
-              <div className="pointer-events-auto absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-10" data-player-controls>
+              <div className={cn('absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-10', showOSD && 'pointer-events-auto')} data-player-controls>
                 {!isLive && (
                   <button
                     className="flex items-center justify-center w-12 h-12 rounded-full border-none bg-transparent text-white tap-none cursor-pointer active:opacity-60"
@@ -682,7 +683,7 @@ export default function Player() {
             )}
 
             {/* Bottom bar: progress + time */}
-            <div className="pointer-events-auto relative px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] pt-8 pb-[calc(12px+env(safe-area-inset-bottom,0px))] lg:px-10 lg:pt-10 lg:pb-6 bg-gradient-to-t from-black/90 to-transparent">
+            <div className={cn('relative px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] pt-8 pb-[calc(12px+env(safe-area-inset-bottom,0px))] lg:px-10 lg:pt-10 lg:pb-6 bg-gradient-to-t from-black/90 to-transparent', showOSD && 'pointer-events-auto')}>
               {/* Seek bar for VOD */}
               {!isLive && hasDuration && (
                 <div data-player-controls>
