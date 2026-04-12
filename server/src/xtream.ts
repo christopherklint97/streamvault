@@ -26,6 +26,7 @@ interface XtreamVodStream {
   stream_icon: string;
   category_id: string;
   container_extension: string;
+  added: string;
 }
 
 interface XtreamSeries {
@@ -34,6 +35,7 @@ interface XtreamSeries {
   series_id: number;
   cover: string;
   category_id: string;
+  last_modified: string;
 }
 
 // ---------- VOD info types ----------
@@ -304,6 +306,7 @@ export async function fetchXtreamStreamsByCategory(
         content_type: 'movies',
         category_id: categoryId,
         sort_order: s.num || 0,
+        added: parseInt(s.added, 10) || 0,
       });
     }
   } else {
@@ -323,6 +326,7 @@ export async function fetchXtreamStreamsByCategory(
         content_type: 'series',
         category_id: categoryId,
         sort_order: s.num || 0,
+        added: parseInt(s.last_modified, 10) || 0,
       });
     }
   }

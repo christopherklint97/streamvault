@@ -84,6 +84,16 @@ try {
 
 db.exec('CREATE INDEX IF NOT EXISTS idx_channels_name ON channels(name COLLATE NOCASE)');
 
+// Migration: add 'added' column (unix timestamp for when stream was added upstream)
+try {
+  db.prepare('SELECT added FROM channels LIMIT 1').get();
+} catch {
+  db.exec('ALTER TABLE channels ADD COLUMN added INTEGER DEFAULT 0');
+  logger.info('Migrated channels table: added "added" column');
+}
+
+db.exec('CREATE INDEX IF NOT EXISTS idx_channels_added ON channels(added)');
+
 // ---------- Recording tables ----------
 
 db.exec(`
@@ -211,10 +221,11 @@ export interface DBChannel {
   content_type: string;
   category_id?: string;
   sort_order?: number;
+  added?: number;
 }
 
 const insertChannel = db.prepare(
-  'INSERT OR REPLACE INTO channels (id, name, url, logo, grp, region, content_type, category_id, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  'INSERT OR REPLACE INTO channels (id, name, url, logo, grp, region, content_type, category_id, sort_order, added) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
 );
 
 const clearChannels = db.prepare('DELETE FROM channels');
@@ -222,7 +233,7 @@ const clearChannels = db.prepare('DELETE FROM channels');
 const insertChannelsBatch = db.transaction((channels: DBChannel[]) => {
   clearChannels.run();
   for (const ch of channels) {
-    insertChannel.run(ch.id, ch.name, ch.url, ch.logo, ch.grp, ch.region, ch.content_type, ch.category_id || '', ch.sort_order ?? 0);
+    insertChannel.run(ch.id, ch.name, ch.url, ch.logo, ch.grp, ch.region, ch.content_type, ch.category_id || '', ch.sort_order ?? 0, ch.added ?? 0);
   }
 });
 
@@ -240,7 +251,7 @@ const clearChannelsByCategory = db.prepare('DELETE FROM channels WHERE category_
 const insertChannelsForCategory = db.transaction((categoryId: string, channels: DBChannel[]) => {
   clearChannelsByCategory.run(categoryId);
   for (const ch of channels) {
-    insertChannel.run(ch.id, ch.name, ch.url, ch.logo, ch.grp, ch.region, ch.content_type, ch.category_id || '', ch.sort_order ?? 0);
+    insertChannel.run(ch.id, ch.name, ch.url, ch.logo, ch.grp, ch.region, ch.content_type, ch.category_id || '', ch.sort_order ?? 0, ch.added ?? 0);
   }
 });
 
@@ -276,11 +287,28 @@ export function getChannelsByGroup(group: string, limit?: number, cursorSort?: n
   return db.prepare('SELECT * FROM channels WHERE grp = ? ORDER BY sort_order, name').all(group) as DBChannel[];
 }
 
-export function getChannelsByGroupCursor(group: string, limit: number, afterName?: string): DBChannel[] {
-  if (afterName) {
-    return db.prepare('SELECT * FROM channels WHERE grp = ? AND name > ? ORDER BY name LIMIT ?').all(group, afterName, limit) as DBChannel[];
+export function getChannelsByGroupCursor(group: string, limit: number, afterCursor?: string, contentType?: string): DBChannel[] {
+  const isNewestFirst = contentType === 'movies' || contentType === 'series';
+
+  if (isNewestFirst) {
+    // Movies/series: newest first (added DESC, name ASC)
+    if (afterCursor) {
+      const cursor = JSON.parse(afterCursor) as { a: number; n: string };
+      return db.prepare(
+        'SELECT * FROM channels WHERE grp = ? AND (added < ? OR (added = ? AND name > ?)) ORDER BY added DESC, name LIMIT ?'
+      ).all(group, cursor.a, cursor.a, cursor.n, limit) as DBChannel[];
+    }
+    return db.prepare('SELECT * FROM channels WHERE grp = ? ORDER BY added DESC, name LIMIT ?').all(group, limit) as DBChannel[];
   }
-  return db.prepare('SELECT * FROM channels WHERE grp = ? ORDER BY name LIMIT ?').all(group, limit) as DBChannel[];
+
+  // Live TV: original order (sort_order ASC, name ASC)
+  if (afterCursor) {
+    const cursor = JSON.parse(afterCursor) as { s: number; n: string };
+    return db.prepare(
+      'SELECT * FROM channels WHERE grp = ? AND (sort_order > ? OR (sort_order = ? AND name > ?)) ORDER BY sort_order, name LIMIT ?'
+    ).all(group, cursor.s, cursor.s, cursor.n, limit) as DBChannel[];
+  }
+  return db.prepare('SELECT * FROM channels WHERE grp = ? ORDER BY sort_order, name LIMIT ?').all(group, limit) as DBChannel[];
 }
 
 export function getChannelCountByGroup(group: string): number {
@@ -288,11 +316,27 @@ export function getChannelCountByGroup(group: string): number {
   return row.count;
 }
 
-export function getChannelsByContentTypeCursor(contentType: string, limit: number, afterName?: string): DBChannel[] {
-  if (afterName) {
-    return db.prepare('SELECT * FROM channels WHERE content_type = ? AND name > ? ORDER BY name LIMIT ?').all(contentType, afterName, limit) as DBChannel[];
+export function getChannelsByContentTypeCursor(contentType: string, limit: number, afterCursor?: string): DBChannel[] {
+  const isNewestFirst = contentType === 'movies' || contentType === 'series';
+
+  if (isNewestFirst) {
+    if (afterCursor) {
+      const cursor = JSON.parse(afterCursor) as { a: number; n: string };
+      return db.prepare(
+        'SELECT * FROM channels WHERE content_type = ? AND (added < ? OR (added = ? AND name > ?)) ORDER BY added DESC, name LIMIT ?'
+      ).all(contentType, cursor.a, cursor.a, cursor.n, limit) as DBChannel[];
+    }
+    return db.prepare('SELECT * FROM channels WHERE content_type = ? ORDER BY added DESC, name LIMIT ?').all(contentType, limit) as DBChannel[];
   }
-  return db.prepare('SELECT * FROM channels WHERE content_type = ? ORDER BY name LIMIT ?').all(contentType, limit) as DBChannel[];
+
+  // Live TV: original order
+  if (afterCursor) {
+    const cursor = JSON.parse(afterCursor) as { s: number; n: string };
+    return db.prepare(
+      'SELECT * FROM channels WHERE content_type = ? AND (sort_order > ? OR (sort_order = ? AND name > ?)) ORDER BY sort_order, name LIMIT ?'
+    ).all(contentType, cursor.s, cursor.s, cursor.n, limit) as DBChannel[];
+  }
+  return db.prepare('SELECT * FROM channels WHERE content_type = ? ORDER BY sort_order, name LIMIT ?').all(contentType, limit) as DBChannel[];
 }
 
 // --- Direct substring search ---

@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useRef } from 'react';
+import { useEffect, useCallback, useRef, useState } from 'react';
 import { useAppStore } from './stores/appStore';
 import { useChannelStore } from './stores/channelStore';
 import { usePlayerStore } from './stores/playerStore';
@@ -6,6 +6,7 @@ import { useRemoteKeys } from './hooks/useRemoteKeys';
 import { useNetworkStatus } from './hooks/useNetworkStatus';
 import { KEY_CODES } from './utils/keys';
 import { cn } from './utils/cn';
+import { isMobile } from './utils/platform';
 import { markTTI, startFPSMonitor, stopFPSMonitor } from './utils/perf-monitor';
 import { parseUrl } from './utils/url-state';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -28,6 +29,46 @@ const BROWSE_VIEWS = [
   { view: 'movies' as const, contentType: 'movies' as const },
   { view: 'series' as const, contentType: 'series' as const },
 ] as const;
+
+const MOBILE_APP = isMobile();
+
+/** Persistent video element — adapts sizing for portrait live mode */
+function AvPlayerVideo({ currentView }: { currentView: string }) {
+  const currentChannel = usePlayerStore((s) => s.currentChannel);
+  const groupChannels = usePlayerStore((s) => s.groupChannels);
+  const isLive = currentChannel?.contentType === 'livetv';
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    const onFsChange = () => {
+      const doc = document as Document & { webkitFullscreenElement?: Element | null };
+      setIsFullscreen(!!(doc.fullscreenElement || doc.webkitFullscreenElement));
+    };
+    document.addEventListener('fullscreenchange', onFsChange);
+    document.addEventListener('webkitfullscreenchange', onFsChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', onFsChange);
+      document.removeEventListener('webkitfullscreenchange', onFsChange);
+    };
+  }, []);
+
+  const isPortraitLive = MOBILE_APP && isLive && !isFullscreen && groupChannels.length > 0;
+
+  return (
+    <video
+      id="av-player"
+      playsInline
+      className={cn(
+        'fixed top-0 left-0 bg-black object-contain object-center',
+        currentView === 'player'
+          ? isPortraitLive
+            ? 'w-full aspect-video z-[998]'
+            : 'w-full h-dvh z-[998]'
+          : 'w-px h-px -z-10 opacity-0 pointer-events-none'
+      )}
+    />
+  );
+}
 
 function AppContent() {
   const currentView = useAppStore((s) => s.currentView);
@@ -204,16 +245,7 @@ function AppContent() {
       {/* Persistent video element — stays in the DOM across view changes so
           playback continues in the background when navigating away from the player */}
       {!(typeof webapis !== 'undefined' && webapis.avplay) && (
-        <video
-          id="av-player"
-          playsInline
-          className={cn(
-            'fixed top-0 left-0 bg-black object-contain object-center',
-            currentView === 'player'
-              ? 'w-full h-dvh z-[998]'
-              : 'w-px h-px -z-10 opacity-0 pointer-events-none'
-          )}
-        />
+        <AvPlayerVideo currentView={currentView} />
       )}
       <Toast />
       <ExitDialog />

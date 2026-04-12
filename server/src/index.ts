@@ -182,7 +182,7 @@ app.get('/api/browse', async (req, res) => {
         }
       }
     }
-    dbChannels = getChannelsByGroupCursor(group, limit, after);
+    dbChannels = getChannelsByGroupCursor(group, limit, after, contentType);
     total = getChannelCountByGroup(group);
   } else if (contentType) {
     dbChannels = getChannelsByContentTypeCursor(contentType, limit, after);
@@ -202,9 +202,17 @@ app.get('/api/browse', async (req, res) => {
     contentType: ch.content_type,
   }));
 
-  // Cursor is the name of the last item — next page starts after this
+  // Build cursor based on content type sort strategy
   const lastItem = dbChannels[dbChannels.length - 1];
-  const nextCursor = lastItem && dbChannels.length === limit ? lastItem.name : null;
+  let nextCursor: string | null = null;
+  if (lastItem && dbChannels.length === limit) {
+    const effectiveType = lastItem.content_type || contentType;
+    if (effectiveType === 'movies' || effectiveType === 'series') {
+      nextCursor = JSON.stringify({ a: lastItem.added ?? 0, n: lastItem.name });
+    } else {
+      nextCursor = JSON.stringify({ s: lastItem.sort_order ?? 0, n: lastItem.name });
+    }
+  }
 
   res.json({ channels, total, nextCursor });
 });
