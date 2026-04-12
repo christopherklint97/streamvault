@@ -102,9 +102,11 @@ export default function Player() {
   const isLive = currentChannel?.contentType === 'livetv';
   const hasDuration = isFinite(duration) && duration > 0;
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [channelListVisible, setChannelListVisible] = useState(true);
 
   // Portrait mode: show channel list below video for live TV on mobile
-  const showPortraitList = MOBILE && isLive && !isFullscreen && groupChannels.length > 0;
+  const canShowPortraitList = MOBILE && isLive && !isFullscreen && groupChannels.length > 0;
+  const showPortraitList = canShowPortraitList && channelListVisible;
 
   const currentProgram = currentChannel
     ? getCurrentProgram(programs, currentChannel.id)
@@ -218,12 +220,19 @@ export default function Player() {
     osdTimerRef.current = setTimeout(() => setShowOSD(false), OSD_TIMEOUT);
   }, []);
 
-  // Start playback when channel changes (skip if already playing same channel)
+  // Start playback when channel changes.
+  // On channel switch: always call play(). On re-mount with same channel: skip if already playing.
+  const prevChannelRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (channelId) {
+    if (!channelId) return;
+    if (channelId !== prevChannelRef.current) {
+      // New channel — always start playback
+      prevChannelRef.current = channelId;
+      play();
+    } else {
+      // Same channel (re-mount) — only play if not already playing
       const video = document.getElementById('av-player') as HTMLVideoElement | null;
-      const isAlreadyPlaying = video && !video.paused && video.readyState > 0;
-      if (!isAlreadyPlaying) {
+      if (!video || video.paused || video.readyState === 0) {
         play();
       }
     }
@@ -613,6 +622,29 @@ export default function Player() {
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <circle cx="12" cy="12" r="10" />
                       <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76" />
+                    </svg>
+                  </button>
+                )}
+                {canShowPortraitList && (
+                  <button
+                    className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-transparent text-white shrink-0 tap-none cursor-pointer active:opacity-60"
+                    onClick={(e) => { e.stopPropagation(); setChannelListVisible(v => !v); resetOSDTimer(); }}
+                    title={channelListVisible ? 'Hide channels' : 'Show channels'}
+                  >
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      {channelListVisible ? (
+                        <>
+                          <rect x="2" y="3" width="20" height="18" rx="2" />
+                          <line x1="2" y1="9" x2="22" y2="9" />
+                        </>
+                      ) : (
+                        <>
+                          <rect x="2" y="3" width="20" height="18" rx="2" />
+                          <line x1="2" y1="9" x2="22" y2="9" />
+                          <line x1="8" y1="13" x2="16" y2="13" />
+                          <line x1="8" y1="17" x2="16" y2="17" />
+                        </>
+                      )}
                     </svg>
                   </button>
                 )}
