@@ -227,7 +227,7 @@ function AppContent() {
       <main
         data-app-content
         className={cn(
-          'flex-1 overflow-y-auto p-4 pt-[calc(8px+env(safe-area-inset-top,0px))] pb-[calc(72px+env(safe-area-inset-bottom,0px))] min-h-0 lg:p-8 lg:px-10 lg:pb-8',
+          'flex-1 overflow-y-auto p-4 pt-[calc(8px+env(safe-area-inset-top,0px))] pb-[72px] min-h-0 lg:p-8 lg:px-10 lg:pb-8',
           currentView === 'player' && '!p-0 !pb-0 w-full h-dvh lg:!w-tv lg:!h-tv'
         )}
         onKeyDown={currentView !== 'player' ? handleMainKeyDown : undefined}

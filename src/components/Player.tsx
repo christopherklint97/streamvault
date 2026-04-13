@@ -693,7 +693,7 @@ export default function Player() {
             )}
 
             {/* Bottom bar: progress + time */}
-            <div className={cn('relative px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] pt-8 pb-[calc(12px+env(safe-area-inset-bottom,0px))] lg:px-10 lg:pt-10 lg:pb-6 bg-gradient-to-t from-black/90 to-transparent', showOSD && 'pointer-events-auto')}>
+            <div className={cn('relative px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] pt-8 pb-3 lg:px-10 lg:pt-10 lg:pb-6 bg-gradient-to-t from-black/90 to-transparent', showOSD && 'pointer-events-auto')}>
               {/* Seek bar for VOD */}
               {!isLive && hasDuration && (
                 <div data-player-controls>

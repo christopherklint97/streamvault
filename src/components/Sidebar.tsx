@@ -108,7 +108,7 @@ export default function Sidebar() {
               className="fixed inset-0 z-[997] tap-none"
               onClick={() => setDrawerOpen(false)}
             />
-            <div className="fixed bottom-[calc(56px+env(safe-area-inset-bottom,0px))] right-2 z-[998] bg-dark-sidebar border border-white/[0.1] rounded-xl shadow-2xl overflow-hidden animate-fade-in-fast">
+            <div className="fixed bottom-[56px] right-2 z-[998] bg-dark-sidebar border border-white/[0.1] rounded-xl shadow-2xl overflow-hidden animate-fade-in-fast">
               {moreItems.map((item) => (
                 <button
                   key={item.view}
