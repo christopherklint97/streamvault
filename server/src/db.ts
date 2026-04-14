@@ -11,10 +11,40 @@ const DB_PATH = path.join(DATA_DIR, 'streamvault.db');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 logger.info(`Opening database at ${DB_PATH}`);
-const db = new Database(DB_PATH);
+let db = openDatabase();
 
-// Enable WAL mode for better concurrent read performance
-db.pragma('journal_mode = WAL');
+function openDatabase(): InstanceType<typeof Database> {
+  const instance = new Database(DB_PATH);
+  instance.pragma('journal_mode = WAL');
+  return instance;
+}
+
+// Integrity check — if corrupted, delete and recreate
+try {
+  const result = db.pragma('integrity_check') as { integrity_check: string }[];
+  if (result[0]?.integrity_check !== 'ok') {
+    logger.error(`Database integrity check failed: ${JSON.stringify(result)}`);
+    db.close();
+    // Remove corrupted files and start fresh
+    for (const suffix of ['', '-shm', '-wal']) {
+      const file = DB_PATH + suffix;
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
+    logger.info('Removed corrupted database, creating fresh one');
+    db = openDatabase();
+  } else {
+    logger.info('Database integrity check passed');
+  }
+} catch (err) {
+  logger.error(`Database integrity check error: ${err instanceof Error ? err.message : err}`);
+  try { db.close(); } catch { /* ignore */ }
+  for (const suffix of ['', '-shm', '-wal']) {
+    const file = DB_PATH + suffix;
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+  }
+  logger.info('Removed corrupted database, creating fresh one');
+  db = openDatabase();
+}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS channels (

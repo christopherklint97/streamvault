@@ -978,6 +978,13 @@ app.post('/api/crawl/cancel', (_req, res) => {
   res.json({ ok: true, message: 'Crawl cancelled' });
 });
 
+// ---------- API error handler ----------
+
+app.use('/api', (err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  logger.error(`API error: ${err.message}`);
+  res.status(500).json({ error: err.message });
+});
+
 // ---------- Serve frontend (PWA) ----------
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
