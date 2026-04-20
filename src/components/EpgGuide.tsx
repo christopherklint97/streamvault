@@ -167,9 +167,6 @@ function GuideFilterDropdown({ categories, selectedGroup, onSelect }: { categori
 
 export default function EpgGuide() {
   const [channels, setChannels] = useState<Channel[]>([]);
-  const [totalCount, setTotalCount] = useState(0);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [epgData, setEpgData] = useState<EpgByChannel>({});
   const [loading, setLoading] = useState(true);
   const [timeOffset, setTimeOffset] = useState(0);
@@ -199,22 +196,33 @@ export default function EpgGuide() {
     fetchCategories('livetv');
   }, [fetchCategories]);
 
-  // Fetch channels when group changes
+  // Fetch all channels when group changes
   useEffect(() => {
     const id = ++fetchIdRef.current;
     let cancelled = false;
     const group = selectedGroup && selectedGroup !== 'All' ? selectedGroup : undefined;
-    fetchBrowseChannels(group, PAGE_SIZE).then(data => {
-      if (cancelled || fetchIdRef.current !== id) return;
-      setChannels(data.channels);
-      setTotalCount(data.total);
-      setNextCursor(data.nextCursor);
-      setLoading(false);
-    }).catch((err) => {
-      if (cancelled || fetchIdRef.current !== id) return;
-      showToast(`Failed to load channels: ${err}`);
-      setLoading(false);
-    });
+
+    (async () => {
+      try {
+        const first = await fetchBrowseChannels(group, PAGE_SIZE);
+        if (cancelled || fetchIdRef.current !== id) return;
+        setChannels(first.channels);
+        setLoading(false);
+
+        let cursor = first.nextCursor;
+        while (cursor) {
+          const next = await fetchBrowseChannels(group, PAGE_SIZE, cursor);
+          if (cancelled || fetchIdRef.current !== id) return;
+          setChannels(prev => [...prev, ...next.channels]);
+          cursor = next.nextCursor;
+        }
+      } catch (err) {
+        if (cancelled || fetchIdRef.current !== id) return;
+        showToast(`Failed to load channels: ${err}`);
+        setLoading(false);
+      }
+    })();
+
     return () => { cancelled = true; };
   }, [selectedGroup, showToast]);
 
@@ -267,19 +275,6 @@ export default function EpgGuide() {
     setSelectedProgram(null);
   }, []);
 
-  const handleLoadMore = useCallback(async () => {
-    if (loadingMore || !nextCursor) return;
-    setLoadingMore(true);
-    try {
-      const group = selectedGroup && selectedGroup !== 'All' ? selectedGroup : undefined;
-      const data = await fetchBrowseChannels(group, PAGE_SIZE, nextCursor);
-      setChannels(prev => [...prev, ...data.channels]);
-      setTotalCount(data.total);
-      setNextCursor(data.nextCursor);
-    } catch (err) { showToast(`Failed to load more: ${err}`); }
-    setLoadingMore(false);
-  }, [loadingMore, nextCursor, selectedGroup, showToast]);
-
   const [now, setNow] = useState(() => Date.now());
   // Update "now" every 60 seconds for the now-line
   useEffect(() => {
@@ -303,8 +298,6 @@ export default function EpgGuide() {
   const hasAnyEpg = useMemo(() => {
     return Object.values(epgData).some(programs => programs.length > 0);
   }, [epgData]);
-
-  const remaining = totalCount - channels.length;
 
   if (loading) {
     return <div className="p-3 lg:p-5 h-full flex flex-col overflow-hidden"><div className="text-[#888] text-center py-[60px]">Loading guide...</div></div>;
@@ -403,16 +396,6 @@ export default function EpgGuide() {
               })}
             </div>
 
-            {/* Load more */}
-            {nextCursor && (
-              <button
-                className="w-full py-3 bg-surface border-2 border-transparent rounded-lg text-[#666] text-center text-14 transition-all duration-150 mt-1 tap-none hover:bg-surface-hover focus:border-accent"
-                onClick={handleLoadMore}
-                disabled={loadingMore}
-              >
-                {loadingMore ? 'Loading...' : `Load more (${remaining} remaining)`}
-              </button>
-            )}
           </div>
         </>
       )}

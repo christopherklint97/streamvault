@@ -80,3 +80,46 @@ export async function exitPiP(video: HTMLVideoElement): Promise<void> {
     wv.webkitSetPresentationMode('inline');
   }
 }
+
+// ---------------------------------------------------------------------------
+// AirPlay helpers (WebKit / Safari on iOS & macOS)
+// ---------------------------------------------------------------------------
+
+type AirPlayVideo = HTMLVideoElement & {
+  webkitShowPlaybackTargetPicker?: () => void;
+};
+
+type AirPlayAvailabilityEvent = Event & {
+  availability?: 'available' | 'not-available';
+};
+
+/** Does this video element support AirPlay API at all? */
+export function canAirPlay(video: HTMLVideoElement): boolean {
+  return typeof (video as AirPlayVideo).webkitShowPlaybackTargetPicker === 'function';
+}
+
+/** Show the native AirPlay route picker */
+export function showAirPlayPicker(video: HTMLVideoElement): void {
+  (video as AirPlayVideo).webkitShowPlaybackTargetPicker?.();
+}
+
+/**
+ * Watch for AirPlay target availability on the given video. The callback fires
+ * immediately with `canAirPlay(video)` (best-effort) and on every availability
+ * change. Returns an unsubscribe function.
+ */
+export function watchAirPlayAvailability(
+  video: HTMLVideoElement,
+  cb: (available: boolean) => void,
+): () => void {
+  if (!canAirPlay(video)) {
+    cb(false);
+    return () => {};
+  }
+  const handler = (e: Event) => {
+    const availability = (e as AirPlayAvailabilityEvent).availability;
+    cb(availability === 'available');
+  };
+  video.addEventListener('webkitplaybacktargetavailabilitychanged', handler);
+  return () => video.removeEventListener('webkitplaybacktargetavailabilitychanged', handler);
+}

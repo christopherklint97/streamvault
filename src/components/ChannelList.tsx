@@ -10,6 +10,7 @@ import { isMobile } from '../utils/platform';
 import { cn } from '../utils/cn';
 import ChannelCard from './ChannelCard';
 import { useFavoritesStore } from '../stores/favoritesStore';
+import { fetchBatchEpg, getCurrentEpg, type EpgProgram, type EpgMap } from '../utils/epg-batch';
 
 interface ChannelListProps {
   contentType: ContentType;
@@ -40,41 +41,6 @@ async function apiBrowse(contentType: string, group?: string, limit = PAGE_SIZE,
   const resp = await fetch(`${base}/api/browse?${params}`);
   if (!resp.ok) throw new Error(`API error: ${resp.status}`);
   return resp.json();
-}
-
-// ---------- Batch EPG helper ----------
-
-interface EpgProgram {
-  title: string;
-  description: string;
-  start: string;
-  stop: string;
-}
-
-type EpgMap = Record<string, EpgProgram[]>;
-
-async function fetchBatchEpg(channelIds: string[]): Promise<EpgMap> {
-  if (channelIds.length === 0) return {};
-  const base = getApiBase();
-  const resp = await fetch(`${base}/api/epg/batch?ids=${channelIds.join(',')}`);
-  if (!resp.ok) return {};
-  const data = await resp.json();
-  return data.programs || {};
-}
-
-function getCurrentEpg(programs: EpgProgram[] | undefined): { current: EpgProgram | null; progress: number } {
-  if (!programs || programs.length === 0) return { current: null, progress: 0 };
-  const now = Date.now();
-  for (const p of programs) {
-    const start = new Date(p.start).getTime();
-    const stop = new Date(p.stop).getTime();
-    if (start <= now && stop > now) {
-      const total = stop - start;
-      const elapsed = now - start;
-      return { current: p, progress: total > 0 ? elapsed / total : 0 };
-    }
-  }
-  return { current: null, progress: 0 };
 }
 
 // ---------- EPG Progress Bar ----------
@@ -319,12 +285,12 @@ export default function ChannelList({ contentType }: ChannelListProps) {
   // Local channel list state (not global store)
   const [channels, setChannels] = useState<Channel[]>([]);
   const [totalCount, setTotalCount] = useState(0);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   // EPG data for live TV channels
   const [epgMap, setEpgMap] = useState<EpgMap>({});
+  const fetchedEpgIdsRef = useRef<Set<string>>(new Set());
 
   const categories = useChannelStore((s) => s.categories);
   const fetchCategories = useChannelStore((s) => s.fetchCategories);
@@ -344,29 +310,46 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     fetchCategories(contentType);
   }, [contentType, fetchCategories]);
 
-  // Load initial page of channels (alphabetical, first 20)
+  // Load all pages of channels for the current category
   useEffect(() => {
     const id = ++fetchIdRef.current;
     let cancelled = false;
     const group = selectedGroup && selectedGroup !== 'All' ? selectedGroup : undefined;
-    apiBrowse(contentType, group, PAGE_SIZE).then(data => {
-      if (cancelled || fetchIdRef.current !== id) return;
-      // If "All" returned 0 results but we have categories, auto-select the first one
-      if (data.total === 0 && !group && categories.length > 0) {
-        setSelectedGroup(categories[0].name);
-        return;
+
+    (async () => {
+      try {
+        const first = await apiBrowse(contentType, group, PAGE_SIZE);
+        if (cancelled || fetchIdRef.current !== id) return;
+        // If "All" returned 0 results but we have categories, auto-select the first one
+        if (first.total === 0 && !group && categories.length > 0) {
+          setSelectedGroup(categories[0].name);
+          return;
+        }
+        setChannels(first.channels);
+        setTotalCount(first.total);
+        setInitialLoading(false);
+        setFocusIndex(0);
+        setScrollOffset(0);
+        setLoadingMore(!!first.nextCursor);
+
+        // Continue loading remaining pages in the background
+        let cursor = first.nextCursor;
+        while (cursor) {
+          const next = await apiBrowse(contentType, group, PAGE_SIZE, cursor);
+          if (cancelled || fetchIdRef.current !== id) return;
+          setChannels(prev => [...prev, ...next.channels]);
+          setTotalCount(next.total);
+          cursor = next.nextCursor;
+        }
+        if (!cancelled && fetchIdRef.current === id) setLoadingMore(false);
+      } catch (err) {
+        if (cancelled || fetchIdRef.current !== id) return;
+        showToast(`Failed to load channels: ${err}`);
+        setInitialLoading(false);
+        setLoadingMore(false);
       }
-      setChannels(data.channels);
-      setTotalCount(data.total);
-      setNextCursor(data.nextCursor);
-      setInitialLoading(false);
-      setFocusIndex(0);
-      setScrollOffset(0);
-    }).catch((err) => {
-      if (cancelled || fetchIdRef.current !== id) return;
-      showToast(`Failed to load channels: ${err}`);
-      setInitialLoading(false);
-    });
+    })();
+
     return () => { cancelled = true; };
   }, [contentType, selectedGroup, categories, showToast]);
 
@@ -387,7 +370,6 @@ export default function ChannelList({ contentType }: ChannelListProps) {
         if (cancelled || fetchIdRef.current !== id) return;
         setChannels(results);
         setTotalCount(results.length);
-        setNextCursor(null);
         setIsSearching(false);
         setFocusIndex(0);
         setScrollOffset(0);
@@ -395,15 +377,14 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     return () => { cancelled = true; };
   }, [debouncedQuery, contentType, selectedGroup, searchChannelsFn]);
 
-  // Fetch EPG for visible live TV channels
+  // Fetch EPG for live TV channels — only for IDs we haven't fetched yet
   useEffect(() => {
     if (contentType !== 'livetv' || channels.length === 0) return;
     let cancelled = false;
-    // Map channel IDs to the EPG channel_id format the backend uses
-    // The Xtream EPG uses epg_channel_id but our programs table uses the channel_id from the EPG response
-    // We'll query by channel IDs and also by the numeric stream IDs
-    const ids = channels.map(ch => ch.id);
-    fetchBatchEpg(ids).then(data => {
+    const missing = channels.map(ch => ch.id).filter(id => !fetchedEpgIdsRef.current.has(id));
+    if (missing.length === 0) return;
+    missing.forEach(id => fetchedEpgIdsRef.current.add(id));
+    fetchBatchEpg(missing).then(data => {
       if (!cancelled) setEpgMap(prev => ({ ...prev, ...data }));
     });
     return () => { cancelled = true; };
@@ -462,19 +443,6 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     },
     [setChannel, navigate, navigateToSeries, navigateToMovie]
   );
-
-  const handleLoadMore = useCallback(async () => {
-    if (loadingMore || !nextCursor) return;
-    setLoadingMore(true);
-    try {
-      const group = selectedGroup && selectedGroup !== 'All' ? selectedGroup : undefined;
-      const data = await apiBrowse(contentType, group, PAGE_SIZE, nextCursor);
-      setChannels(prev => [...prev, ...data.channels]);
-      setTotalCount(data.total);
-      setNextCursor(data.nextCursor);
-    } catch (err) { showToast(`Failed to load more: ${err}`); }
-    setLoadingMore(false);
-  }, [loadingMore, nextCursor, selectedGroup, contentType, showToast]);
 
   const handleGroupSelect = useCallback((groupName: string) => {
     setSelectedGroup(groupName);
@@ -578,7 +546,9 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     ? 'Loading...'
     : showingSearch
       ? `${channels.length} result${channels.length !== 1 ? 's' : ''}${isSearching ? ' (searching...)' : ''}`
-      : `${channels.length} of ${totalCount} item${totalCount !== 1 ? 's' : ''}`;
+      : loadingMore
+        ? `${channels.length} of ${totalCount} item${totalCount !== 1 ? 's' : ''} (loading...)`
+        : `${channels.length} item${channels.length !== 1 ? 's' : ''}`;
 
   const emptyMessage = initialLoading
     ? 'Loading...'
@@ -589,8 +559,6 @@ export default function ChannelList({ contentType }: ChannelListProps) {
         : totalCount === 0 && (!selectedGroup || selectedGroup === 'All')
           ? 'Select a category to browse.'
           : 'No items in this category yet.';
-
-  const remaining = totalCount - channels.length;
 
   // Mobile: simple CSS grid, no virtualization
   if (MOBILE) {
@@ -643,11 +611,6 @@ export default function ChannelList({ contentType }: ChannelListProps) {
               ))
             )}
           </div>
-        )}
-        {nextCursor && !showingSearch && (
-          <button className="col-span-full py-3.5 lg:py-3 bg-surface border-2 border-transparent rounded-lg text-[#666] text-center text-15 lg:text-17 transition-all duration-150 w-full mt-2 lg:mt-0 tap-none focus:border-accent focus:bg-surface-hover" onClick={handleLoadMore} disabled={loadingMore}>
-            {loadingMore ? 'Loading...' : `Load more (${remaining} remaining)`}
-          </button>
         )}
       </div>
     );
@@ -733,11 +696,6 @@ export default function ChannelList({ contentType }: ChannelListProps) {
           </div>
         )}
       </div>
-      {nextCursor && !showingSearch && (
-        <button className="col-span-full py-3.5 lg:py-3 bg-surface border-2 border-transparent rounded-lg text-[#666] text-center text-15 lg:text-17 transition-all duration-150 w-full mt-2 lg:mt-0 tap-none focus:border-accent focus:bg-surface-hover" onClick={handleLoadMore} disabled={loadingMore}>
-          {loadingMore ? 'Loading...' : `Load more (${remaining} remaining)`}
-        </button>
-      )}
     </div>
   );
 }

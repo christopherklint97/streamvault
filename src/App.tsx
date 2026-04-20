@@ -7,6 +7,7 @@ import { useNetworkStatus } from './hooks/useNetworkStatus';
 import { KEY_CODES } from './utils/keys';
 import { cn } from './utils/cn';
 import { isMobile } from './utils/platform';
+import { initCast } from './utils/cast';
 import { markTTI, startFPSMonitor, stopFPSMonitor } from './utils/perf-monitor';
 import { parseUrl } from './utils/url-state';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -59,6 +60,7 @@ function AvPlayerVideo({ currentView }: { currentView: string }) {
     <video
       id="av-player"
       playsInline
+      {...{ 'x-webkit-airplay': 'allow' }}
       className={cn(
         'fixed top-0 left-0 bg-black object-contain object-center',
         currentView === 'player'
@@ -128,6 +130,11 @@ function AppContent() {
   useEffect(() => {
     hydrate();
   }, [hydrate]);
+
+  // Load the Chromecast sender SDK in the background (no-op on Tizen/iOS/Safari)
+  useEffect(() => {
+    initCast();
+  }, []);
 
   // Deep-link: ?play=channelId auto-starts playback (used by "Open in Safari" for PiP)
   const deepLinkHandled = useRef(false);

@@ -6,8 +6,19 @@ import { useAppStore } from '../stores/appStore';
 import { useRecordingStore } from '../stores/recordingStore';
 import { getCurrentProgram } from '../services/epg-service';
 import { KEY_CODES } from '../utils/keys';
-import { isMobile, isIPhone, isStandalonePWA, canPiP, isInPiP, enterPiP } from '../utils/platform';
+import {
+  isMobile,
+  isIPhone,
+  canPiP,
+  isInPiP,
+  enterPiP,
+  canAirPlay,
+  showAirPlayPicker,
+  watchAirPlayAvailability,
+} from '../utils/platform';
+import { castMedia, pickCastMime, watchCastState, isCastConnected } from '../utils/cast';
 import { cn } from '../utils/cn';
+import { fetchBatchEpg, getCurrentEpg, type EpgProgram, type EpgMap } from '../utils/epg-batch';
 import type { Channel } from '../types';
 
 const OSD_TIMEOUT = 5000;
@@ -23,12 +34,72 @@ function formatTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+function formatHourMinute(d: Date): string {
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function PortraitChannelRow({ channel, active, programs, onSelect }: {
+  channel: Channel;
+  active: boolean;
+  programs: EpgProgram[] | undefined;
+  onSelect: (ch: Channel) => void;
+}) {
+  const { current, progress } = useMemo(() => getCurrentEpg(programs), [programs]);
+
+  return (
+    <button
+      data-active={active}
+      className={cn(
+        'w-full flex items-center gap-3 px-4 py-3 border-none text-left tap-none active:bg-white/10 transition-colors',
+        active ? 'bg-white/[0.08]' : 'bg-transparent'
+      )}
+      onClick={() => onSelect(channel)}
+    >
+      {channel.logo ? (
+        <img
+          src={channel.logo}
+          alt=""
+          className="w-10 h-10 rounded object-contain bg-black/40 shrink-0"
+          loading="lazy"
+        />
+      ) : (
+        <div className="w-10 h-10 rounded bg-white/[0.06] shrink-0 flex items-center justify-center text-[#555] text-xs">TV</div>
+      )}
+      <div className="flex-1 min-w-0 flex flex-col gap-1">
+        <span className={cn(
+          'text-sm block truncate',
+          active ? 'text-accent font-semibold' : 'text-white'
+        )}>{channel.name}</span>
+        {current ? (
+          <div className="flex flex-col gap-[3px]">
+            <div className="flex items-center gap-2">
+              <span className="text-12 text-[#aaa] flex-1 min-w-0 truncate">{current.title}</span>
+              <span className="text-11 text-[#666] tabular-nums shrink-0">
+                {formatHourMinute(new Date(current.start))} – {formatHourMinute(new Date(current.stop))}
+              </span>
+            </div>
+            <div className="h-[3px] bg-white/[0.08] rounded-sm overflow-hidden">
+              <div className="h-full bg-epg-purple rounded-sm" style={{ width: `${Math.min(progress * 100, 100)}%` }} />
+            </div>
+          </div>
+        ) : (
+          <span className="text-11 text-[#555]">No guide</span>
+        )}
+      </div>
+      {active && (
+        <div className="w-2 h-2 rounded-full bg-accent shrink-0" />
+      )}
+    </button>
+  );
+}
+
 function PortraitChannelList({ channels, currentId, onSelect }: {
   channels: Channel[];
   currentId: string;
   onSelect: (ch: Channel) => void;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
+  const [epgMap, setEpgMap] = useState<EpgMap>({});
 
   // Scroll current channel into view on mount
   useEffect(() => {
@@ -36,42 +107,28 @@ function PortraitChannelList({ channels, currentId, onSelect }: {
     el?.scrollIntoView({ block: 'center', behavior: 'instant' });
   }, [currentId]);
 
+  // Fetch EPG for all channels in the list
+  useEffect(() => {
+    if (channels.length === 0) return;
+    let cancelled = false;
+    const ids = channels.map(ch => ch.id);
+    fetchBatchEpg(ids).then(data => {
+      if (!cancelled) setEpgMap(data);
+    });
+    return () => { cancelled = true; };
+  }, [channels]);
+
   return (
     <div ref={listRef} className="flex-1 overflow-y-auto bg-[#111] [-webkit-overflow-scrolling:touch]">
-      {channels.map((ch) => {
-        const active = ch.id === currentId;
-        return (
-          <button
-            key={ch.id}
-            data-active={active}
-            className={cn(
-              'w-full flex items-center gap-3 px-4 py-3 border-none text-left tap-none active:bg-white/10 transition-colors',
-              active ? 'bg-white/[0.08]' : 'bg-transparent'
-            )}
-            onClick={() => onSelect(ch)}
-          >
-            {ch.logo ? (
-              <img
-                src={ch.logo}
-                alt=""
-                className="w-10 h-10 rounded object-contain bg-black/40 shrink-0"
-                loading="lazy"
-              />
-            ) : (
-              <div className="w-10 h-10 rounded bg-white/[0.06] shrink-0 flex items-center justify-center text-[#555] text-xs">TV</div>
-            )}
-            <div className="flex-1 min-w-0">
-              <span className={cn(
-                'text-sm block truncate',
-                active ? 'text-accent font-semibold' : 'text-white'
-              )}>{ch.name}</span>
-            </div>
-            {active && (
-              <div className="w-2 h-2 rounded-full bg-accent shrink-0" />
-            )}
-          </button>
-        );
-      })}
+      {channels.map((ch) => (
+        <PortraitChannelRow
+          key={ch.id}
+          channel={ch}
+          active={ch.id === currentId}
+          programs={epgMap[ch.id]}
+          onSelect={onSelect}
+        />
+      ))}
     </div>
   );
 }
@@ -296,33 +353,53 @@ export default function Player() {
     }
   }, [getVideoElement, seek, resetOSDTimer]);
 
-  const handleExternalPlayer = useCallback((e: React.MouseEvent) => {
+  // Cast + AirPlay availability (driven by SDK / WebKit events)
+  const [castState, setCastState] = useState<'NO_DEVICES_AVAILABLE' | 'NOT_CONNECTED' | 'CONNECTING' | 'CONNECTED'>('NO_DEVICES_AVAILABLE');
+  const [airPlayAvailable, setAirPlayAvailable] = useState(false);
+
+  useEffect(() => {
+    return watchCastState(setCastState);
+  }, []);
+
+  useEffect(() => {
+    const video = getVideoElement();
+    if (!video) return;
+    return watchAirPlayAvailability(video, setAirPlayAvailable);
+  }, [getVideoElement]);
+
+  const handleCast = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     if (!currentChannel) return;
-    const streamUrl = getStreamUrl(currentChannel.id, currentChannel.url);
-    // Absolute URL for external app
+    const isRecording = currentChannel.id.startsWith('recording_');
+    const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
+    const streamUrl = isRecording
+      ? `${apiBaseUrl}${currentChannel.url}`
+      : getStreamUrl(currentChannel.id, currentChannel.url);
+    // Cast receiver needs an absolute URL
     const absoluteUrl = streamUrl.startsWith('http') ? streamUrl : `${window.location.origin}${streamUrl}`;
-    // Android intent — opens in VLC, MX Player, or any video handler
-    const intentUrl = `intent:${absoluteUrl}#Intent;type=video/*;end`;
-    window.location.href = intentUrl;
-  }, [currentChannel]);
+    const contentType: 'livetv' | 'movies' | 'series' | 'recording' = isRecording
+      ? 'recording'
+      : (currentChannel.contentType as 'livetv' | 'movies' | 'series');
+    const video = getVideoElement();
+    castMedia({
+      url: absoluteUrl,
+      title: currentProgram?.title || currentChannel.name,
+      mimeType: pickCastMime(contentType),
+      isLive: currentChannel.contentType === 'livetv',
+      startTime: video && !isCastConnected() ? video.currentTime : undefined,
+      poster: currentChannel.logo,
+    }).catch((err) => showToast(`Cast failed: ${err?.message || err}`));
+  }, [currentChannel, currentProgram, getVideoElement, showToast]);
 
-  // Open app in Safari for PiP / background playback (iPhone PWA workaround).
-  // Opens the same app URL with ?play=channelId so Safari loads the full player with PiP support.
-  const handleOpenInSafari = useCallback((e: React.MouseEvent) => {
+  const handleAirPlay = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!currentChannel) return;
-    const params = new URLSearchParams({ play: currentChannel.id });
-    // For episodes not in DB, pass the direct URL
-    if (currentChannel.url && currentChannel.id.startsWith('episode_')) {
-      params.set('url', currentChannel.url);
-    }
-    const safariUrl = `${window.location.origin}${window.location.pathname}?${params}`;
-    // window.open in standalone PWA opens Safari on iOS
-    window.open(safariUrl, '_blank');
-  }, [currentChannel]);
+    const video = getVideoElement();
+    if (video && canAirPlay(video)) showAirPlayPicker(video);
+  }, [getVideoElement]);
 
-  const showSafariButton = MOBILE && isIPhone() && isStandalonePWA();
+  const showCastButton = MOBILE && castState !== 'NO_DEVICES_AVAILABLE';
+  const showAirPlayButton = MOBILE && airPlayAvailable;
+  const castActive = castState === 'CONNECTED' || castState === 'CONNECTING';
 
   // Fullscreen: container-level on Android/iPad, native video fullscreen on iPhone
   const handleFullscreen = useCallback((e: React.MouseEvent) => {
@@ -475,7 +552,6 @@ export default function Player() {
   }, [currentChannel?.id, switchToChannel]);
 
   const seekDisplay = isSeeking ? seekValue : currentTime;
-  const isAndroid = /Android/i.test(navigator.userAgent);
   const remaining = hasDuration ? duration - seekDisplay : 0;
 
   // Swipe indicator labels
@@ -601,28 +677,32 @@ export default function Player() {
                     </svg>
                   </button>
                 )}
-                {MOBILE && isAndroid && (
+                {showCastButton && (
                   <button
-                    className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-transparent text-white shrink-0 tap-none cursor-pointer active:opacity-60"
-                    onClick={handleExternalPlayer}
-                    title="Open in external player"
+                    className={cn(
+                      'flex items-center justify-center w-10 h-10 rounded-lg border-none bg-transparent shrink-0 tap-none cursor-pointer active:opacity-60',
+                      castActive ? 'text-accent' : 'text-white'
+                    )}
+                    onClick={handleCast}
+                    title={castActive ? 'Casting' : 'Cast'}
                   >
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-                      <polyline points="15 3 21 3 21 9" />
-                      <line x1="10" y1="14" x2="21" y2="3" />
+                      <path d="M2 16.1A5 5 0 0 1 5.9 20" />
+                      <path d="M2 12.05A9 9 0 0 1 9.95 20" />
+                      <path d="M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" />
+                      <line x1="2" y1="20" x2="2.01" y2="20" />
                     </svg>
                   </button>
                 )}
-                {showSafariButton && (
+                {showAirPlayButton && (
                   <button
                     className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-transparent text-white shrink-0 tap-none cursor-pointer active:opacity-60"
-                    onClick={handleOpenInSafari}
-                    title="Open in Safari (background play)"
+                    onClick={handleAirPlay}
+                    title="AirPlay"
                   >
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <circle cx="12" cy="12" r="10" />
-                      <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76" />
+                      <path d="M5 17H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-1" />
+                      <polygon points="12 15 17 21 7 21 12 15" fill="currentColor" />
                     </svg>
                   </button>
                 )}
