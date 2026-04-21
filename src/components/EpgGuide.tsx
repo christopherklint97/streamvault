@@ -167,6 +167,8 @@ function GuideFilterDropdown({ categories, selectedGroup, onSelect }: { categori
 
 export default function EpgGuide() {
   const [channels, setChannels] = useState<Channel[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [epgData, setEpgData] = useState<EpgByChannel>({});
   const [loading, setLoading] = useState(true);
   const [timeOffset, setTimeOffset] = useState(0);
@@ -179,6 +181,7 @@ export default function EpgGuide() {
   const showToast = useAppStore((s) => s.showToastMessage);
   const createFromProgram = useRecordingStore((s) => s.createFromProgram);
   const gridRef = useRef<HTMLDivElement>(null);
+  const sentinelRef = useRef<HTMLDivElement>(null);
   const fetchIdRef = useRef(0);
 
   // The base time: current hour rounded down
@@ -196,35 +199,59 @@ export default function EpgGuide() {
     fetchCategories('livetv');
   }, [fetchCategories]);
 
-  // Fetch all channels when group changes
+  // Fetch first page when group changes
   useEffect(() => {
     const id = ++fetchIdRef.current;
     let cancelled = false;
     const group = selectedGroup && selectedGroup !== 'All' ? selectedGroup : undefined;
 
-    (async () => {
-      try {
-        const first = await fetchBrowseChannels(group, PAGE_SIZE);
-        if (cancelled || fetchIdRef.current !== id) return;
-        setChannels(first.channels);
-        setLoading(false);
-
-        let cursor = first.nextCursor;
-        while (cursor) {
-          const next = await fetchBrowseChannels(group, PAGE_SIZE, cursor);
-          if (cancelled || fetchIdRef.current !== id) return;
-          setChannels(prev => [...prev, ...next.channels]);
-          cursor = next.nextCursor;
-        }
-      } catch (err) {
-        if (cancelled || fetchIdRef.current !== id) return;
-        showToast(`Failed to load channels: ${err}`);
-        setLoading(false);
-      }
-    })();
+    fetchBrowseChannels(group, PAGE_SIZE).then(data => {
+      if (cancelled || fetchIdRef.current !== id) return;
+      setChannels(data.channels);
+      setNextCursor(data.nextCursor);
+      setLoading(false);
+    }).catch((err) => {
+      if (cancelled || fetchIdRef.current !== id) return;
+      showToast(`Failed to load channels: ${err}`);
+      setLoading(false);
+    });
 
     return () => { cancelled = true; };
   }, [selectedGroup, showToast]);
+
+  // Load the next page (triggered by scroll proximity)
+  const loadNextPage = useCallback(async () => {
+    if (loadingMore || !nextCursor) return;
+    const id = fetchIdRef.current;
+    const group = selectedGroup && selectedGroup !== 'All' ? selectedGroup : undefined;
+    setLoadingMore(true);
+    try {
+      const data = await fetchBrowseChannels(group, PAGE_SIZE, nextCursor);
+      if (fetchIdRef.current !== id) return;
+      setChannels(prev => [...prev, ...data.channels]);
+      setNextCursor(data.nextCursor);
+    } catch (err) {
+      showToast(`Failed to load more: ${err}`);
+    } finally {
+      if (fetchIdRef.current === id) setLoadingMore(false);
+    }
+  }, [loadingMore, nextCursor, selectedGroup, showToast]);
+
+  // Infinite scroll: observe a sentinel near the bottom of the grid
+  useEffect(() => {
+    if (!nextCursor) return;
+    const el = sentinelRef.current;
+    const root = gridRef.current;
+    if (!el || !root) return;
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries.some(e => e.isIntersecting)) loadNextPage();
+      },
+      { root, rootMargin: '600px 0px' }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [nextCursor, loadNextPage]);
 
   // Fetch EPG when channels or time window changes
   useEffect(() => {
@@ -396,6 +423,11 @@ export default function EpgGuide() {
               })}
             </div>
 
+            {nextCursor && (
+              <div ref={sentinelRef} className="py-4 text-center text-13 text-[#555]">
+                {loadingMore ? 'Loading more...' : ''}
+              </div>
+            )}
           </div>
         </>
       )}

@@ -285,6 +285,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
   // Local channel list state (not global store)
   const [channels, setChannels] = useState<Channel[]>([]);
   const [totalCount, setTotalCount] = useState(0);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [initialLoading, setInitialLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
 
@@ -303,6 +304,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
 
   const gridRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const sentinelRef = useRef<HTMLDivElement>(null);
   const fetchIdRef = useRef(0); // to discard stale responses
 
   // Fetch categories on mount
@@ -310,48 +312,77 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     fetchCategories(contentType);
   }, [contentType, fetchCategories]);
 
-  // Load all pages of channels for the current category
+  // Load the first page of channels for the current category
   useEffect(() => {
     const id = ++fetchIdRef.current;
     let cancelled = false;
     const group = selectedGroup && selectedGroup !== 'All' ? selectedGroup : undefined;
 
-    (async () => {
-      try {
-        const first = await apiBrowse(contentType, group, PAGE_SIZE);
-        if (cancelled || fetchIdRef.current !== id) return;
-        // If "All" returned 0 results but we have categories, auto-select the first one
-        if (first.total === 0 && !group && categories.length > 0) {
-          setSelectedGroup(categories[0].name);
-          return;
-        }
-        setChannels(first.channels);
-        setTotalCount(first.total);
-        setInitialLoading(false);
-        setFocusIndex(0);
-        setScrollOffset(0);
-        setLoadingMore(!!first.nextCursor);
-
-        // Continue loading remaining pages in the background
-        let cursor = first.nextCursor;
-        while (cursor) {
-          const next = await apiBrowse(contentType, group, PAGE_SIZE, cursor);
-          if (cancelled || fetchIdRef.current !== id) return;
-          setChannels(prev => [...prev, ...next.channels]);
-          setTotalCount(next.total);
-          cursor = next.nextCursor;
-        }
-        if (!cancelled && fetchIdRef.current === id) setLoadingMore(false);
-      } catch (err) {
-        if (cancelled || fetchIdRef.current !== id) return;
-        showToast(`Failed to load channels: ${err}`);
-        setInitialLoading(false);
-        setLoadingMore(false);
+    apiBrowse(contentType, group, PAGE_SIZE).then(data => {
+      if (cancelled || fetchIdRef.current !== id) return;
+      // If "All" returned 0 results but we have categories, auto-select the first one
+      if (data.total === 0 && !group && categories.length > 0) {
+        setSelectedGroup(categories[0].name);
+        return;
       }
-    })();
+      setChannels(data.channels);
+      setTotalCount(data.total);
+      setNextCursor(data.nextCursor);
+      setInitialLoading(false);
+      setFocusIndex(0);
+      setScrollOffset(0);
+    }).catch((err) => {
+      if (cancelled || fetchIdRef.current !== id) return;
+      showToast(`Failed to load channels: ${err}`);
+      setInitialLoading(false);
+    });
 
     return () => { cancelled = true; };
   }, [contentType, selectedGroup, categories, showToast]);
+
+  // Load the next page (triggered by scroll proximity)
+  const loadNextPage = useCallback(async () => {
+    if (loadingMore || !nextCursor) return;
+    const id = fetchIdRef.current;
+    const group = selectedGroup && selectedGroup !== 'All' ? selectedGroup : undefined;
+    setLoadingMore(true);
+    try {
+      const data = await apiBrowse(contentType, group, PAGE_SIZE, nextCursor);
+      if (fetchIdRef.current !== id) return;
+      setChannels(prev => [...prev, ...data.channels]);
+      setTotalCount(data.total);
+      setNextCursor(data.nextCursor);
+    } catch (err) {
+      showToast(`Failed to load more: ${err}`);
+    } finally {
+      if (fetchIdRef.current === id) setLoadingMore(false);
+    }
+  }, [loadingMore, nextCursor, selectedGroup, contentType, showToast]);
+
+  // Mobile infinite scroll: observe the sentinel near the bottom of the list
+  useEffect(() => {
+    if (!MOBILE || !nextCursor) return;
+    const el = sentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries.some(e => e.isIntersecting)) loadNextPage();
+      },
+      { rootMargin: '600px 0px' }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [nextCursor, loadNextPage]);
+
+  // TV infinite scroll: when the viewport approaches the end of loaded rows, fetch more
+  useEffect(() => {
+    if (MOBILE || !nextCursor) return;
+    const loadedRows = Math.ceil(channels.length / COLUMN_COUNT);
+    const visibleEndRow = Math.ceil((scrollOffset + CONTAINER_HEIGHT) / ROW_HEIGHT);
+    if (visibleEndRow >= loadedRows - BUFFER) {
+      loadNextPage();
+    }
+  }, [scrollOffset, channels.length, nextCursor, loadNextPage]);
 
   // Debounce search
   useEffect(() => {
@@ -370,6 +401,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
         if (cancelled || fetchIdRef.current !== id) return;
         setChannels(results);
         setTotalCount(results.length);
+        setNextCursor(null);
         setIsSearching(false);
         setFocusIndex(0);
         setScrollOffset(0);
@@ -546,9 +578,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     ? 'Loading...'
     : showingSearch
       ? `${channels.length} result${channels.length !== 1 ? 's' : ''}${isSearching ? ' (searching...)' : ''}`
-      : loadingMore
-        ? `${channels.length} of ${totalCount} item${totalCount !== 1 ? 's' : ''} (loading...)`
-        : `${channels.length} item${channels.length !== 1 ? 's' : ''}`;
+      : `${channels.length} of ${totalCount} item${totalCount !== 1 ? 's' : ''}${loadingMore ? ' (loading...)' : ''}`;
 
   const emptyMessage = initialLoading
     ? 'Loading...'
@@ -610,6 +640,11 @@ export default function ChannelList({ contentType }: ChannelListProps) {
                 <ChannelCard key={ch.id} channel={ch} onSelect={handleSelect} vindex={idx} />
               ))
             )}
+          </div>
+        )}
+        {nextCursor && !showingSearch && (
+          <div ref={sentinelRef} className="py-6 text-center text-13 text-[#555]">
+            {loadingMore ? 'Loading more...' : ''}
           </div>
         )}
       </div>
