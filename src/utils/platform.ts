@@ -4,6 +4,16 @@ let _isMobile: boolean | null = null;
 
 export function isMobile(): boolean {
   if (_isMobile !== null) return _isMobile;
+  // Tizen TVs always use the desktop layout. Check the `tizen` global (injected
+  // by the runtime before any script runs) and the data-tizen attribute set
+  // from index.html — UA detection alone has been unreliable across firmware
+  // versions.
+  if (typeof tizen !== 'undefined'
+      || document.documentElement.hasAttribute('data-tizen')
+      || /Tizen|SMART-TV/i.test(navigator.userAgent)) {
+    _isMobile = false;
+    return _isMobile;
+  }
   _isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
     || (navigator.maxTouchPoints > 0 && window.innerWidth < 1024);
   return _isMobile;

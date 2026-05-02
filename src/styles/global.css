@@ -148,6 +148,47 @@
 }
 
 /* ============================
+   Tizen TV (Chromium 85) overrides
+
+   Force the 1920×1080 desktop layout on Tizen regardless of how the runtime
+   reports viewport width or whether dynamic viewport units (dvh) work. The
+   `data-tizen` attribute is set by an inline script in index.html before any
+   styles are applied. Targeting it with selectors avoids relying on `lg:`
+   media queries, which have proven unreliable on Tizen 6.5.
+   ============================ */
+@supports not (height: 100dvh) {
+  .h-dvh { height: 100vh; }
+  .min-h-\[60dvh\] { min-height: 60vh; }
+  .max-h-\[60dvh\] { max-height: 60vh; }
+  .max-h-\[50dvh\] { max-height: 50vh; }
+}
+
+html[data-tizen],
+html[data-tizen] body,
+html[data-tizen] #root {
+  width: 1920px;
+  height: 1080px;
+  overflow: hidden;
+}
+html[data-tizen] [data-app-root] {
+  flex-direction: row;
+  width: 1920px;
+  height: 1080px;
+}
+html[data-tizen] [data-app-content] {
+  padding: 2rem 2.5rem;
+}
+html[data-tizen] [data-app-content][data-fullscreen] {
+  padding: 0;
+  width: 1920px;
+  height: 1080px;
+}
+html[data-tizen] #av-player[data-active] {
+  width: 1920px;
+  height: 1080px;
+}
+
+/* ============================
    Component styles that require
    pseudo-elements or complex selectors
    ============================ */

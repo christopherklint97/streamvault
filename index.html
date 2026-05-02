@@ -3,6 +3,18 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <script>
+      // Tizen TVs (Chromium 85): pin viewport to 1920×1080 and tag <html> so CSS
+      // can force the desktop layout independently of viewport-derived media
+      // queries (which are unreliable on Tizen) and `dvh` units (unsupported).
+      if (typeof tizen !== 'undefined' || /Tizen|SMART-TV/i.test(navigator.userAgent)) {
+        document.documentElement.setAttribute('data-tizen', '');
+        document.querySelector('meta[name=viewport]').setAttribute(
+          'content',
+          'width=1920, initial-scale=1.0, user-scalable=no'
+        );
+      }
+    </script>
     <meta name="theme-color" content="#0a0a12" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />

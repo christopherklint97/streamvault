@@ -543,13 +543,30 @@ export default function ChannelList({ contentType }: ChannelListProps) {
         searchRef.current?.focus({ preventScroll: true });
       }
     } else if (e.keyCode === KEY_CODES.RIGHT) {
-      if (focusZone === 'search' || focusZone === 'filter') return;
+      // Search -> filter trigger (spatial: search is left of filter on TV)
+      if (focusZone === 'search') {
+        e.preventDefault();
+        setFocusZone('filter');
+        requestAnimationFrame(() => {
+          const trigger = document.querySelector('[data-filter-trigger]') as HTMLElement | null;
+          trigger?.focus();
+        });
+        return;
+      }
+      if (focusZone === 'filter') return;
       if (focusIndex % COLUMN_COUNT < COLUMN_COUNT - 1 && focusIndex + 1 < count) {
         e.preventDefault();
         setFocusIndex(focusIndex + 1);
       }
     } else if (e.keyCode === KEY_CODES.LEFT) {
-      if (focusZone === 'search' || focusZone === 'filter') return;
+      // Filter trigger -> search
+      if (focusZone === 'filter') {
+        e.preventDefault();
+        setFocusZone('search');
+        searchRef.current?.focus({ preventScroll: true });
+        return;
+      }
+      if (focusZone === 'search') return;
       if (focusIndex % COLUMN_COUNT > 0) {
         e.preventDefault();
         setFocusIndex(focusIndex - 1);
@@ -703,6 +720,17 @@ export default function ChannelList({ contentType }: ChannelListProps) {
             placeholder={`Search ${label.toLowerCase()}...`}
             value={searchQuery}
             onChange={(e) => handleSearchChange(e.target.value)}
+            // Tizen sometimes swallows arrow keys inside <input>; route them
+            // explicitly to the same handler the parent div uses.
+            onKeyDown={(e) => {
+              if (
+                e.keyCode === KEY_CODES.DOWN ||
+                e.keyCode === KEY_CODES.UP ||
+                e.keyCode === KEY_CODES.RIGHT
+              ) {
+                handleKeyDown(e);
+              }
+            }}
             tabIndex={0}
           />
           {searchQuery && (
@@ -726,7 +754,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
         {channels.length === 0 ? (
           <div className="text-center py-10 lg:py-20 text-base lg:text-22 text-[#444] col-span-full">{emptyMessage}</div>
         ) : (
-          <div style={{ height: totalRows * ROW_HEIGHT, position: 'relative' }}>
+          <div style={{ height: totalRows * ROW_HEIGHT, position: 'relative', transform: `translateY(${-scrollOffset}px)`, willChange: 'transform' }}>
             {rows}
           </div>
         )}

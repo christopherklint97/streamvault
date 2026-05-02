@@ -6,6 +6,7 @@ import { useAppStore } from '../stores/appStore';
 import { useRecordingStore } from '../stores/recordingStore';
 import { isMobile } from '../utils/platform';
 import { cn } from '../utils/cn';
+import { KEY_CODES } from '../utils/keys';
 
 interface EpgProgram {
   channelId: string;
@@ -330,8 +331,49 @@ export default function EpgGuide() {
     return <div className="p-3 lg:p-5 h-full flex flex-col overflow-hidden"><div className="text-[#888] text-center py-[60px]">Loading guide...</div></div>;
   }
 
+  // TV: arrow keys scroll the guide grid (no per-cell focus management)
+  const containerRef = useRef<HTMLDivElement>(null);
+  const handleGridKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (MOBILE) return;
+    const grid = gridRef.current;
+    if (!grid) return;
+    const stepX = HOUR_WIDTH;
+    const stepY = ROW_HEIGHT * 2;
+    switch (e.keyCode) {
+      case KEY_CODES.DOWN:
+        e.preventDefault();
+        grid.scrollTop += stepY;
+        break;
+      case KEY_CODES.UP:
+        e.preventDefault();
+        grid.scrollTop -= stepY;
+        break;
+      case KEY_CODES.RIGHT:
+        e.preventDefault();
+        grid.scrollLeft += stepX;
+        break;
+      case KEY_CODES.LEFT:
+        e.preventDefault();
+        grid.scrollLeft -= stepX;
+        break;
+    }
+  }, []);
+
+  // Auto-focus the guide container on mount so arrow-key scrolling works
+  // immediately when arriving here from the sidebar
+  useEffect(() => {
+    if (MOBILE) return;
+    requestAnimationFrame(() => containerRef.current?.focus({ preventScroll: true }));
+  }, []);
+
   return (
-    <div className="p-3 lg:p-5 h-full flex flex-col overflow-hidden">
+    <div
+      ref={containerRef}
+      className="p-3 lg:p-5 h-full flex flex-col overflow-hidden outline-hidden"
+      onKeyDown={handleGridKeyDown}
+      tabIndex={MOBILE ? -1 : 0}
+      data-focusable
+    >
       <div className="flex items-center gap-2.5 lg:gap-5 mb-4 shrink-0 flex-wrap lg:flex-nowrap">
         <h1 className="text-20 lg:text-28 font-bold">TV Guide</h1>
         <GuideFilterDropdown
