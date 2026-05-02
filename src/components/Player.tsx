@@ -586,7 +586,7 @@ export default function Player() {
           No bg-black in portrait: the persistent <video> at z-998 provides the background. */}
       <div className={cn(
         'relative',
-        showPortraitList ? 'w-full aspect-video shrink-0' : MOBILE ? 'w-full h-full' : 'w-full h-full bg-black'
+        showPortraitList ? 'w-full aspect-video shrink-0' : IS_TV ? 'w-full h-full bg-black' : 'w-full h-full'
       )}>
         {/* Video container — on Tizen, AVPlay needs its own object div.
             On HTML5, the persistent <video> in App.tsx is shown via z-index. */}
