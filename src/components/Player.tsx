@@ -443,7 +443,9 @@ export default function Player() {
     if (doc.fullscreenElement || doc.webkitFullscreenElement) {
       if (doc.exitFullscreen) doc.exitFullscreen();
       else if (doc.webkitExitFullscreen) doc.webkitExitFullscreen();
-      try { screen.orientation.unlock(); } catch (err) { showToast(`Orientation unlock failed: ${err}`); }
+      if (MOBILE) {
+        try { screen.orientation.unlock(); } catch { /* desktop: no orientation API */ }
+      }
     } else {
       const goFs = el.requestFullscreen
         ? el.requestFullscreen()
@@ -451,10 +453,11 @@ export default function Player() {
           ? el.webkitRequestFullscreen()
           : Promise.resolve();
       (goFs as Promise<void>).then(() => {
+        if (!MOBILE) return;
         try {
           const orientation = screen.orientation as ScreenOrientation & { lock?: (o: string) => Promise<void> };
-          orientation.lock?.('landscape')?.catch((err) => showToast(`Orientation lock failed: ${err}`));
-        } catch (err) { showToast(`Orientation lock failed: ${err}`); }
+          orientation.lock?.('landscape')?.catch(() => { /* portrait-locked devices: ignore */ });
+        } catch { /* desktop: no orientation API */ }
       }).catch((err) => showToast(`Fullscreen failed: ${err}`));
     }
   }, [getVideoElement, showToast]);
