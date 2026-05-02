@@ -166,7 +166,7 @@ export default function Sidebar() {
 
   // Desktop/TV: vertical sidebar (unchanged)
   return (
-    <nav className="flex w-sidebar h-tv flex-col items-center pt-5 shrink-0 z-[100] border-r border-white/[0.06] bg-dark-sidebar [contain:layout_style_paint]" ref={sidebarRef}>
+    <nav className="flex w-sidebar h-full flex-col items-center pt-5 shrink-0 z-[100] border-r border-white/[0.06] bg-dark-sidebar [contain:layout_style_paint]" ref={sidebarRef}>
       <div className="text-24 font-bold text-accent mb-8">SV</div>
       <ul className="flex flex-col gap-1 w-full list-none">
         {NAV_ITEMS.map((item, index) => (

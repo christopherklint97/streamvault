@@ -200,7 +200,7 @@ function AppContent() {
   };
 
   return (
-    <div data-app-root className="flex flex-col w-full h-dvh lg:flex-row lg:w-tv lg:h-tv overflow-hidden">
+    <div data-app-root className="flex flex-col w-full h-dvh lg:flex-row overflow-hidden">
       {!isOnline && (
         <div className="fixed top-0 left-0 right-0 z-[9999] p-2 lg:p-2.5 bg-[#c0392b] text-white text-center text-sm lg:text-18">
           No network connection. Some features may be unavailable.
@@ -237,7 +237,7 @@ function AppContent() {
         {...(currentView === 'player' ? { 'data-fullscreen': '' } : {})}
         className={cn(
           'flex-1 overflow-y-auto p-4 pt-[calc(8px+env(safe-area-inset-top,0px))] pb-[72px] min-h-0 lg:p-8 lg:px-10 lg:pb-8',
-          currentView === 'player' && '!p-0 !pb-0 w-full h-dvh lg:!w-tv lg:!h-tv'
+          currentView === 'player' && '!p-0 !pb-0 w-full h-dvh'
         )}
         onKeyDown={currentView !== 'player' ? handleMainKeyDown : undefined}
       >

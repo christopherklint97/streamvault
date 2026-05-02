@@ -564,7 +564,7 @@ export default function Player() {
     <div
       ref={containerRef}
       className={cn(
-        'w-full fixed lg:static top-0 left-0 right-0 bottom-0 z-[999] lg:w-tv lg:h-tv',
+        'w-full fixed lg:static top-0 left-0 right-0 bottom-0 z-[999]',
         showPortraitList ? 'h-dvh flex flex-col' : 'h-dvh relative'
       )}
       tabIndex={0}

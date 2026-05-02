@@ -3,6 +3,8 @@ import { execSync } from 'child_process'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
+import postcss from 'postcss'
+import postcssPresetEnv from 'postcss-preset-env'
 
 // When VITE_SERVER_URL is explicitly set (e.g. "" for Docker/PWA), use it.
 // Otherwise detect LAN IP for Tizen TV dev builds.
@@ -11,70 +13,58 @@ const serverUrl = process.env.VITE_SERVER_URL !== undefined
   : `http://${process.env.VITE_SERVER_IP || execSync('hostname -I').toString().trim().split(/\s+/)[0]}:3002`;
 
 /**
- * Tailwind v4 wraps everything in `@layer` (cascade layers), which Chromium
- * <99 (incl. Tizen 6.5 / Chromium 85) treats as an unknown at-rule and skips
- * entirely — leaving zero theme variables and zero utility classes applied.
- * Flatten `@layer name { ... }` blocks to plain CSS so the styles still work
- * on Tizen. Nested at-rules (@media, @supports, @keyframes) are preserved.
+ * Lower modern CSS to syntax old Samsung Tizen browsers understand.
+ *
+ * Why: Tailwind v4 emits `@layer`, `:is()`/`:where()`, `oklch()` colors, and
+ * other features that Chromium <99 silently drops, leaving the TV with no
+ * styles. We target Chrome 76 to cover Tizen 6.0 (2021 sets) and up.
+ *
+ * Runs at `generateBundle` (post-build) on the final CSS asset so it catches
+ * everything Tailwind, Vite, and any plugin emit — regardless of where each
+ * one sits in the transform pipeline.
  */
-function flattenCascadeLayers(): Plugin {
+function lowerModernCss(): Plugin {
+  const processor = postcss([
+    postcssPresetEnv({
+      // stage 2 = features approaching standard; conservative default.
+      stage: 2,
+      browsers: 'Chrome >= 76',
+      features: {
+        // Tailwind's @theme generates plenty of `var(--foo)` references —
+        // Chromium 76 supports custom properties natively, no need to inline.
+        'custom-properties': false,
+        // Explicit opt-ins for things we know break on old Tizen:
+        'cascade-layers': true,
+        'is-pseudo-class': true,
+        'has-pseudo-class': true,
+        'oklab-function': true,
+        'color-functional-notation': true,
+      },
+    }),
+  ]);
+
   return {
-    name: 'flatten-cascade-layers',
+    name: 'lower-modern-css',
     enforce: 'post',
-    generateBundle(_, bundle) {
+    async generateBundle(_, bundle) {
       for (const fileName of Object.keys(bundle)) {
         const asset = bundle[fileName];
         if (!fileName.endsWith('.css') || asset.type !== 'asset') continue;
         const css = typeof asset.source === 'string'
           ? asset.source
           : new TextDecoder().decode(asset.source as Uint8Array);
-        asset.source = flatten(css);
+        const result = await processor.process(css, { from: undefined });
+        asset.source = result.css;
       }
     },
   };
-}
-
-function flatten(css: string): string {
-  let out = '';
-  let i = 0;
-  while (i < css.length) {
-    if (css.startsWith('@layer', i)) {
-      // Skip whitespace and any layer name(s) up to `{` or `;`
-      let j = i + 6;
-      while (j < css.length && css[j] !== '{' && css[j] !== ';') j++;
-      if (css[j] === ';') {
-        // `@layer name;` — declaration without body, drop it
-        i = j + 1;
-        continue;
-      }
-      if (css[j] !== '{') break;
-      // Find matching closing brace
-      let depth = 1;
-      let k = j + 1;
-      while (k < css.length && depth > 0) {
-        const ch = css[k];
-        if (ch === '{') depth++;
-        else if (ch === '}') {
-          depth--;
-          if (depth === 0) break;
-        }
-        k++;
-      }
-      // Recurse so nested @layer blocks are also flattened
-      out += flatten(css.slice(j + 1, k));
-      i = k + 1;
-      continue;
-    }
-    out += css[i++];
-  }
-  return out;
 }
 
 export default defineConfig({
   plugins: [
     tailwindcss(),
     react(),
-    flattenCascadeLayers(),
+    lowerModernCss(),
     VitePWA({
       registerType: 'autoUpdate',
       manifest: {
@@ -143,6 +133,7 @@ export default defineConfig({
   },
   build: {
     target: 'es2017',
+    cssTarget: ['chrome76'],
     outDir: 'dist',
   },
   server: {
