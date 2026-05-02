@@ -181,19 +181,19 @@ function FilterDropdown({ categories, selectedGroup, onSelect }: FilterDropdownP
     <div className="relative shrink-0" ref={containerRef} onKeyDown={handleKeyDown}>
       <button
         className={cn(
-          'flex items-center gap-2 py-2.5 px-3.5 lg:py-3 lg:px-[18px] bg-surface border-2 border-surface-border rounded-lg text-sm lg:text-17 font-semibold text-[#ccc] whitespace-nowrap transition-all duration-150 w-full lg:w-auto lg:max-w-[320px] tap-none',
+          'flex items-center gap-2 py-2.5 px-3.5 lg:py-3 lg:px-[18px] bg-surface border-2 border-surface-border rounded-lg text-sm lg:text-17 font-semibold text-[#ccc] whitespace-nowrap transition-all duration-150 w-full lg:w-[320px] tap-none',
           open && 'border-accent text-white'
         )}
         data-filter-trigger
         onClick={handleToggle}
         tabIndex={0}
       >
-        <span className="overflow-hidden text-ellipsis">{label}</span>
+        <span className="flex-1 overflow-hidden text-ellipsis text-left">{label}</span>
         <span className="text-12 text-[#555] shrink-0">{open ? '\u25B2' : '\u25BC'}</span>
       </button>
 
       {open && (
-        <div className="absolute top-[calc(100%+6px)] left-0 right-0 lg:min-w-[320px] lg:max-w-[460px] bg-surface border-2 border-surface-border rounded-[10px] z-[100] flex flex-col animate-fade-in-fast shadow-[0_12px_40px_rgba(0,0,0,0.6)] max-h-[60dvh] lg:max-h-none">
+        <div className="absolute top-[calc(100%+6px)] left-0 right-0 bg-surface border-2 border-surface-border rounded-[10px] z-[100] flex flex-col animate-fade-in-fast shadow-[0_12px_40px_rgba(0,0,0,0.6)] max-h-[60dvh] lg:max-h-[480px]">
           <input
             ref={inputRef}
             className="py-2.5 px-3 lg:py-3 lg:px-3.5 text-sm lg:text-17 bg-dark-deep border-none border-b border-surface-border rounded-t-[10px] text-[#e8eaed] outline-hidden placeholder:text-[#444]"
@@ -330,7 +330,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
       setNextCursor(data.nextCursor);
       setInitialLoading(false);
       setFocusIndex(0);
-      setScrollOffset(0);
+      if (gridRef.current) gridRef.current.scrollTop = 0;
     }).catch((err) => {
       if (cancelled || fetchIdRef.current !== id) return;
       showToast(`Failed to load channels: ${err}`);
@@ -488,7 +488,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     if (value.trim()) setIsSearching(true);
     else setIsSearching(false);
     setFocusIndex(0);
-    setScrollOffset(0);
+    if (gridRef.current) gridRef.current.scrollTop = 0;
     setFocusZone('search');
     setBrowseState(viewName, { searchQuery: value });
   }, [setBrowseState, viewName]);
@@ -511,14 +511,14 @@ export default function ChannelList({ contentType }: ChannelListProps) {
         if (count > 0) {
           setFocusZone('grid');
           setFocusIndex(0);
-          setScrollOffset(0);
+          if (gridRef.current) gridRef.current.scrollTop = 0;
         }
       } else if (focusIndex + COLUMN_COUNT < count) {
         const next = focusIndex + COLUMN_COUNT;
         setFocusIndex(next);
         const nextBottom = (Math.floor(next / COLUMN_COUNT) + 1) * ROW_HEIGHT;
-        if (nextBottom > scrollOffset + CONTAINER_HEIGHT) {
-          setScrollOffset(nextBottom - CONTAINER_HEIGHT);
+        if (nextBottom > scrollOffset + CONTAINER_HEIGHT && gridRef.current) {
+          gridRef.current.scrollTop = nextBottom - CONTAINER_HEIGHT;
         }
       }
     } else if (e.keyCode === KEY_CODES.UP) {
@@ -528,8 +528,8 @@ export default function ChannelList({ contentType }: ChannelListProps) {
           const prev = focusIndex - COLUMN_COUNT;
           setFocusIndex(prev);
           const prevTop = Math.floor(prev / COLUMN_COUNT) * ROW_HEIGHT;
-          if (prevTop < scrollOffset) {
-            setScrollOffset(prevTop);
+          if (prevTop < scrollOffset && gridRef.current) {
+            gridRef.current.scrollTop = prevTop;
           }
         } else {
           setFocusZone('filter');
@@ -750,11 +750,15 @@ export default function ChannelList({ contentType }: ChannelListProps) {
         />
       </div>
       <div className="text-13 lg:text-base text-[#555]">{countText}</div>
-      <div className="h-[900px] overflow-hidden relative [contain:strict] py-2 px-1 [content-visibility:auto]" ref={gridRef}>
+      <div
+        className="h-[900px] overflow-y-auto relative py-2 px-1 [content-visibility:auto]"
+        ref={gridRef}
+        onScroll={(e) => setScrollOffset((e.target as HTMLDivElement).scrollTop)}
+      >
         {channels.length === 0 ? (
           <div className="text-center py-10 lg:py-20 text-base lg:text-22 text-[#444] col-span-full">{emptyMessage}</div>
         ) : (
-          <div style={{ height: totalRows * ROW_HEIGHT, position: 'relative', transform: `translateY(${-scrollOffset}px)`, willChange: 'transform' }}>
+          <div style={{ height: totalRows * ROW_HEIGHT, position: 'relative' }}>
             {rows}
           </div>
         )}

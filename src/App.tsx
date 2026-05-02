@@ -236,7 +236,7 @@ function AppContent() {
         data-app-content
         {...(currentView === 'player' ? { 'data-fullscreen': '' } : {})}
         className={cn(
-          'flex-1 overflow-y-auto p-4 pt-[calc(8px+env(safe-area-inset-top,0px))] pb-[72px] min-h-0 lg:p-8 lg:px-10 lg:pb-8',
+          'flex-1 overflow-y-auto overflow-x-hidden p-4 pt-[calc(8px+env(safe-area-inset-top,0px))] pb-[72px] min-h-0 lg:p-8 lg:px-10 lg:pb-8',
           currentView === 'player' && '!p-0 !pb-0 w-full h-dvh'
         )}
         onKeyDown={currentView !== 'player' ? handleMainKeyDown : undefined}

@@ -23,6 +23,10 @@ import type { Channel } from '../types';
 
 const OSD_TIMEOUT = 5000;
 const MOBILE = isMobile();
+const IS_TV = typeof tizen !== 'undefined';
+// Desktop browsers + mobile show on-screen controls; only Tizen relies on
+// the remote and hides them by default.
+const SHOW_OSD_CONTROLS = !IS_TV;
 const SWIPE_THRESHOLD = 60;
 
 function formatTime(seconds: number): string {
@@ -294,8 +298,12 @@ export default function Player() {
         play();
       }
     }
-    // Don't stop on unmount — video keeps playing in background
-  }, [channelId, play]);
+    // Mobile: keep playing in the background (PWA/PiP). Desktop & TV: stop
+    // when the user leaves the player view.
+    return () => {
+      if (!MOBILE) stop();
+    };
+  }, [channelId, play, stop]);
 
   // Show OSD initially, auto-hide after timeout
   useEffect(() => {
@@ -569,6 +577,7 @@ export default function Player() {
       )}
       tabIndex={0}
       onKeyDown={handleKeyDown}
+      onMouseMove={!MOBILE && !IS_TV ? resetOSDTimer : undefined}
     >
       {/* Video section — in portrait live mode this is aspect-video, otherwise full.
           No bg-black in portrait: the persistent <video> at z-998 provides the background. */}
@@ -625,14 +634,14 @@ export default function Player() {
           </div>
         )}
 
-        {/* Tap/swipe zone — sits above video, below controls; toggles OSD on tap, swipe to switch channels */}
-        {MOBILE && (
+        {/* Click/tap/swipe zone — toggles OSD; mobile also handles channel-switch swipes */}
+        {SHOW_OSD_CONTROLS && (
           <div
             className="absolute inset-0 z-[2]"
             onClick={handleTapZone}
-            onTouchStart={handleTouchStart}
-            onTouchMove={handleTouchMove}
-            onTouchEnd={handleTouchEnd}
+            onTouchStart={MOBILE ? handleTouchStart : undefined}
+            onTouchMove={MOBILE ? handleTouchMove : undefined}
+            onTouchEnd={MOBILE ? handleTouchEnd : undefined}
           />
         )}
 
@@ -644,7 +653,7 @@ export default function Player() {
           )}>
             {/* Top bar */}
             <div className={cn('flex items-center gap-3 pt-[calc(12px+env(safe-area-inset-top,0px))] pb-8 px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] bg-gradient-to-b from-black/[0.85] to-transparent lg:gap-3 lg:pt-6 lg:px-10 lg:pb-10', showOSD && 'pointer-events-auto')}>
-              {MOBILE && (
+              {SHOW_OSD_CONTROLS && (
                 <button
                   className="flex items-center justify-center w-10 h-10 bg-transparent border-none text-white shrink-0 tap-none active:opacity-60"
                   onClick={(e) => { e.stopPropagation(); handleBack(); }}
@@ -662,7 +671,7 @@ export default function Player() {
               </div>
               {/* Top-right action buttons */}
               <div className="flex items-center gap-1" data-player-controls>
-                {MOBILE && isLive && (
+                {SHOW_OSD_CONTROLS && isLive && (
                   <button
                     className={cn(
                       'flex items-center justify-center w-10 h-10 rounded-lg border-none bg-transparent text-white shrink-0 tap-none cursor-pointer active:opacity-60',
@@ -706,7 +715,7 @@ export default function Player() {
                     </svg>
                   </button>
                 )}
-                {MOBILE && (
+                {SHOW_OSD_CONTROLS && (
                   <button
                     className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-transparent text-white shrink-0 tap-none cursor-pointer active:opacity-60"
                     onClick={handleFullscreen}
@@ -733,7 +742,7 @@ export default function Player() {
             </div>
 
             {/* Center play/skip controls */}
-            {MOBILE && (
+            {SHOW_OSD_CONTROLS && (
               <div className={cn('absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-10', showOSD && 'pointer-events-auto')} data-player-controls>
                 {!isLive && (
                   <button
