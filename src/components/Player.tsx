@@ -428,15 +428,15 @@ export default function Player() {
       return;
     }
 
-    // Android / iPad: fullscreen on the container to keep custom controls
-    const container = containerRef.current;
-    if (!container) return;
-
+    // Android / iPad / Desktop: fullscreen the document root so both the
+    // persistent <video> (sibling of <main>) and the Player's OSD overlay are
+    // descendants of the fullscreen element. Targeting the Player container
+    // alone hides the video, which lives outside it.
     const doc = document as Document & {
       webkitFullscreenElement?: Element | null;
       webkitExitFullscreen?: () => Promise<void>;
     };
-    const el = container as HTMLElement & {
+    const el = document.documentElement as HTMLElement & {
       webkitRequestFullscreen?: () => Promise<void>;
     };
 
