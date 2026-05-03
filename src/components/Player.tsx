@@ -313,6 +313,20 @@ export default function Player() {
     };
   }, []);
 
+  // Tizen AVPlay is a hardware overlay behind the webview — body must be
+  // transparent here for the video to show through.
+  useEffect(() => {
+    if (!IS_TV) return;
+    const prevBody = document.body.style.background;
+    const prevRoot = document.documentElement.style.background;
+    document.body.style.background = 'transparent';
+    document.documentElement.style.background = 'transparent';
+    return () => {
+      document.body.style.background = prevBody;
+      document.documentElement.style.background = prevRoot;
+    };
+  }, []);
+
   // Auto-PiP when the app is backgrounded (home button, app switcher).
   // Uses visibilitychange since autoPictureInPicture is not reliable on iPhone PWAs.
   useEffect(() => {
@@ -583,10 +597,11 @@ export default function Player() {
       onMouseMove={!MOBILE && !IS_TV ? resetOSDTimer : undefined}
     >
       {/* Video section — in portrait live mode this is aspect-video, otherwise full.
-          No bg-black in portrait: the persistent <video> at z-998 provides the background. */}
+          On Tizen, AVPlay renders on a hardware plane behind the webview, so this
+          area must stay transparent (a bg-black would cover the video). */}
       <div className={cn(
         'relative',
-        showPortraitList ? 'w-full aspect-video shrink-0' : IS_TV ? 'w-full h-full bg-black' : 'w-full h-full'
+        showPortraitList ? 'w-full aspect-video shrink-0' : 'w-full h-full'
       )}>
         {/* Video container — on Tizen, AVPlay needs its own object div.
             On HTML5, the persistent <video> in App.tsx is shown via z-index. */}
