@@ -22,6 +22,19 @@ let activeMpegtsPlayer: MpegtsType.Player | null = null;
 let bgProgressInterval: ReturnType<typeof setInterval> | null = null;
 let bgBufferTimer: ReturnType<typeof setTimeout> | null = null;
 
+// Tizen AVPlay live-stream resilience: auto-retry on stalls and unexpected
+// stream completions. Throttled so a permanently-broken stream stops looping.
+let avplayStallTimer: ReturnType<typeof setTimeout> | null = null;
+let avplayLastRetryAt = 0;
+const AVPLAY_STALL_TIMEOUT_MS = 8000;
+const AVPLAY_RETRY_COOLDOWN_MS = 2000;
+function clearAvplayStallTimer() {
+  if (avplayStallTimer) {
+    clearTimeout(avplayStallTimer);
+    avplayStallTimer = null;
+  }
+}
+
 /** Save watch progress using the current video/avplay state */
 function saveProgressNow() {
   const channel = usePlayerStore.getState().currentChannel;
@@ -108,6 +121,7 @@ function stopPlayback() {
   }
 
   if (typeof webapis !== 'undefined' && webapis.avplay) {
+    clearAvplayStallTimer();
     try {
       webapis.avplay.stop();
       webapis.avplay.close();
@@ -185,11 +199,31 @@ export function usePlayer(): {
     // Try AVPlay first (Samsung Tizen), fallback to HTML5 video
     if (typeof webapis !== 'undefined' && webapis.avplay) {
       log.info('Using Tizen AVPlay backend');
+      const isLive = channel.contentType === 'livetv';
       try {
         const avplay = webapis.avplay;
+        clearAvplayStallTimer();
         avplay.close();
         avplay.open(channel.url);
         avplay.setDisplayRect(0, 0, 1920, 1080);
+
+        // Bigger buffer for live MPEG-TS over HTTP — Tizen's defaults stall
+        // frequently on flaky upstream feeds. Catch unsupported-call errors so
+        // older firmware doesn't break.
+        try {
+          avplay.setBufferingParam?.(
+            'PLAYER_BUFFER_FOR_PLAY',
+            'PLAYER_BUFFER_SIZE_IN_SECOND',
+            isLive ? 10 : 5
+          );
+          avplay.setBufferingParam?.(
+            'PLAYER_BUFFER_FOR_RESUME',
+            'PLAYER_BUFFER_SIZE_IN_SECOND',
+            isLive ? 10 : 5
+          );
+        } catch (err) {
+          log.warn('AVPlay: setBufferingParam unsupported', err);
+        }
 
         const tizenPlayer = new TizenPlayer();
         tizenPlayer.onSubtitleText = (text: string) => {
@@ -197,17 +231,56 @@ export function usePlayer(): {
         };
         playerRef.current = tizenPlayer;
 
+        // Throttled retry — used by stall watchdog, onerror, and onstreamcompleted (live).
+        const tryAutoRetry = (reason: string) => {
+          const now = Date.now();
+          if (now - avplayLastRetryAt < AVPLAY_RETRY_COOLDOWN_MS) {
+            log.warn(`AVPlay: ${reason} — skipping retry (cooldown)`);
+            return false;
+          }
+          avplayLastRetryAt = now;
+          log.warn(`AVPlay: ${reason} — auto-retrying`);
+          clearAvplayStallTimer();
+          play();
+          return true;
+        };
+
+        const armStallWatchdog = () => {
+          clearAvplayStallTimer();
+          avplayStallTimer = setTimeout(() => {
+            avplayStallTimer = null;
+            tryAutoRetry('stall watchdog fired');
+          }, AVPLAY_STALL_TIMEOUT_MS);
+        };
+
         avplay.setListener({
-          onbufferingstart: () => { log.debug('AVPlay: buffering start'); setStatus('loading'); },
-          onbufferingcomplete: () => { log.debug('AVPlay: buffering complete'); setStatus('playing'); },
-          oncurrentplaytime: () => {},
+          onbufferingstart: () => {
+            log.debug('AVPlay: buffering start');
+            setStatus('loading');
+            armStallWatchdog();
+          },
+          onbufferingcomplete: () => {
+            log.debug('AVPlay: buffering complete');
+            setStatus('playing');
+            clearAvplayStallTimer();
+          },
+          oncurrentplaytime: () => {
+            // Progress means the stream is alive — cancel any pending watchdog.
+            clearAvplayStallTimer();
+          },
           onevent: () => {},
-          onerror: () => { log.error('AVPlay: playback error'); setError('Playback error'); },
+          onerror: () => {
+            log.error('AVPlay: playback error');
+            if (isLive && tryAutoRetry('onerror')) return;
+            setError('Playback error');
+          },
           onsubtitlechange: (_duration: number, text: string) => {
             tizenPlayer.onSubtitleText?.(text);
           },
           onstreamcompleted: () => {
             log.info('AVPlay: stream completed');
+            // Live streams "completing" usually means the upstream dropped us — retry.
+            if (isLive && tryAutoRetry('live stream completed')) return;
             saveProgressNow();
             setStatus('idle');
           },
@@ -225,7 +298,11 @@ export function usePlayer(): {
             startBgProgressTracking();
             setupMediaSession(channel.name);
           },
-          () => { log.error('AVPlay: prepare failed'); setError('Failed to prepare stream'); }
+          () => {
+            log.error('AVPlay: prepare failed');
+            if (isLive && tryAutoRetry('prepare failed')) return;
+            setError('Failed to prepare stream');
+          }
         );
       } catch (e) {
         log.error('AVPlay: init failed', e);

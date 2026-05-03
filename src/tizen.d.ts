@@ -27,6 +27,14 @@ type AVPlayState =
   | 'PLAYING'
   | 'PAUSED';
 
+type AVPlayBufferOption =
+  | 'PLAYER_BUFFER_FOR_PLAY'
+  | 'PLAYER_BUFFER_FOR_RESUME';
+
+type AVPlayBufferType =
+  | 'PLAYER_BUFFER_SIZE_IN_BYTE'
+  | 'PLAYER_BUFFER_SIZE_IN_SECOND';
+
 interface AVPlayManager {
   open(url: string): void;
   close(): void;
@@ -55,6 +63,12 @@ interface AVPlayManager {
   getCurrentTime(): number;
   setSubtitlePosition?(position: number): void;
   getSubtitleLanguage?(): string;
+  setBufferingParam?(
+    option: AVPlayBufferOption,
+    type: AVPlayBufferType,
+    size: number
+  ): void;
+  setStreamingProperty?(propertyType: string, value: string): void;
 }
 
 interface AppCommonScreenSaverStateEnum {

@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { KEY_CODES } from '../utils/keys';
 import { cn } from '../utils/cn';
@@ -7,6 +7,8 @@ export default function ExitDialog() {
   const showExitDialog = useAppStore((s) => s.showExitDialog);
   const hideExitConfirm = useAppStore((s) => s.hideExitConfirm);
   const [focusedButton, setFocusedButton] = useState<'yes' | 'no'>('no');
+  const yesRef = useRef<HTMLButtonElement>(null);
+  const noRef = useRef<HTMLButtonElement>(null);
 
   const handleExit = useCallback(() => {
     try {
@@ -16,16 +18,28 @@ export default function ExitDialog() {
     }
   }, []);
 
+  // Pull focus to the dialog when it opens — Tizen ignores autoFocus on
+  // dynamically rendered content, so without this the underlying view keeps
+  // focus and remote keys never reach this dialog. The button's onFocus then
+  // syncs focusedButton state, no setState-in-effect required.
+  useEffect(() => {
+    if (!showExitDialog) return;
+    requestAnimationFrame(() => noRef.current?.focus());
+  }, [showExitDialog]);
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       switch (e.keyCode) {
         case KEY_CODES.LEFT:
         case KEY_CODES.RIGHT:
           e.preventDefault();
-          setFocusedButton((prev) => (prev === 'yes' ? 'no' : 'yes'));
+          e.stopPropagation();
+          // Move DOM focus; onFocus on the target button updates focusedButton.
+          (focusedButton === 'yes' ? noRef : yesRef).current?.focus();
           break;
         case KEY_CODES.ENTER:
           e.preventDefault();
+          e.stopPropagation();
           if (focusedButton === 'yes') {
             handleExit();
           } else {
@@ -34,6 +48,7 @@ export default function ExitDialog() {
           break;
         case KEY_CODES.BACK:
           e.preventDefault();
+          e.stopPropagation();
           hideExitConfirm();
           break;
       }
@@ -50,6 +65,7 @@ export default function ExitDialog() {
         <p className="text-sm lg:text-18 text-[#666] mb-5 lg:mb-7">Are you sure you want to exit?</p>
         <div className="flex gap-2.5 lg:gap-4 justify-center">
           <button
+            ref={yesRef}
             className={cn(
               'py-2.5 px-5 lg:py-3 lg:px-9 border-2 border-[#222] rounded-[10px] text-sm lg:text-18 font-semibold bg-surface-border text-[#ccc] transition-all duration-150 focus:border-accent focus:text-white focus:scale-[1.04]',
               focusedButton === 'yes' && 'border-accent bg-accent text-black'
@@ -62,13 +78,13 @@ export default function ExitDialog() {
             Yes
           </button>
           <button
+            ref={noRef}
             className={cn(
               'py-2.5 px-5 lg:py-3 lg:px-9 border-2 border-[#222] rounded-[10px] text-sm lg:text-18 font-semibold bg-surface-border text-[#ccc] transition-all duration-150 focus:border-accent focus:text-white focus:scale-[1.04]',
               focusedButton === 'no' && 'border-accent bg-accent text-black'
             )}
             data-focusable
             tabIndex={0}
-            autoFocus
             onClick={hideExitConfirm}
             onFocus={() => setFocusedButton('no')}
           >

@@ -201,6 +201,18 @@ function FilterDropdown({ categories, selectedGroup, onSelect }: FilterDropdownP
             placeholder="Search categories..."
             value={filterQuery}
             onChange={e => { setFilterQuery(e.target.value); setFocusIdx(-1); }}
+            // Tizen swallows arrow / ENTER keys inside <input> before they
+            // bubble to the parent's onKeyDown — route them explicitly.
+            onKeyDown={(e) => {
+              if (
+                e.keyCode === KEY_CODES.DOWN ||
+                e.keyCode === KEY_CODES.UP ||
+                e.keyCode === KEY_CODES.ENTER ||
+                e.keyCode === KEY_CODES.BACK
+              ) {
+                handleKeyDown(e);
+              }
+            }}
           />
           <div className="max-h-[50dvh] lg:max-h-[400px] overflow-y-auto p-1 [-webkit-overflow-scrolling:touch]" ref={listRef}>
             <button

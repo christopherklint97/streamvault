@@ -327,6 +327,14 @@ export default function Player() {
     };
   }, []);
 
+  // TV: pull DOM focus into the Player container so remote keys (PLAY/PAUSE,
+  // RED-refresh, GREEN-subs, etc.) reach handleKeyDown. Without this, focus
+  // stays on whatever item the user pressed in the channel list.
+  useEffect(() => {
+    if (!IS_TV) return;
+    requestAnimationFrame(() => containerRef.current?.focus());
+  }, []);
+
   // Auto-PiP when the app is backgrounded (home button, app switcher).
   // Uses visibilitychange since autoPictureInPicture is not reliable on iPhone PWAs.
   useEffect(() => {
@@ -562,13 +570,18 @@ export default function Player() {
           e.preventDefault();
           handleSkip(-10);
           break;
+        case KEY_CODES.RED:
+          e.preventDefault();
+          retry();
+          showToast('Refreshing stream...');
+          break;
         case KEY_CODES.GREEN:
           e.preventDefault();
           cycleSubtitles();
           break;
       }
     },
-    [resetOSDTimer, playerState.status, retry, stop, togglePlay, handleSkip, cycleSubtitles]
+    [resetOSDTimer, playerState.status, retry, stop, togglePlay, handleSkip, cycleSubtitles, showToast]
   );
 
   const handleChannelSelect = useCallback((ch: Channel) => {
@@ -841,8 +854,14 @@ export default function Player() {
                 </div>
               )}
 
-              {/* Subtitle indicator (TV only) */}
-              {!MOBILE && (
+              {/* TV remote-key hints */}
+              {IS_TV && (
+                <div className="flex items-center gap-4 mt-1 text-sm text-[#555]">
+                  <span><span className="inline-block w-2.5 h-2.5 rounded-full bg-[#ef4444] mr-1.5 align-middle" />Refresh</span>
+                  <span><span className="inline-block w-2.5 h-2.5 rounded-full bg-[#22c55e] mr-1.5 align-middle" />{currentSubtitleIndex === -1 ? 'Subs Off' : `Subs: ${subtitleTracks[currentSubtitleIndex]?.label || 'On'}`}</span>
+                </div>
+              )}
+              {!MOBILE && !IS_TV && (
                 <span className="text-sm text-[#555] mt-1 block">
                   {currentSubtitleIndex === -1 ? 'Subs: Off' : `Subs: ${subtitleTracks[currentSubtitleIndex]?.label || 'On'}`}
                 </span>
