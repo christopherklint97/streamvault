@@ -7,10 +7,10 @@
     "start": "node --import tsx src/index.ts"
   },
   "dependencies": {
-    "better-sqlite3": "12.9.0",
+    "better-sqlite3": "12.10.0",
     "cors": "2.8.6",
     "express": "5.2.1",
-    "tsx": "4.21.0"
+    "tsx": "4.22.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "7.6.13",
