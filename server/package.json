@@ -9,13 +9,13 @@
     "audit:prod": "npm audit --omit=dev"
   },
   "dependencies": {
-    "better-sqlite3": "12.9.0",
+    "better-sqlite3": "12.11.1",
     "cors": "2.8.6",
     "express": "^5.2.1",
     "path-to-regexp": "^8.4.2",
-    "qs": "^6.15.2",
-    "tsx": "4.21.0",
-    "undici": "^6.26.0"
+    "qs": "^6.15.3",
+    "tsx": "4.22.4",
+    "undici": "^8.5.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "7.6.13",
