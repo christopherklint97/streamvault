@@ -44,3 +44,8 @@ server/tsconfig.tsbuildinfo
 # Screenshots
 Screenshot*.png
 .claude/
+
+# Tizen IDE project files / build-deploy package (generated, not source)
+.project
+/config.xml
+tizen-tv/

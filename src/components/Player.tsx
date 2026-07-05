@@ -376,6 +376,18 @@ export default function Player() {
   }, [seek, seekValue, resetOSDTimer]);
 
   const handleSkip = useCallback((delta: number) => {
+    // AVPlay renders into a plain placeholder <div>, not a real
+    // HTMLVideoElement, so .currentTime/.duration are always undefined there —
+    // read position/duration from the AVPlay API instead.
+    if (typeof webapis !== 'undefined' && webapis.avplay) {
+      try {
+        const current = webapis.avplay.getCurrentTime() / 1000;
+        const duration = webapis.avplay.getDuration() / 1000;
+        seek(Math.max(0, Math.min(duration || Infinity, current + delta)));
+        resetOSDTimer();
+      } catch { /* not playing / not seekable */ }
+      return;
+    }
     const video = getVideoElement();
     if (video) {
       seek(Math.max(0, Math.min(video.duration || 0, video.currentTime + delta)));
@@ -570,6 +582,20 @@ export default function Player() {
           e.preventDefault();
           handleSkip(-10);
           break;
+        // Samsung One Remote has no dedicated FF/REW buttons — use the
+        // d-pad for seeking in VOD content (live streams aren't seekable).
+        case KEY_CODES.RIGHT:
+          if (!isLive) {
+            e.preventDefault();
+            handleSkip(10);
+          }
+          break;
+        case KEY_CODES.LEFT:
+          if (!isLive) {
+            e.preventDefault();
+            handleSkip(-10);
+          }
+          break;
         case KEY_CODES.RED:
           e.preventDefault();
           retry();
@@ -581,7 +607,7 @@ export default function Player() {
           break;
       }
     },
-    [resetOSDTimer, playerState.status, retry, stop, togglePlay, handleSkip, cycleSubtitles, showToast]
+    [resetOSDTimer, playerState.status, retry, stop, togglePlay, handleSkip, cycleSubtitles, showToast, isLive]
   );
 
   const handleChannelSelect = useCallback((ch: Channel) => {
