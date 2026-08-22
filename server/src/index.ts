@@ -39,6 +39,7 @@ import { startScheduler, getSchedulerStatus, matchRules } from './recording-sche
 import { recoverRecordings } from './recorder.js';
 import { rewriteHlsManifest } from './hls.js';
 import { buildFragmentedMp4Args } from './vod-remux.js';
+import { selectIosVodFallback } from './ios-vod.js';
 import { parseByteRange } from './ranges.js';
 import { allowedProxyHostsFromConfig, maskConfigResponse, normalizeAllowedOrigins, requireAuth, validateExternalHttpUrl } from './security.js';
 import { isDatabaseCorruptionError } from './db-lifecycle.js';
@@ -597,16 +598,28 @@ video{width:100%;height:100%;object-fit:contain}
 // cost and latency of a transcode.
 app.get('/api/remux/:channelId', (req, res) => {
   const channelId = req.params.channelId;
-  const channel = getChannelById(channelId);
-  if (!channel?.url || channel.content_type === 'livetv') {
+  const requestedChannel = getChannelById(channelId);
+  if (!requestedChannel?.url || requestedChannel.content_type === 'livetv') {
     res.status(404).json({ error: 'VOD stream not found' });
     return;
   }
 
+  // Prefer an identical non-4K edition on iPhone. It avoids a costly,
+  // non-realtime transcode when the handset cannot decode the 4K HEVC source.
+  const fallbackCandidates = searchChannelsByName(
+    requestedChannel.name.replace(/\s*\[4K\]\s*$/i, ''),
+    'movies'
+  );
+  const sourceChannel = selectIosVodFallback(requestedChannel, fallbackCandidates);
+  if (sourceChannel.id !== requestedChannel.id) {
+    logger.info(`VOD remux: iPhone fallback ${requestedChannel.id} → ${sourceChannel.id}`);
+  }
+
   // Use the existing loopback stream proxy so the provider request retains
   // StreamVault's CDN-compatible headers and credential handling.
-  const sourceUrl = `http://127.0.0.1:${PORT}/api/stream/${encodeURIComponent(channelId)}`;
-  const ff = spawn('ffmpeg', buildFragmentedMp4Args(sourceUrl), {
+  const sourceUrl = `http://127.0.0.1:${PORT}/api/stream/${encodeURIComponent(sourceChannel.id)}`;
+  const isHevc = /\[4K\]\s*$/i.test(sourceChannel.name);
+  const ff = spawn('ffmpeg', buildFragmentedMp4Args(sourceUrl, isHevc), {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
