@@ -7,7 +7,7 @@ describe('buildFragmentedMp4Args', () => {
       '-hide_banner', '-loglevel', 'warning',
       '-i', 'http://provider.example/movie.mkv',
       '-map', '0:v:0', '-map', '0:a:0?',
-      '-c', 'copy', '-sn',
+      '-c', 'copy', '-tag:v', 'hvc1', '-sn',
       '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
       '-f', 'mp4', 'pipe:1',
     ]);
