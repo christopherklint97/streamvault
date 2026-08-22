@@ -8,6 +8,7 @@ import { TizenPlayer } from '../services/avplay';
 import { saveWatchProgress, getWatchProgress, getSubtitlesEnabled, setSubtitlesEnabled } from '../services/channel-service';
 import { clientLogger as log } from '../utils/logger';
 import { useAppStore } from '../stores/appStore';
+import { toAbsolutePlayerUrl } from '../utils/stream-url';
 
 const toast = (msg: string) => useAppStore.getState().showToastMessage(msg);
 
@@ -224,9 +225,13 @@ export function usePlayer(): {
         // and VOD go through /api/stream/. Episodes carry the URL as a
         // query param via getStreamUrl().
         const isRecording = channel.id.startsWith('recording_');
-        const tizenPlayUrl = isRecording
-          ? `${useChannelStore.getState().apiBaseUrl}${channel.url}`
+        const playerPath = isRecording
+          ? channel.url
           : getStreamUrl(channel.id, channel.url, keepSubsRef.current, isLive);
+        const tizenPlayUrl = toAbsolutePlayerUrl(
+          playerPath,
+          useChannelStore.getState().apiBaseUrl
+        );
         log.info(`AVPlay: opening ${tizenPlayUrl}`);
         avplay.open(tizenPlayUrl);
         avplay.setDisplayRect(0, 0, 1920, 1080);
