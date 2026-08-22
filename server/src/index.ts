@@ -38,6 +38,7 @@ import { startRecording, stopRecording, cancelRecording, deleteRecordingFile, ge
 import { startScheduler, getSchedulerStatus, matchRules } from './recording-scheduler.js';
 import { recoverRecordings } from './recorder.js';
 import { rewriteHlsManifest } from './hls.js';
+import { buildFragmentedMp4Args } from './vod-remux.js';
 import { parseByteRange } from './ranges.js';
 import { allowedProxyHostsFromConfig, maskConfigResponse, normalizeAllowedOrigins, requireAuth, validateExternalHttpUrl } from './security.js';
 import { isDatabaseCorruptionError } from './db-lifecycle.js';
@@ -588,6 +589,50 @@ video{width:100%;height:100%;object-fit:contain}
 </head><body>
 <video src="${streamSrc}" autoplay playsinline controls controlslist="nodownload"></video>
 </body></html>`);
+});
+
+// ---------- Browser-compatible VOD remux ----------
+// iOS Safari does not play provider MKV files directly. Remuxing the existing
+// HEVC/AAC streams into fragmented MP4 preserves quality and avoids the CPU
+// cost and latency of a transcode.
+app.get('/api/remux/:channelId', (req, res) => {
+  const channelId = req.params.channelId;
+  const channel = getChannelById(channelId);
+  if (!channel?.url || channel.content_type === 'livetv') {
+    res.status(404).json({ error: 'VOD stream not found' });
+    return;
+  }
+
+  // Use the existing loopback stream proxy so the provider request retains
+  // StreamVault's CDN-compatible headers and credential handling.
+  const sourceUrl = `http://127.0.0.1:${PORT}/api/stream/${encodeURIComponent(channelId)}`;
+  const ff = spawn('ffmpeg', buildFragmentedMp4Args(sourceUrl), {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  res.status(200);
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  setStreamSocketOpts(res);
+
+  ff.stderr.on('data', (chunk) => {
+    const message = chunk.toString().trim();
+    if (message) logger.warn(`VOD remux[${channelId}]: ${message}`);
+  });
+  ff.on('error', (err) => {
+    logger.error(`VOD remux spawn failed for ${channelId}: ${err.message}`);
+    if (!res.headersSent) res.status(500).json({ error: 'VOD remux failed to start' });
+  });
+  ff.on('exit', (code, signal) => {
+    logger.info(`VOD remux exited ${channelId} code=${code} signal=${signal}`);
+  });
+  ff.stdout.on('error', () => {});
+  ff.stdout.pipe(res);
+
+  req.on('close', () => {
+    if (!ff.killed) ff.kill('SIGKILL');
+  });
 });
 
 // ---------- Stream Proxy ----------

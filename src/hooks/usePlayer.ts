@@ -8,7 +8,8 @@ import { TizenPlayer } from '../services/avplay';
 import { saveWatchProgress, getWatchProgress, getSubtitlesEnabled, setSubtitlesEnabled } from '../services/channel-service';
 import { clientLogger as log } from '../utils/logger';
 import { useAppStore } from '../stores/appStore';
-import { toAbsolutePlayerUrl } from '../utils/stream-url';
+import { toAbsolutePlayerUrl, vodRemuxPath } from '../utils/stream-url';
+import { isIPhone } from '../utils/platform';
 
 const toast = (msg: string) => useAppStore.getState().showToastMessage(msg);
 
@@ -440,9 +441,12 @@ export function usePlayer(): {
       const isLiveTs = channel.contentType === 'livetv';
       const isRecording = channel.id.startsWith('recording_');
       // Recordings have a direct server URL; live/VOD go through stream proxy
+      const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
       const playUrl = isRecording
-        ? `${useChannelStore.getState().apiBaseUrl}${channel.url}`
-        : getStreamUrl(channel.id, channel.url, false, isLiveTs);
+        ? `${apiBaseUrl}${channel.url}`
+        : isIPhone() && channel.contentType === 'movies'
+          ? `${apiBaseUrl}${vodRemuxPath(channel.id)}`
+          : getStreamUrl(channel.id, channel.url, false, isLiveTs);
       log.info(`HTML5: playUrl=${playUrl}, contentType=${channel.contentType}`);
 
       if (isLiveTs) {

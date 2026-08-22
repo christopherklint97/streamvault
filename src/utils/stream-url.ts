@@ -6,3 +6,8 @@
 export function toAbsolutePlayerUrl(path: string, apiBaseUrl: string, pageOrigin = window.location.origin): string {
   return new URL(path, apiBaseUrl || pageOrigin).toString();
 }
+
+/** Endpoint that remuxes provider VOD into an iOS-compatible fragmented MP4. */
+export function vodRemuxPath(channelId: string): string {
+  return `/api/remux/${encodeURIComponent(channelId)}`;
+}
