@@ -11,3 +11,20 @@ export function toAbsolutePlayerUrl(path: string, apiBaseUrl: string, pageOrigin
 export function vodRemuxPath(channelId: string): string {
   return `/api/remux/${encodeURIComponent(channelId)}`;
 }
+
+export function iosHlsPath(channelId: string, directUrl: string, startSeconds = 0): string {
+  const path = `/api/ios-hls/${encodeURIComponent(channelId)}/index.m3u8`;
+  const params = new URLSearchParams({ url: directUrl });
+  if (startSeconds > 0) params.set('start', String(Math.floor(startSeconds)));
+  return `${path}?${params.toString()}`;
+}
+
+/** Endpoint that transcodes legacy VOD codecs into browser-compatible H.264/AAC MP4. */
+export function browserTranscodePath(channelId: string, directUrl?: string, startSeconds = 0): string {
+  const path = `/api/transcode/${encodeURIComponent(channelId)}`;
+  const params = new URLSearchParams();
+  if (directUrl) params.set('url', directUrl);
+  if (startSeconds > 0) params.set('start', String(Math.floor(startSeconds)));
+  const query = params.toString();
+  return query ? `${path}?${query}` : path;
+}

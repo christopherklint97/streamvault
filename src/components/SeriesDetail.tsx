@@ -3,12 +3,19 @@ import type { Channel, SeriesInfo, Episode } from '../types';
 import { useChannelStore } from '../stores/channelStore';
 import { usePlayerStore } from '../stores/playerStore';
 import { useAppStore } from '../stores/appStore';
+import { useFavoritesStore } from '../stores/favoritesStore';
 import { getWatchProgress } from '../services/channel-service';
 import { isMobile } from '../utils/platform';
 import { cn } from '../utils/cn';
 import FocusZone from './FocusZone';
 
 const MOBILE = isMobile();
+
+function durationToSeconds(value: string): number | undefined {
+  const parts = value.split(':').map(Number);
+  if (parts.length < 2 || parts.length > 3 || parts.some(part => !Number.isFinite(part) || part < 0)) return undefined;
+  return parts.reduce((total, part) => total * 60 + part, 0);
+}
 
 interface SeriesDetailProps {
   series: Channel;
@@ -24,6 +31,8 @@ export default function SeriesDetail({ series }: SeriesDetailProps) {
   const setChannel = usePlayerStore((s) => s.setChannel);
   const navigate = useAppStore((s) => s.navigate);
   const goBack = useAppStore((s) => s.goBack);
+  const isFavorite = useFavoritesStore((s) => s.favoriteIds.has(series.id));
+  const toggleFavorite = useFavoritesStore((s) => s.toggleFavorite);
 
   // Extract numeric series ID from prefixed ID (e.g., "series_12345" -> 12345)
   const seriesId = parseInt(series.id.replace('series_', ''), 10);
@@ -63,6 +72,8 @@ export default function SeriesDetail({ series }: SeriesDetailProps) {
       group: series.group,
       region: '',
       contentType: 'series',
+      duration: durationToSeconds(episode.duration),
+      seriesId: series.id,
     };
     setChannel(episodeChannel);
     navigate('player');
@@ -112,6 +123,17 @@ export default function SeriesDetail({ series }: SeriesDetailProps) {
         </div>
         <div className="flex flex-col gap-2 text-center lg:text-left lg:flex-1 lg:min-w-0">
           <h1 className="text-22 lg:text-32 font-bold text-white leading-tight">{info.name || series.name}</h1>
+          <button
+            className={cn(
+              'self-center lg:self-start py-2 px-4 rounded-lg border text-sm font-semibold transition-colors',
+              isFavorite ? 'bg-favorite/20 border-favorite text-favorite' : 'bg-surface border-surface-border text-[#ccc] hover:border-favorite'
+            )}
+            data-focusable
+            tabIndex={0}
+            onClick={() => toggleFavorite(series.id)}
+          >
+            {isFavorite ? '★ Favorited' : '☆ Add to Favorites'}
+          </button>
           {info.genre && <span className="text-15 text-[#9ca3af]">{info.genre}</span>}
           {info.rating && <span className="text-15 text-rating">Rating: {info.rating}</span>}
           {info.releaseDate && <span className="text-15 text-[#9ca3af]">{info.releaseDate}</span>}

@@ -8,6 +8,10 @@ export interface Channel {
   group: string;
   region: string;
   contentType: ContentType;
+  /** Provider-reported VOD duration in seconds, when known. */
+  duration?: number;
+  /** Parent series ID for an episode. */
+  seriesId?: string;
 }
 
 export interface Program {
@@ -137,4 +141,6 @@ export interface WatchProgress {
   updatedAt: number;
   /** Content type at time of watching */
   contentType: ContentType;
+  /** Parent series ID so episode progress can appear on Home. */
+  seriesId?: string;
 }

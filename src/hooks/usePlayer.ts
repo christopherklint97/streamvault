@@ -8,7 +8,7 @@ import { TizenPlayer } from '../services/avplay';
 import { saveWatchProgress, getWatchProgress, getSubtitlesEnabled, setSubtitlesEnabled } from '../services/channel-service';
 import { clientLogger as log } from '../utils/logger';
 import { useAppStore } from '../stores/appStore';
-import { toAbsolutePlayerUrl, vodRemuxPath } from '../utils/stream-url';
+import { browserTranscodePath, iosHlsPath, toAbsolutePlayerUrl, vodRemuxPath } from '../utils/stream-url';
 import { isIPhone } from '../utils/platform';
 
 const toast = (msg: string) => useAppStore.getState().showToastMessage(msg);
@@ -46,12 +46,12 @@ function saveProgressNow() {
     try {
       const position = webapis.avplay.getCurrentTime() / 1000;
       const duration = webapis.avplay.getDuration() / 1000;
-      if (duration > 0) saveWatchProgress(channel.id, position, duration, channel.contentType);
+      if (duration > 0) saveWatchProgress(channel.id, position, duration, channel.contentType, channel.seriesId);
     } catch { /* ignore */ }
   } else {
     const video = document.getElementById('av-player') as HTMLVideoElement | null;
     if (video && video.duration > 0 && isFinite(video.duration)) {
-      saveWatchProgress(channel.id, video.currentTime, video.duration, channel.contentType);
+      saveWatchProgress(channel.id, video.currentTime, video.duration, channel.contentType, channel.seriesId);
     }
   }
 }
@@ -378,7 +378,7 @@ export function usePlayer(): {
         video.onloadedmetadata = () => log.info(`HTML5 event: loadedmetadata, duration=${video.duration}, videoWidth=${video.videoWidth}x${video.videoHeight}`);
         video.onloadeddata = () => {
           log.info(`HTML5 event: loadeddata, readyState=${video.readyState}`);
-          if (resumePosition > 0) {
+          if (resumePosition > 0 && !needsBrowserTranscode && !isIphoneEpisode) {
             video.currentTime = resumePosition;
           }
           startBgProgressTracking();
@@ -442,11 +442,18 @@ export function usePlayer(): {
       const isRecording = channel.id.startsWith('recording_');
       // Recordings have a direct server URL; live/VOD go through stream proxy
       const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
+      const isIphoneMovie = isIPhone() && channel.contentType === 'movies';
+      const isIphoneEpisode = isIPhone() && channel.id.startsWith('episode_');
+      const needsBrowserTranscode = !isLiveTs && !isRecording && !isIphoneMovie && !isIphoneEpisode;
       const playUrl = isRecording
         ? `${apiBaseUrl}${channel.url}`
-        : isIPhone() && channel.contentType === 'movies'
+        : isIphoneMovie
           ? `${apiBaseUrl}${vodRemuxPath(channel.id)}`
-          : getStreamUrl(channel.id, channel.url, false, isLiveTs);
+          : isIphoneEpisode
+            ? `${apiBaseUrl}${iosHlsPath(channel.id, channel.url, resumePosition)}`
+            : needsBrowserTranscode
+            ? `${apiBaseUrl}${browserTranscodePath(channel.id, channel.id.startsWith('episode_') ? channel.url : undefined, resumePosition)}`
+            : getStreamUrl(channel.id, channel.url, false, isLiveTs);
       log.info(`HTML5: playUrl=${playUrl}, contentType=${channel.contentType}`);
 
       if (isLiveTs) {
@@ -508,6 +515,7 @@ export function usePlayer(): {
         // before playback starts. iOS Safari may clamp this without user
         // gesture, but Chrome/Edge/Android honor it.
         try { video.preload = 'auto'; } catch { /* ignore */ }
+        video.dataset.streamOffset = needsBrowserTranscode || isIphoneEpisode ? String(resumePosition) : '0';
         video.src = playUrl;
         video.load();
       }
@@ -586,7 +594,25 @@ export function usePlayer(): {
       try { webapis.avplay.seekTo(time * 1000); } catch (err) { toast(`Seek failed: ${err}`); }
     } else {
       const video = document.getElementById('av-player') as HTMLVideoElement | null;
-      if (video) video.currentTime = time;
+      const channel = usePlayerStore.getState().currentChannel;
+      if (!video || !channel) return;
+      const isIphoneEpisode = isIPhone() && channel.id.startsWith('episode_');
+      const usesTranscode = channel.contentType !== 'livetv' && !channel.id.startsWith('recording_') && !isIphoneEpisode && !(isIPhone() && channel.contentType === 'movies');
+      if (isIphoneEpisode) {
+        const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
+        video.dataset.streamOffset = String(time);
+        video.src = `${apiBaseUrl}${iosHlsPath(channel.id, channel.url, time)}`;
+        video.load();
+        video.play().catch(() => {});
+      } else if (usesTranscode) {
+        const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
+        video.dataset.streamOffset = String(time);
+        video.src = `${apiBaseUrl}${browserTranscodePath(channel.id, channel.id.startsWith('episode_') ? channel.url : undefined, time)}`;
+        video.load();
+        video.play().catch(() => {});
+      } else {
+        video.currentTime = time;
+      }
     }
   }, []);
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { toAbsolutePlayerUrl, vodRemuxPath } from '../stream-url';
+import { browserTranscodePath, iosHlsPath, toAbsolutePlayerUrl, vodRemuxPath } from '../stream-url';
 
 describe('toAbsolutePlayerUrl', () => {
   it('turns a same-origin proxy path into an absolute URL for AVPlay', () => {
@@ -16,5 +16,27 @@ describe('toAbsolutePlayerUrl', () => {
 
   it('builds the VOD remux endpoint from the channel ID', () => {
     expect(vodRemuxPath('vod_1467994')).toBe('/api/remux/vod_1467994');
+  });
+
+  it('builds a transcoder URL for an episode source URL', () => {
+    expect(browserTranscodePath('episode_177574', 'http://provider.example/episode.mkv')).toBe(
+      '/api/transcode/episode_177574?url=http%3A%2F%2Fprovider.example%2Fepisode.mkv'
+    );
+  });
+
+  it('adds a start offset when restarting a browser transcode to seek', () => {
+    expect(browserTranscodePath('episode_177574', 'http://provider.example/episode.mkv', 120)).toBe(
+      '/api/transcode/episode_177574?url=http%3A%2F%2Fprovider.example%2Fepisode.mkv&start=120'
+    );
+  });
+
+  it('builds native HLS path for an iPhone episode', () => {
+    expect(iosHlsPath('episode_177574', 'http://provider.example/episode.mkv')).toBe(
+      '/api/ios-hls/episode_177574/index.m3u8?url=http%3A%2F%2Fprovider.example%2Fepisode.mkv'
+    );
+  });
+
+  it('builds a transcoder URL for a catalogue VOD', () => {
+    expect(browserTranscodePath('vod_1467994')).toBe('/api/transcode/vod_1467994');
   });
 });

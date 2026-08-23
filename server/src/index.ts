@@ -39,6 +39,8 @@ import { startScheduler, getSchedulerStatus, matchRules } from './recording-sche
 import { recoverRecordings } from './recorder.js';
 import { rewriteHlsManifest } from './hls.js';
 import { buildFragmentedMp4Args } from './vod-remux.js';
+import { buildBrowserCompatibleVideoArgs } from './browser-transcode.js';
+import { buildIosHlsArgs } from './ios-hls.js';
 import { selectIosVodFallback } from './ios-vod.js';
 import { parseByteRange } from './ranges.js';
 import { allowedProxyHostsFromConfig, maskConfigResponse, normalizeAllowedOrigins, requireAuth, validateExternalHttpUrl } from './security.js';
@@ -46,6 +48,8 @@ import { isDatabaseCorruptionError } from './db-lifecycle.js';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001', 10);
+const IOS_HLS_ROOT = path.join('/tmp', 'streamvault-ios-hls');
+const iosHlsSessions = new Map<string, { directory: string; process: ReturnType<typeof spawn>; expiresAt: number }>();
 
 function parseIntegerQuery(value: unknown, min: number, max = Number.MAX_SAFE_INTEGER): number | undefined | null {
   if (value === undefined) return undefined;
@@ -646,6 +650,155 @@ app.get('/api/remux/:channelId', (req, res) => {
   req.on('close', () => {
     if (!ff.killed) ff.kill('SIGKILL');
   });
+});
+
+// ---------- Browser-compatible VOD transcode ----------
+// Some providers package series episodes as MKV with legacy MPEG-4 Part 2
+// video. Chromium can decode the MP3 audio but not that video, producing a
+// black picture. Convert only browser VOD playback to H.264/AAC fMP4.
+app.get('/api/transcode/:channelId', (req, res) => {
+  const channelId = req.params.channelId;
+  const channel = getChannelById(channelId);
+  let sourcePath: string;
+
+  if (channel?.url && channel.content_type !== 'livetv') {
+    sourcePath = `/api/stream/${encodeURIComponent(channelId)}`;
+  } else if (channelId.startsWith('episode_') && typeof req.query.url === 'string') {
+    const validation = validateExternalHttpUrl(req.query.url, allowedProxyHostsFromConfig(getConfig('xtream_server'), process.env.STREAMVAULT_PROXY_ALLOWED_HOSTS));
+    if (!validation.ok) {
+      res.status(400).json({ error: validation.error });
+      return;
+    }
+    sourcePath = `/api/stream/${encodeURIComponent(channelId)}?url=${encodeURIComponent(validation.url.toString())}&type=series`;
+  } else {
+    res.status(404).json({ error: 'VOD stream not found' });
+    return;
+  }
+
+  const startSeconds = parseIntegerQuery(req.query.start, 0);
+  if (startSeconds === null) {
+    res.status(400).json({ error: 'Invalid start time' });
+    return;
+  }
+
+  const sourceUrl = `http://127.0.0.1:${PORT}${sourcePath}`;
+  const ff = spawn('ffmpeg', buildBrowserCompatibleVideoArgs(sourceUrl, startSeconds || 0), {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  res.status(200);
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  setStreamSocketOpts(res);
+
+  ff.stderr.on('data', (chunk) => {
+    const message = chunk.toString().trim();
+    if (message) logger.warn(`VOD transcode[${channelId}]: ${message}`);
+  });
+  ff.on('error', (err) => {
+    logger.error(`VOD transcode spawn failed for ${channelId}: ${err.message}`);
+    if (!res.headersSent) res.status(500).json({ error: 'VOD transcode failed to start' });
+  });
+  ff.on('exit', (code, signal) => {
+    logger.info(`VOD transcode exited ${channelId} code=${code} signal=${signal}`);
+  });
+  ff.stdout.on('error', () => {});
+  ff.stdout.pipe(res);
+
+  req.on('close', () => {
+    if (!ff.killed) ff.kill('SIGKILL');
+  });
+});
+
+// ---------- iPhone HLS fallback ----------
+// iOS WebKit rejects some direct chunked fMP4 responses even when their H.264
+// and AAC tracks are valid. Native HLS is its reliable streaming format.
+app.get('/api/ios-hls/:channelId/index.m3u8', (req, res) => {
+  const channelId = req.params.channelId;
+  if (!channelId.startsWith('episode_') || typeof req.query.url !== 'string') {
+    res.status(404).json({ error: 'Series episode not found' });
+    return;
+  }
+  const validation = validateExternalHttpUrl(req.query.url, allowedProxyHostsFromConfig(getConfig('xtream_server'), process.env.STREAMVAULT_PROXY_ALLOWED_HOSTS));
+  if (!validation.ok) {
+    res.status(400).json({ error: validation.error });
+    return;
+  }
+
+  const startSeconds = parseIntegerQuery(req.query.start, 0);
+  if (startSeconds === null) {
+    res.status(400).json({ error: 'Invalid start time' });
+    return;
+  }
+
+  const existingSessionId = typeof req.query.session === 'string' ? req.query.session : undefined;
+  if (existingSessionId) {
+    const existing = iosHlsSessions.get(existingSessionId);
+    if (!existing) {
+      res.status(404).json({ error: 'iPhone stream session expired' });
+      return;
+    }
+    existing.expiresAt = Date.now() + 30 * 60_000;
+    const existingPlaylist = path.join(existing.directory, 'index.m3u8');
+    const startedAt = Date.now();
+    const sendExistingPlaylist = () => {
+      if (fs.existsSync(existingPlaylist)) {
+        const playlist = fs.readFileSync(existingPlaylist, 'utf8')
+          .replace(/(init\.mp4|segment-\d+\.m4s)/g, `/api/ios-hls-assets/${existingSessionId}/$1`);
+        res.type('application/vnd.apple.mpegurl').set('Cache-Control', 'no-store').send(playlist);
+        return;
+      }
+      if (Date.now() - startedAt > 20_000) {
+        res.status(504).json({ error: 'Timed out preparing iPhone stream' });
+        return;
+      }
+      setTimeout(sendExistingPlaylist, 100);
+    };
+    sendExistingPlaylist();
+    return;
+  }
+
+  const sessionId = randomUUID();
+  const directory = path.join(IOS_HLS_ROOT, sessionId);
+  const playlistPath = path.join(directory, 'index.m3u8');
+  fs.mkdirSync(directory, { recursive: true });
+  const sourcePath = `/api/stream/${encodeURIComponent(channelId)}?url=${encodeURIComponent(validation.url.toString())}&type=series`;
+  const sourceUrl = `http://127.0.0.1:${PORT}${sourcePath}`;
+  const ff = spawn('ffmpeg', buildIosHlsArgs(sourceUrl, playlistPath, startSeconds || 0), { stdio: ['ignore', 'ignore', 'pipe'] });
+  iosHlsSessions.set(sessionId, { directory, process: ff, expiresAt: Date.now() + 30 * 60_000 });
+
+  const cleanup = () => {
+    const session = iosHlsSessions.get(sessionId);
+    if (!session || session.expiresAt > Date.now()) return;
+    iosHlsSessions.delete(sessionId);
+    if (!session.process.killed) session.process.kill('SIGKILL');
+    fs.rmSync(session.directory, { recursive: true, force: true });
+  };
+  setTimeout(cleanup, 30 * 60_000).unref();
+  ff.stderr.on('data', (chunk) => {
+    const message = chunk.toString().trim();
+    if (message) logger.warn(`iOS HLS[${channelId}]: ${message}`);
+  });
+  ff.on('error', (err) => logger.error(`iOS HLS spawn failed for ${channelId}: ${err.message}`));
+
+  const playlistUrl = `/api/ios-hls/${encodeURIComponent(channelId)}/index.m3u8?url=${encodeURIComponent(validation.url.toString())}&session=${encodeURIComponent(sessionId)}${startSeconds ? `&start=${startSeconds}` : ''}`;
+  res.redirect(302, playlistUrl);
+});
+
+app.get('/api/ios-hls-assets/:sessionId/:asset', (req, res) => {
+  const session = iosHlsSessions.get(req.params.sessionId);
+  const asset = req.params.asset;
+  if (!session || !/^(init\.mp4|segment-\d+\.m4s)$/.test(asset)) {
+    res.status(404).end();
+    return;
+  }
+  const filePath = path.join(session.directory, asset);
+  if (!fs.existsSync(filePath)) {
+    res.status(404).end();
+    return;
+  }
+  res.type(asset.endsWith('.mp4') ? 'video/mp4' : 'video/iso.segment').set('Cache-Control', 'no-store').sendFile(filePath);
 });
 
 // ---------- Stream Proxy ----------

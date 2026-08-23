@@ -227,15 +227,17 @@ export default function Player() {
     const video = getVideoElement();
     if (!video) return;
 
+    const streamOffset = () => Number(video.dataset.streamOffset || '0');
+    const displayDuration = () => currentChannel?.duration || video.duration || 0;
     const onTimeUpdate = () => {
       if (!isSeeking) {
-        setCurrentTime(video.currentTime);
-        setDuration(video.duration || 0);
+        setCurrentTime(streamOffset() + video.currentTime);
+        setDuration(displayDuration());
       }
     };
     const onPlay = () => setIsPaused(false);
     const onPause = () => setIsPaused(true);
-    const onDurationChange = () => setDuration(video.duration || 0);
+    const onDurationChange = () => setDuration(displayDuration());
 
     video.addEventListener('timeupdate', onTimeUpdate);
     video.addEventListener('play', onPlay);
@@ -245,8 +247,8 @@ export default function Player() {
     // Poll as fallback for mpegts.js streams (timeupdate may not fire)
     timeUpdateRef.current = window.setInterval(() => {
       if (!isSeeking && video.currentTime > 0) {
-        setCurrentTime(video.currentTime);
-        if (video.duration) setDuration(video.duration);
+        setCurrentTime(Number(video.dataset.streamOffset || '0') + video.currentTime);
+        setDuration(currentChannel?.duration || video.duration);
       }
     }, 500);
 
@@ -257,7 +259,7 @@ export default function Player() {
       video.removeEventListener('durationchange', onDurationChange);
       clearInterval(timeUpdateRef.current);
     };
-  }, [getVideoElement, isSeeking, playerState.status]);
+  }, [getVideoElement, isSeeking, playerState.status, currentChannel?.duration]);
 
   // EPG progress for live (only used when currentProgram is rendered)
   const [liveProgress, setLiveProgress] = useState(0);
@@ -820,6 +822,7 @@ export default function Player() {
                   <input
                     ref={seekBarRef}
                     className="seek-bar w-full h-1 rounded-sm mb-2"
+                    style={{ background: `linear-gradient(to right, #00d4ff 0%, #00d4ff ${duration > 0 ? (seekDisplay / duration) * 100 : 0}%, rgba(255,255,255,0.2) ${duration > 0 ? (seekDisplay / duration) * 100 : 0}%, rgba(255,255,255,0.2) 100%)` }}
                     type="range"
                     min={0}
                     max={duration}

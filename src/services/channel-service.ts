@@ -21,11 +21,12 @@ export function getLastWatchedChannelId(): string | null {
 }
 
 export function trackWatch(channel: Channel): void {
-  setItem(LAST_WATCHED_KEY, channel.id);
+  const libraryId = channel.seriesId || channel.id;
+  setItem(LAST_WATCHED_KEY, libraryId);
 
   const recent = getRecentChannelIds();
-  const filtered = recent.filter((id) => id !== channel.id);
-  filtered.unshift(channel.id);
+  const filtered = recent.filter((id) => id !== libraryId);
+  filtered.unshift(libraryId);
   setItem(RECENT_KEY, filtered.slice(0, MAX_RECENT));
 }
 
@@ -62,7 +63,8 @@ export function saveWatchProgress(
   channelId: string,
   position: number,
   duration: number,
-  contentType: Channel['contentType']
+  contentType: Channel['contentType'],
+  seriesId?: string
 ): void {
   // Don't save negligible progress
   if (position < MIN_POSITION_TO_SAVE) return;
@@ -82,6 +84,7 @@ export function saveWatchProgress(
     duration,
     updatedAt: Date.now(),
     contentType,
+    seriesId,
   };
   saveProgressMap(map);
 }
@@ -100,10 +103,16 @@ export function getWatchProgress(channelId: string): WatchProgress | null {
  */
 export function getContinueWatchingIds(): string[] {
   const map = getProgressMap();
+  const seen = new Set<string>();
   return Object.values(map)
     .filter((p) => p.contentType !== 'livetv' && p.duration > 0)
     .sort((a, b) => b.updatedAt - a.updatedAt)
-    .map((p) => p.channelId);
+    .map((p) => p.seriesId || p.channelId)
+    .filter((id) => {
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
 }
 
 /**
