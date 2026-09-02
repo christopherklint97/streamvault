@@ -12,11 +12,24 @@ export function vodRemuxPath(channelId: string): string {
   return `/api/remux/${encodeURIComponent(channelId)}`;
 }
 
-export function iosHlsPath(channelId: string, directUrl: string, startSeconds = 0): string {
-  const path = `/api/ios-hls/${encodeURIComponent(channelId)}/index.m3u8`;
+export function iosHlsPath(channelId: string, directUrl: string, startSeconds = 0, contentType?: string): string {
+  const path = `/api/ios-hls-authorize/${encodeURIComponent(channelId)}/index.m3u8`;
   const params = new URLSearchParams({ url: directUrl });
   if (startSeconds > 0) params.set('start', String(Math.floor(startSeconds)));
+  if (contentType === 'movies') params.set('type', 'movies');
   return `${path}?${params.toString()}`;
+}
+
+/** Use native HLS for iPhone catalogue movies and series episodes. */
+export function iphoneVodPlaybackPath(
+  channelId: string,
+  directUrl: string,
+  contentType: string,
+  startSeconds = 0,
+): string | null {
+  if (contentType === 'livetv' || channelId.startsWith('recording_')) return null;
+  if (contentType !== 'movies' && !channelId.startsWith('episode_')) return null;
+  return iosHlsPath(channelId, directUrl, startSeconds, contentType);
 }
 
 /** Endpoint that transcodes legacy VOD codecs into browser-compatible H.264/AAC MP4. */

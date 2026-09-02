@@ -7,6 +7,7 @@ import { useFavoritesStore } from '../stores/favoritesStore';
 import { getWatchProgress } from '../services/channel-service';
 import { cn } from '../utils/cn';
 import FocusZone from './FocusZone';
+import { isVodInfoLoading, parseMediaDuration, parseVodId } from '../utils/vod-metadata';
 
 interface MovieDetailProps {
   movie: Channel;
@@ -27,10 +28,11 @@ export default function MovieDetail({ movie }: MovieDetailProps) {
   const [showListMenu, setShowListMenu] = useState(false);
 
   // Extract numeric VOD ID from channel ID (e.g., "movie_12345" -> 12345)
-  const vodId = useMemo(() => parseInt(movie.id.replace('movie_', ''), 10), [movie.id]);
+  const vodId = useMemo(() => parseVodId(movie.id), [movie.id]);
+  const showInfoLoading = isVodInfoLoading(vodId, loading);
 
   useEffect(() => {
-    if (isNaN(vodId)) return;
+    if (vodId === null) return;
     let cancelled = false;
     fetchMovieInfo(vodId).then(result => {
       if (cancelled) return;
@@ -41,9 +43,9 @@ export default function MovieDetail({ movie }: MovieDetailProps) {
   }, [vodId, fetchMovieInfo]);
 
   const handlePlay = useCallback(() => {
-    setChannel(movie);
+    setChannel({ ...movie, duration: parseMediaDuration(info?.duration) });
     navigate('player');
-  }, [movie, setChannel, navigate]);
+  }, [info?.duration, movie, setChannel, navigate]);
 
   const progress = getWatchProgress(movie.id);
   const pct = progress && progress.duration > 0
@@ -80,7 +82,7 @@ export default function MovieDetail({ movie }: MovieDetailProps) {
           {info?.plot && <p className="text-sm lg:text-15 text-[#b0b8c4] leading-relaxed text-left lg:mt-1">{info.plot}</p>}
           {info?.cast && <p className="text-13 text-[#7a8290] text-left">Cast: {info.cast}</p>}
           {info?.director && <p className="text-13 text-[#7a8290] text-left">Director: {info.director}</p>}
-          {!info && !loading && (
+          {!info && !showInfoLoading && (
             <p className="text-sm lg:text-15 text-[#555]">{movie.group}</p>
           )}
 
@@ -145,7 +147,7 @@ export default function MovieDetail({ movie }: MovieDetailProps) {
         </div>
       </div>
 
-      {loading && <div className="text-center p-5 lg:p-10 text-[#888] text-sm lg:text-18">Loading movie info...</div>}
+      {showInfoLoading && <div className="text-center p-5 lg:p-10 text-[#888] text-sm lg:text-18">Loading movie info...</div>}
     </FocusZone>
   );
 }

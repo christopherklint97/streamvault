@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { browserTranscodePath, iosHlsPath, toAbsolutePlayerUrl, vodRemuxPath } from '../stream-url';
+import { browserTranscodePath, iphoneVodPlaybackPath, iosHlsPath, toAbsolutePlayerUrl, vodRemuxPath } from '../stream-url';
 
 describe('toAbsolutePlayerUrl', () => {
   it('turns a same-origin proxy path into an absolute URL for AVPlay', () => {
@@ -32,8 +32,18 @@ describe('toAbsolutePlayerUrl', () => {
 
   it('builds native HLS path for an iPhone episode', () => {
     expect(iosHlsPath('episode_177574', 'http://provider.example/episode.mkv')).toBe(
-      '/api/ios-hls/episode_177574/index.m3u8?url=http%3A%2F%2Fprovider.example%2Fepisode.mkv'
+      '/api/ios-hls-authorize/episode_177574/index.m3u8?url=http%3A%2F%2Fprovider.example%2Fepisode.mkv'
     );
+  });
+
+  it('routes iPhone catalogue movies through native HLS', () => {
+    expect(iphoneVodPlaybackPath('vod_83608', 'http://provider.example/movie.mkv', 'movies')).toBe(
+      '/api/ios-hls-authorize/vod_83608/index.m3u8?url=http%3A%2F%2Fprovider.example%2Fmovie.mkv&type=movies'
+    );
+  });
+
+  it('keeps iPhone recordings on their direct range-capable URL', () => {
+    expect(iphoneVodPlaybackPath('recording_42', '/api/recordings/42', 'movies')).toBeNull();
   });
 
   it('builds a transcoder URL for a catalogue VOD', () => {

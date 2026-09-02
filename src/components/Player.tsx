@@ -20,6 +20,7 @@ import { castMedia, pickCastMime, watchCastState, isCastConnected } from '../uti
 import { cn } from '../utils/cn';
 import { fetchBatchEpg, getCurrentEpg, type EpgProgram, type EpgMap } from '../utils/epg-batch';
 import type { Channel } from '../types';
+import { getAbsoluteSkipTarget } from '../utils/media-progress';
 
 const OSD_TIMEOUT = 5000;
 const MOBILE = isMobile();
@@ -380,10 +381,16 @@ export default function Player() {
   const handleSkip = useCallback((delta: number) => {
     const video = getVideoElement();
     if (video) {
-      seek(Math.max(0, Math.min(video.duration || 0, video.currentTime + delta)));
+      seek(getAbsoluteSkipTarget(
+        video.currentTime,
+        delta,
+        video.duration,
+        Number(video.dataset.streamOffset || '0'),
+        currentChannel?.duration,
+      ));
       resetOSDTimer();
     }
-  }, [getVideoElement, seek, resetOSDTimer]);
+  }, [currentChannel?.duration, getVideoElement, seek, resetOSDTimer]);
 
   // Cast + AirPlay availability (driven by SDK / WebKit events)
   const [castState, setCastState] = useState<'NO_DEVICES_AVAILABLE' | 'NOT_CONNECTED' | 'CONNECTING' | 'CONNECTED'>('NO_DEVICES_AVAILABLE');

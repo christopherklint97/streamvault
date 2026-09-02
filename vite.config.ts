@@ -5,6 +5,7 @@ import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 import postcss from 'postcss'
 import postcssPresetEnv from 'postcss-preset-env'
+import { CACHEABLE_API_PATTERN } from './src/utils/pwa-cache'
 
 // When VITE_SERVER_URL is explicitly set (e.g. "" for Docker/PWA), use it.
 // Otherwise detect LAN IP for Tizen TV dev builds.
@@ -109,7 +110,7 @@ export default defineConfig({
             },
           },
           {
-            urlPattern: /\/api\/(?!stream|proxy)/,
+            urlPattern: CACHEABLE_API_PATTERN,
             handler: 'NetworkFirst',
             options: {
               cacheName: 'api-cache',

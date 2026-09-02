@@ -105,7 +105,7 @@ export function getContinueWatchingIds(): string[] {
   const map = getProgressMap();
   const seen = new Set<string>();
   return Object.values(map)
-    .filter((p) => p.contentType !== 'livetv' && p.duration > 0)
+    .filter((p) => p.contentType !== 'livetv')
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .map((p) => p.seriesId || p.channelId)
     .filter((id) => {
