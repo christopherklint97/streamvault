@@ -13,7 +13,7 @@ export function buildFragmentedMp4Args(inputUrl: string, isHevc: boolean): strin
     '-c', 'copy',
     ...(isHevc ? ['-tag:v', 'hvc1'] : []),
     '-sn',
-    '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+    '-movflags', 'frag_keyframe+empty_moov+default_base_moof+delay_moov',
     '-f', 'mp4', 'pipe:1',
   ];
 }
