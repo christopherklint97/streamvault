@@ -4,6 +4,39 @@ export interface IosHlsSessionDescriptor {
   expiresAt: number;
 }
 
+// Native Safari can prefetch several minutes of HLS segments, leaving no
+// requests while it drains that buffer. Keep the backing files longer than
+// that quiet window; global session, lifetime, and storage caps still apply.
+export const IOS_HLS_IDLE_TIMEOUT_MS = 10 * 60_000;
+
+export interface ReusableIosHlsSession {
+  key: string;
+  expiresAt: number;
+  state?: 'running' | 'complete' | 'failed';
+}
+
+export function iosHlsProcessExitState(
+  code: number | null,
+  signal: NodeJS.Signals | null,
+): 'complete' | 'failed' {
+  return code === 0 && signal === null ? 'complete' : 'failed';
+}
+
+export function iosHlsSessionKey(channelId: string, sourceUrl: string, startSeconds: number): string {
+  return `${channelId}\n${sourceUrl}\n${Math.floor(startSeconds)}`;
+}
+
+export function findReusableIosHlsSession(
+  sessions: ReadonlyMap<string, ReusableIosHlsSession>,
+  key: string,
+  now = Date.now(),
+): string | null {
+  for (const [sessionId, session] of sessions) {
+    if (session.key === key && session.expiresAt > now && session.state !== 'failed') return sessionId;
+  }
+  return null;
+}
+
 export function iosHlsSessionLimitReason(
   session: IosHlsSessionDescriptor,
   now: number,

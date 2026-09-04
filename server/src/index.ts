@@ -41,7 +41,7 @@ import { rewriteHlsManifest } from './hls.js';
 import { buildFragmentedMp4Args } from './vod-remux.js';
 import { buildBrowserCompatibleVideoArgs } from './browser-transcode.js';
 import { buildIosHlsArgs, iosHlsContentType } from './ios-hls.js';
-import { iosHlsSessionLimitReason, selectIosHlsSessionsToRetire } from './ios-hls-sessions.js';
+import { IOS_HLS_IDLE_TIMEOUT_MS, findReusableIosHlsSession, iosHlsProcessExitState, iosHlsSessionKey, iosHlsSessionLimitReason, selectIosHlsSessionsToRetire } from './ios-hls-sessions.js';
 import { FixedWindowRateLimiter, createIosHlsTicket, sanitizeFfmpegMessage, verifyIosHlsTicket } from './ios-hls-security.js';
 import { selectIosVodFallback } from './ios-vod.js';
 import { parseByteRange } from './ranges.js';
@@ -51,7 +51,6 @@ import { isDatabaseCorruptionError } from './db-lifecycle.js';
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001', 10);
 const IOS_HLS_ROOT = path.join('/tmp', 'streamvault-ios-hls');
-const IOS_HLS_IDLE_TIMEOUT_MS = 2 * 60_000;
 const IOS_HLS_CLEANUP_INTERVAL_MS = 30_000;
 const IOS_HLS_MAX_LIFETIME_MS = 4 * 60 * 60_000;
 const IOS_HLS_MAX_STORAGE_BYTES = 4 * 1024 * 1024 * 1024;
@@ -64,6 +63,8 @@ type IosHlsSession = {
   directory: string;
   process: ReturnType<typeof spawn>;
   channelId: string;
+  key: string;
+  state: 'running' | 'complete' | 'failed';
   createdAt: number;
   expiresAt: number;
 };
@@ -888,6 +889,22 @@ app.get('/api/ios-hls/:channelId/index.m3u8', (req, res) => {
   }
   iosHlsTicketNonces.delete(ticketResult.nonce);
 
+  const requestedStart = startSeconds || 0;
+  const sessionKey = iosHlsSessionKey(channelId, sourceValidation.url.toString(), requestedStart);
+  const reusableSessionId = findReusableIosHlsSession(iosHlsSessions, sessionKey);
+  if (reusableSessionId) {
+    const reusable = iosHlsSessions.get(reusableSessionId)!;
+    reusable.expiresAt = Date.now() + IOS_HLS_IDLE_TIMEOUT_MS;
+    const params = new URLSearchParams({
+      url: requestValidation.url.toString(),
+      type: contentType,
+      session: reusableSessionId,
+    });
+    if (requestedStart) params.set('start', String(requestedStart));
+    res.redirect(302, `/api/ios-hls/${encodeURIComponent(channelId)}/index.m3u8?${params.toString()}`);
+    return;
+  }
+
   const sessionId = randomUUID();
   const directory = path.join(IOS_HLS_ROOT, sessionId);
   const playlistPath = path.join(directory, 'index.m3u8');
@@ -902,6 +919,8 @@ app.get('/api/ios-hls/:channelId/index.m3u8', (req, res) => {
     directory,
     process: ff,
     channelId,
+    key: sessionKey,
+    state: 'running',
     createdAt: Date.now(),
     expiresAt: Date.now() + IOS_HLS_IDLE_TIMEOUT_MS,
   });
@@ -910,7 +929,24 @@ app.get('/api/ios-hls/:channelId/index.m3u8', (req, res) => {
     const message = chunk.toString().trim();
     if (message) logger.warn(`iOS HLS[${channelId}]: ${sanitizeFfmpegMessage(message)}`);
   });
-  ff.on('error', (err) => logger.error(`iOS HLS spawn failed for ${channelId}: ${err.message}`));
+  ff.on('error', (err) => {
+    logger.error(`iOS HLS spawn failed for ${channelId}: ${err.message}`);
+    const active = iosHlsSessions.get(sessionId);
+    if (active?.process === ff) {
+      active.state = 'failed';
+      retireIosHlsSession(sessionId, 'ffmpeg-error');
+    }
+  });
+  ff.on('exit', (code, signal) => {
+    const active = iosHlsSessions.get(sessionId);
+    if (active?.process !== ff) return;
+    active.state = iosHlsProcessExitState(code, signal);
+    if (active.state === 'failed') {
+      retireIosHlsSession(sessionId, `ffmpeg-exit-${code ?? signal ?? 'unknown'}`);
+    } else {
+      logger.info(`iOS HLS session complete: ${sessionId}`);
+    }
+  });
 
   const playlistUrl = `/api/ios-hls/${encodeURIComponent(channelId)}/index.m3u8?url=${encodeURIComponent(requestValidation.url.toString())}&type=${contentType}&session=${encodeURIComponent(sessionId)}${startSeconds ? `&start=${startSeconds}` : ''}`;
   res.redirect(302, playlistUrl);

@@ -14,6 +14,22 @@ describe('buildIosHlsArgs', () => {
     expect(buildIosHlsArgs('http://source', '/tmp/index.m3u8', 120)).toContain('-ss');
   });
 
+  it('reconnects its HTTP input when a long provider stream drops', () => {
+    const args = buildIosHlsArgs('http://source', '/tmp/session/index.m3u8');
+    expect(args).toContain('-reconnect');
+    expect(args).toContain('-reconnect_on_network_error');
+    expect(args).toContain('-reconnect_streamed');
+    expect(args).toContain('-reconnect_delay_max');
+  });
+
+  it('forces short independent segments so iPhone playback starts promptly', () => {
+    const args = buildIosHlsArgs('http://source', '/tmp/session/index.m3u8');
+    expect(args).toContain('-force_key_frames');
+    expect(args).toContain('expr:gte(t,n_forced*4)');
+    expect(args).toContain('-hls_flags');
+    expect(args).toContain('independent_segments');
+  });
+
   it('downmixes provider audio to browser-safe stereo AAC', () => {
     const args = buildIosHlsArgs('http://source', '/tmp/session/index.m3u8');
     expect(args).toContain('-c:a');
