@@ -3,6 +3,11 @@ export interface Html5WatchProgress {
   duration: number;
 }
 
+export function getResumePosition(progress: { position: number; completed?: boolean } | null): number {
+  if (!progress || progress.completed || !Number.isFinite(progress.position) || progress.position <= 0) return 0;
+  return progress.position;
+}
+
 export function getAbsoluteSkipTarget(
   currentTime: number,
   delta: number,

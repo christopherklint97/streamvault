@@ -10,7 +10,7 @@ import { clientLogger as log } from '../utils/logger';
 import { useAppStore } from '../stores/appStore';
 import { browserTranscodePath, iphoneVodPlaybackPath, toAbsolutePlayerUrl } from '../utils/stream-url';
 import { isIPhone } from '../utils/platform';
-import { getHtml5WatchProgress } from '../utils/media-progress';
+import { getHtml5WatchProgress, getResumePosition } from '../utils/media-progress';
 import { LiveStreamRecovery } from '../utils/live-stream-recovery';
 import { hasDecodedFrameProgress, withLiveStreamOptions } from '../utils/live-stream-options';
 
@@ -53,16 +53,30 @@ function clearAvplayStallTimer() {
   }
 }
 
-/** Save watch progress using the current video/avplay state */
-function saveProgressNow() {
+/** Save watch progress using the current video/avplay state. */
+function saveProgressNow(markEnded = false) {
   const channel = usePlayerStore.getState().currentChannel;
   if (!channel || channel.contentType === 'livetv') return;
+  // A natural ended event is the only completion signal available when an
+  // episode has neither a finite media duration nor provider duration. Known
+  // durations still use the 95% threshold, avoiding false completion on an
+  // unexpectedly truncated stream.
+  const completedOverride = markEnded
+    && channel.contentType === 'series'
+    && !(Number.isFinite(channel.duration) && (channel.duration ?? 0) > 0);
 
   if (typeof webapis !== 'undefined' && webapis.avplay) {
     try {
       const position = webapis.avplay.getCurrentTime() / 1000;
-      const duration = webapis.avplay.getDuration() / 1000;
-      if (duration > 0) saveWatchProgress(channel.id, position, duration, channel.contentType, channel.seriesId);
+      const progress = getHtml5WatchProgress(
+        position,
+        webapis.avplay.getDuration() / 1000,
+        0,
+        channel.duration,
+      );
+      if (progress) {
+        saveWatchProgress(channel.id, progress.position, progress.duration, channel.contentType, channel.seriesId, completedOverride);
+      }
     } catch { /* ignore */ }
   } else {
     const video = document.getElementById('av-player') as HTMLVideoElement | null;
@@ -74,7 +88,7 @@ function saveProgressNow() {
         channel.duration,
       );
       if (progress) {
-        saveWatchProgress(channel.id, progress.position, progress.duration, channel.contentType, channel.seriesId);
+        saveWatchProgress(channel.id, progress.position, progress.duration, channel.contentType, channel.seriesId, completedOverride);
       }
     }
   }
@@ -86,10 +100,9 @@ function startBgProgressTracking() {
 }
 
 function stopBgProgressTracking() {
-  if (bgProgressInterval) {
-    clearInterval(bgProgressInterval);
-    bgProgressInterval = null;
-  }
+  if (!bgProgressInterval) return;
+  clearInterval(bgProgressInterval);
+  bgProgressInterval = null;
   saveProgressNow();
 }
 
@@ -240,7 +253,7 @@ export function usePlayer(): {
     const savedProgress = channel.contentType !== 'livetv'
       ? getWatchProgress(channel.id)
       : null;
-    const resumePosition = savedProgress ? savedProgress.position : 0;
+    const resumePosition = getResumePosition(savedProgress);
     if (resumePosition > 0) {
       log.info(`Resuming from position ${resumePosition.toFixed(1)}s`);
     }
@@ -348,7 +361,8 @@ export function usePlayer(): {
             log.info('AVPlay: stream completed');
             // Live streams "completing" usually means the upstream dropped us — retry.
             if (isLive && tryAutoRetry('live stream completed')) return;
-            saveProgressNow();
+            stopBgProgressTracking();
+            saveProgressNow(true);
             setStatus('idle');
           },
           ondrmevent: () => {},
@@ -482,7 +496,8 @@ export function usePlayer(): {
             liveStreamRecovery.transportEnded('media-ended');
             return;
           }
-          saveProgressNow();
+          stopBgProgressTracking();
+          saveProgressNow(true);
           setStatus('idle');
           clearMediaSession();
         };

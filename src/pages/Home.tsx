@@ -12,6 +12,7 @@ import {
   getRecentChannelIds,
   getLastWatchedChannelId,
   getContinueWatchingIds,
+  getLatestSeriesProgress,
   getWatchProgress,
 } from '../services/channel-service';
 import { getCurrentProgram } from '../services/epg-service';
@@ -205,7 +206,9 @@ export default function Home() {
           <h2 className="text-base lg:text-22 font-bold mb-2 lg:mb-3 text-[#ccc]">Continue Watching</h2>
           <div className="flex gap-2.5 lg:gap-4 overflow-x-auto py-2 px-1 [contain:content] [will-change:scroll-position] [-webkit-overflow-scrolling:touch]">
             {continueWatchingChannels.map((ch) => {
-              const progress = getWatchProgress(ch.id);
+              const progress = ch.contentType === 'series'
+                ? getLatestSeriesProgress(ch.id)
+                : getWatchProgress(ch.id);
               const pct = progress && progress.duration > 0
                 ? Math.round((progress.position / progress.duration) * 100)
                 : 0;

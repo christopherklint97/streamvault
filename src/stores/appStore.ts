@@ -45,6 +45,15 @@ function pushState(view: View, group?: string | null) {
 
 // Parse URL on startup to restore view + search state
 const initialUrl = parseUrl();
+const initialSeries: Channel | null = initialUrl.selectedSeriesId ? {
+  id: initialUrl.selectedSeriesId,
+  name: '',
+  url: '',
+  logo: '',
+  group: '',
+  region: '',
+  contentType: 'series',
+} : null;
 const initialBrowse: Record<string, BrowseState> = {};
 if (initialUrl.searchQuery || initialUrl.selectedGroup) {
   initialBrowse[initialUrl.view] = {
@@ -57,7 +66,7 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
   currentView: initialUrl.view,
   viewStack: [],
   selectedGroup: null,
-  selectedSeries: null,
+  selectedSeries: initialSeries,
   selectedMovie: null,
   showExitDialog: false,
   showToast: false,
@@ -181,7 +190,9 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
 
 // Sync URL whenever the active view or its browse state changes
 useAppStore.subscribe((state, prevState) => {
-  if (state.currentView !== prevState.currentView || state.browseStates !== prevState.browseStates) {
-    updateUrl(state.currentView, state.browseStates[state.currentView]);
+  if (state.currentView !== prevState.currentView
+      || state.browseStates !== prevState.browseStates
+      || state.selectedSeries?.id !== prevState.selectedSeries?.id) {
+    updateUrl(state.currentView, state.browseStates[state.currentView], state.selectedSeries?.id);
   }
 });

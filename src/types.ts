@@ -143,4 +143,6 @@ export interface WatchProgress {
   contentType: ContentType;
   /** Parent series ID so episode progress can appear on Home. */
   seriesId?: string;
+  /** Completed episodes stay recorded so Series Detail can advance to the next one. */
+  completed?: boolean;
 }

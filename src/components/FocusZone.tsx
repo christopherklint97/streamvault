@@ -169,6 +169,10 @@ export default function FocusZone({ children, className, onEnter, onBack }: Focu
         return;
       }
 
+      // Native selects own Enter and all arrow keys. Intercepting them here
+      // prevents keyboard/touch-TV users from changing the selected option.
+      if (active.tagName === 'SELECT') return;
+
       // ENTER: click the focused element
       if (e.keyCode === KEY_CODES.ENTER) {
         if (onEnter) {

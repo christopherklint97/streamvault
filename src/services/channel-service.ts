@@ -6,7 +6,8 @@ const LAST_WATCHED_KEY = 'streamvault_last_watched';
 const WATCH_PROGRESS_KEY = 'streamvault_watch_progress';
 const SUBTITLES_ENABLED_KEY = 'streamvault_subtitles_enabled';
 const MAX_RECENT = 20;
-const MAX_PROGRESS_ENTRIES = 100;
+// Long series can exceed 100 episodes; keep enough history to preserve watched order.
+const MAX_PROGRESS_ENTRIES = 2000;
 /** Percentage threshold to consider content "finished" */
 const FINISHED_THRESHOLD = 0.95;
 /** Minimum seconds watched before saving progress */
@@ -64,15 +65,25 @@ export function saveWatchProgress(
   position: number,
   duration: number,
   contentType: Channel['contentType'],
-  seriesId?: string
+  seriesId?: string,
+  completedOverride = false,
 ): void {
-  // Don't save negligible progress
-  if (position < MIN_POSITION_TO_SAVE) return;
+  // Don't save negligible progress unless a terminal event explicitly completed it.
+  if (position < MIN_POSITION_TO_SAVE && !completedOverride) return;
 
   const map = getProgressMap();
 
-  // If finished (>95% watched), remove from continue watching
-  if (duration > 0 && position / duration >= FINISHED_THRESHOLD) {
+  const previous = map[channelId];
+  const keptCompletion = contentType === 'series'
+    && previous?.completed === true
+    && position >= previous.position - 5;
+  const completed = completedOverride
+    || (duration > 0 && position / duration >= FINISHED_THRESHOLD)
+    || keptCompletion;
+
+  // Finished movies leave Continue Watching. Completed episodes remain as
+  // history so Series Detail can mark them watched and advance to the next one.
+  if (completed && contentType !== 'series') {
     delete map[channelId];
     saveProgressMap(map);
     return;
@@ -85,6 +96,7 @@ export function saveWatchProgress(
     updatedAt: Date.now(),
     contentType,
     seriesId,
+    completed,
   };
   saveProgressMap(map);
 }
@@ -95,6 +107,20 @@ export function saveWatchProgress(
 export function getWatchProgress(channelId: string): WatchProgress | null {
   const map = getProgressMap();
   return map[channelId] || null;
+}
+
+/** Read one parent series' episode records in a single localStorage parse. */
+export function getSeriesWatchProgress(seriesId: string): Record<string, WatchProgress> {
+  const entries = Object.entries(getProgressMap())
+    .filter(([, progress]) => progress.contentType === 'series' && progress.seriesId === seriesId);
+  return Object.fromEntries(entries);
+}
+
+/** Most recent unfinished episode progress for a parent series. */
+export function getLatestSeriesProgress(seriesId: string): WatchProgress | null {
+  const entries = Object.values(getSeriesWatchProgress(seriesId))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+  return entries.find(progress => !progress.completed) ?? entries[0] ?? null;
 }
 
 /**
