@@ -146,6 +146,8 @@ export default function Player() {
   const switchByOffset = usePlayerStore((s) => s.switchByOffset);
   const channelListVisible = usePlayerStore((s) => s.channelListVisible);
   const toggleChannelList = usePlayerStore((s) => s.toggleChannelList);
+  const audioOnly = usePlayerStore((s) => s.audioOnly);
+  const setAudioOnly = usePlayerStore((s) => s.setAudioOnly);
   const channelId = currentChannel?.id;
   const programs = useChannelStore((s) => s.programs);
   const goBack = useAppStore((s) => s.goBack);
@@ -542,6 +544,15 @@ export default function Player() {
     resetOSDTimer();
   }, [currentChannel, currentProgram, isRecording, createRecording, showToast, resetOSDTimer]);
 
+  const handleAudioOnly = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    const nextAudioOnly = !audioOnly;
+    setAudioOnly(nextAudioOnly);
+    showToast(nextAudioOnly ? 'Audio-only mode' : 'Video mode');
+    play();
+    resetOSDTimer();
+  }, [audioOnly, play, resetOSDTimer, setAudioOnly, showToast]);
+
   // Tap empty area to toggle OSD (dedicated layer behind controls)
   const handleTapZone = useCallback(() => {
     if (showOSD) {
@@ -633,6 +644,26 @@ export default function Player() {
           </div>
         )}
 
+        {isLive && audioOnly && currentChannel && (
+          <div className="absolute inset-0 z-[1] flex flex-col items-center justify-center gap-4 bg-[radial-gradient(circle_at_center,_#172336_0%,_#090b10_68%)] text-center px-6" data-audio-only-view>
+            <div className="relative flex items-center justify-center w-28 h-28 rounded-full bg-white/[0.06] border border-white/10 shadow-2xl">
+              {currentChannel.logo ? (
+                <img src={currentChannel.logo} alt="" className="w-20 h-20 object-contain rounded-full" />
+              ) : (
+                <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" className="text-accent">
+                  <path d="M4 14v-4a8 8 0 0 1 16 0v4" />
+                  <path d="M18 19h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3v4a3 3 0 0 1-3 3Z" />
+                  <path d="M6 19H5a3 3 0 0 1-3-3v-4h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2Z" />
+                </svg>
+              )}
+            </div>
+            <div>
+              <p className="text-18 font-semibold text-white">Audio only</p>
+              <p className="text-sm text-[#8d9aad] mt-1">Listening to {currentChannel.name}</p>
+            </div>
+          </div>
+        )}
+
         {/* Loading spinner */}
         {playerState.status === 'loading' && (
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center gap-4 text-[#888] text-20 animate-fade-in">
@@ -711,6 +742,24 @@ export default function Player() {
               </div>
               {/* Top-right action buttons */}
               <div className="flex items-center gap-1" data-player-controls>
+                {SHOW_OSD_CONTROLS && isLive && (
+                  <button
+                    className={cn(
+                      'flex items-center justify-center w-10 h-10 rounded-lg border-none bg-transparent shrink-0 tap-none cursor-pointer active:opacity-60',
+                      audioOnly ? 'text-accent bg-white/[0.08]' : 'text-white'
+                    )}
+                    onClick={handleAudioOnly}
+                    title={audioOnly ? 'Show video' : 'Audio only'}
+                    aria-label={audioOnly ? 'Show video' : 'Switch to audio only'}
+                    aria-pressed={audioOnly}
+                  >
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M4 14v-4a8 8 0 0 1 16 0v4" />
+                      <path d="M18 19h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3v4a3 3 0 0 1-3 3Z" />
+                      <path d="M6 19H5a3 3 0 0 1-3-3v-4h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2Z" />
+                    </svg>
+                  </button>
+                )}
                 {SHOW_OSD_CONTROLS && isLive && (
                   <button
                     className={cn(

@@ -47,6 +47,7 @@ import { selectIosVodFallback } from './ios-vod.js';
 import { parseByteRange } from './ranges.js';
 import { allowedProxyHostsFromConfig, maskConfigResponse, normalizeAllowedOrigins, requireAuth, validateExternalHttpUrl } from './security.js';
 import { isDatabaseCorruptionError } from './db-lifecycle.js';
+import { buildLiveMpegTsArgs } from './live-stream.js';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001', 10);
@@ -1093,7 +1094,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
       }
       const rewritten = rewriteHlsManifest(body, upstream.finalUrl || streamUrl);
       res.send(rewritten);
-    } else if (isLive && req.query.subs !== '1') {
+    } else if (isLive && (req.query.audio === '1' || req.query.subs !== '1')) {
       // Live MPEG-TS: pipe through ffmpeg to drop subtitle PIDs (`-sn`) and
       // CEA-608/708 SEI NAL units (filter_units bitstream filter). AVPlay
       // on Tizen renders DVB/teletext subs and embedded captions natively
@@ -1101,9 +1102,12 @@ app.get('/api/stream/:channelId', async (req, res) => {
       // and SEI here is the only reliable way to suppress them. `-c copy`
       // = no transcoding, only demuxer/muxer overhead. Skip when the
       // client opts in to keeping subs via `?subs=1`.
-      logger.info(`Stream proxy: ffmpeg -sn pipe for ${channelId} (content-type: ${contentType})`);
+      const audioOnly = req.query.audio === '1';
+      logger.info(`Stream proxy: ffmpeg ${audioOnly ? 'audio-only' : '-sn'} pipe for ${channelId} (content-type: ${contentType})`);
       // ffmpeg's output length is unknown; never forward upstream Content-Length.
       res.removeHeader('Content-Length');
+      res.setHeader('Cache-Control', 'no-store');
+      if (audioOnly) res.setHeader('X-StreamVault-Mode', 'audio-only');
 
       // CEA-608/708 closed captions ride inside H.264 SEI NAL units (type 6)
       // and HEVC SEI (types 39/40), so `-sn` alone won't drop them — that
@@ -1112,15 +1116,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
       // stream without re-encoding. List both H.264 and HEVC SEI types so
       // the same command works regardless of codec; non-matching types are
       // silently ignored.
-      const ff = spawn('ffmpeg', [
-        '-hide_banner', '-loglevel', 'warning',
-        '-fflags', '+nobuffer+discardcorrupt',
-        '-i', 'pipe:0',
-        '-map', '0:v', '-map', '0:a?',
-        '-c', 'copy', '-sn',
-        '-bsf:v', 'filter_units=remove_types=6|39|40',
-        '-f', 'mpegts', 'pipe:1',
-      ], { stdio: ['pipe', 'pipe', 'pipe'] });
+      const ff = spawn('ffmpeg', buildLiveMpegTsArgs(audioOnly), { stdio: ['pipe', 'pipe', 'pipe'] });
 
       ff.stderr.on('data', (chunk) => {
         const msg = chunk.toString().trim();

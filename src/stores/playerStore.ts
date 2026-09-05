@@ -8,6 +8,7 @@ interface PlayerStoreState extends PlayerState {
   groupChannels: Channel[];
   groupChannelsLoading: boolean;
   channelListVisible: boolean;
+  audioOnly: boolean;
 }
 
 interface PlayerStoreActions {
@@ -19,6 +20,7 @@ interface PlayerStoreActions {
   switchToChannel: (channel: Channel) => void;
   switchByOffset: (offset: number) => void;
   toggleChannelList: () => void;
+  setAudioOnly: (audioOnly: boolean) => void;
 }
 
 export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((set, get) => ({
@@ -29,12 +31,14 @@ export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((s
   groupChannels: [],
   groupChannelsLoading: false,
   channelListVisible: true,
+  audioOnly: false,
 
   setChannel: (channel: Channel) => {
     set({
       currentChannel: channel,
       status: 'loading',
       errorMessage: '',
+      audioOnly: false,
     });
     trackWatch(channel);
     // Auto-fetch group channels for live TV
@@ -79,6 +83,7 @@ export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((s
       currentChannel: channel,
       status: 'loading',
       errorMessage: '',
+      ...(channel.contentType === 'livetv' ? {} : { audioOnly: false }),
     });
     trackWatch(channel);
   },
@@ -101,5 +106,9 @@ export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((s
 
   toggleChannelList: () => {
     set((s) => ({ channelListVisible: !s.channelListVisible }));
+  },
+
+  setAudioOnly: (audioOnly: boolean) => {
+    set({ audioOnly });
   },
 }));

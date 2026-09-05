@@ -38,6 +38,7 @@ function AvPlayerVideo({ currentView }: { currentView: string }) {
   const currentChannel = usePlayerStore((s) => s.currentChannel);
   const groupChannels = usePlayerStore((s) => s.groupChannels);
   const channelListVisible = usePlayerStore((s) => s.channelListVisible);
+  const audioOnly = usePlayerStore((s) => s.audioOnly);
   const isLive = currentChannel?.contentType === 'livetv';
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -63,13 +64,15 @@ function AvPlayerVideo({ currentView }: { currentView: string }) {
       preload="auto"
       {...{ 'x-webkit-airplay': 'allow' }}
       {...(currentView === 'player' ? { 'data-active': '' } : {})}
+      {...(audioOnly ? { 'data-audio-only': '' } : {})}
       className={cn(
         'fixed top-0 left-0 bg-black object-contain object-center',
         currentView === 'player'
           ? isPortraitLive
             ? 'w-full aspect-video z-[998]'
             : 'w-full h-dvh z-[998]'
-          : 'w-px h-px -z-10 opacity-0 pointer-events-none'
+          : 'w-px h-px -z-10 opacity-0 pointer-events-none',
+        currentView === 'player' && audioOnly && 'opacity-0'
       )}
     />
   );

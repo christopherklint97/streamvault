@@ -11,6 +11,8 @@ import { useAppStore } from '../stores/appStore';
 import { browserTranscodePath, iphoneVodPlaybackPath, toAbsolutePlayerUrl } from '../utils/stream-url';
 import { isIPhone } from '../utils/platform';
 import { getHtml5WatchProgress } from '../utils/media-progress';
+import { LiveStreamRecovery } from '../utils/live-stream-recovery';
+import { withLiveStreamOptions } from '../utils/live-stream-options';
 
 const toast = (msg: string) => useAppStore.getState().showToastMessage(msg);
 
@@ -24,6 +26,14 @@ const PROGRESS_SAVE_INTERVAL = 10_000; // Save progress every 10 seconds
 let activeMpegtsPlayer: MpegtsType.Player | null = null;
 let bgProgressInterval: ReturnType<typeof setInterval> | null = null;
 let bgBufferTimer: ReturnType<typeof setTimeout> | null = null;
+let html5PlaybackGeneration = 0;
+let restartActiveLiveStream: (() => void) | null = null;
+
+const liveStreamRecovery = new LiveStreamRecovery((reason, attempt) => {
+  log.warn(`Live stream: ${reason} — reconnecting (attempt ${attempt})`);
+  usePlayerStore.getState().setStatus('loading');
+  restartActiveLiveStream?.();
+});
 
 // Tizen AVPlay live-stream resilience: auto-retry on stalls and unexpected
 // stream completions. Throttled so a permanently-broken stream stops looping.
@@ -88,10 +98,16 @@ function setupMediaSession(channelName: string) {
   const getVideo = () => document.getElementById('av-player') as HTMLVideoElement | null;
 
   navigator.mediaSession.setActionHandler('play', () => {
+    if (usePlayerStore.getState().currentChannel?.contentType === 'livetv') {
+      liveStreamRecovery.resume();
+    }
     getVideo()?.play().catch(() => {});
     navigator.mediaSession.playbackState = 'playing';
   });
   navigator.mediaSession.setActionHandler('pause', () => {
+    if (usePlayerStore.getState().currentChannel?.contentType === 'livetv') {
+      liveStreamRecovery.suspend();
+    }
     getVideo()?.pause();
     navigator.mediaSession.playbackState = 'paused';
   });
@@ -122,6 +138,9 @@ function stopPlayback() {
   log.info('⏹ stopPlayback()');
 
   stopBgProgressTracking();
+  html5PlaybackGeneration += 1;
+  restartActiveLiveStream = null;
+  liveStreamRecovery.stop();
 
   if (bgBufferTimer) { clearTimeout(bgBufferTimer); bgBufferTimer = null; }
 
@@ -164,7 +183,7 @@ function stopPlayback() {
  *
  * @param directUrl the upstream URL required for episodes not stored in the DB
  */
-export function getStreamUrl(channelId: string, directUrl?: string, keepSubs?: boolean, _isLive?: boolean): string {
+export function getStreamUrl(channelId: string, directUrl?: string, keepSubs?: boolean, isLive?: boolean, audioOnly?: boolean): string {
   const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
 
   const params: string[] = [];
@@ -173,7 +192,8 @@ export function getStreamUrl(channelId: string, directUrl?: string, keepSubs?: b
   }
   if (keepSubs) params.push('subs=1');
   const query = params.length ? `?${params.join('&')}` : '';
-  return `${apiBaseUrl}/api/stream/${encodeURIComponent(channelId)}${query}`;
+  const streamPath = `${apiBaseUrl}/api/stream/${encodeURIComponent(channelId)}${query}`;
+  return withLiveStreamOptions(streamPath, Boolean(isLive && audioOnly));
 }
 
 export function usePlayer(): {
@@ -208,6 +228,7 @@ export function usePlayer(): {
 
     const setStatus = usePlayerStore.getState().setStatus;
     const setError = usePlayerStore.getState().setError;
+    const audioOnly = channel.contentType === 'livetv' && usePlayerStore.getState().audioOnly;
 
     log.info(`▶ play() channel="${channel.name}" id=${channel.id} type=${channel.contentType} url=${channel.url ? channel.url.substring(0, 60) + '...' : '(empty)'}`);
 
@@ -237,7 +258,7 @@ export function usePlayer(): {
         const isRecording = channel.id.startsWith('recording_');
         const playerPath = isRecording
           ? channel.url
-          : getStreamUrl(channel.id, channel.url, keepSubsRef.current, isLive);
+          : getStreamUrl(channel.id, channel.url, keepSubsRef.current, isLive, audioOnly);
         const tizenPlayUrl = toAbsolutePlayerUrl(
           playerPath,
           useChannelStore.getState().apiBaseUrl
@@ -362,13 +383,25 @@ export function usePlayer(): {
         return;
       }
 
+      const isLiveTs = channel.contentType === 'livetv';
+      const playbackGeneration = ++html5PlaybackGeneration;
+      const isCurrentPlayback = () => playbackGeneration === html5PlaybackGeneration;
+      if (isLiveTs) {
+        restartActiveLiveStream = play;
+        liveStreamRecovery.begin(channel.id);
+      } else {
+        restartActiveLiveStream = null;
+        liveStreamRecovery.stop();
+      }
+
       log.info(`HTML5: found video element, readyState=${video.readyState}, networkState=${video.networkState}`);
 
       // Clean up any previous playback state
       if (activeMpegtsPlayer) {
         log.info('HTML5: destroying previous mpegts.js instance');
-        activeMpegtsPlayer.destroy();
+        const previousPlayer = activeMpegtsPlayer;
         activeMpegtsPlayer = null;
+        previousPlayer.destroy();
       }
       // Reset the video element so the new source can attach cleanly
       video.pause();
@@ -382,6 +415,7 @@ export function usePlayer(): {
         }
       } catch { /* ignore */ }
 
+      let lastMediaTime = -1;
       const setupEvents = () => {
         video.onloadstart = () => log.debug('HTML5 event: loadstart');
         video.onloadedmetadata = () => log.info(`HTML5 event: loadedmetadata, duration=${video.duration}, videoWidth=${video.videoWidth}x${video.videoHeight}`);
@@ -412,19 +446,38 @@ export function usePlayer(): {
           log.info('HTML5 event: playing');
           if (bgBufferTimer) { clearTimeout(bgBufferTimer); bgBufferTimer = null; }
           setStatus('playing');
+          if (isLiveTs) liveStreamRecovery.progress();
           setupMediaSession(channel.name);
         };
-        video.onstalled = () => log.warn('HTML5 event: stalled');
+        video.ontimeupdate = () => {
+          if (!isLiveTs || !isCurrentPlayback() || video.currentTime <= lastMediaTime) return;
+          lastMediaTime = video.currentTime;
+          liveStreamRecovery.progress();
+        };
+        video.onstalled = () => {
+          log.warn('HTML5 event: stalled');
+          if (isLiveTs) liveStreamRecovery.stalled();
+        };
         video.onsuspend = () => log.debug('HTML5 event: suspend');
         video.onerror = () => {
           const err = video.error;
           const errMsg = err ? `code=${err.code} message="${err.message}"` : 'unknown';
           log.error(`HTML5 event: error — ${errMsg}`);
+          if (isLiveTs && isCurrentPlayback()) {
+            setStatus('loading');
+            liveStreamRecovery.transportEnded('mpegts-error');
+            return;
+          }
           setError(`Playback failed: ${errMsg}`);
         };
         video.onabort = () => log.warn('HTML5 event: abort');
         video.onended = () => {
           log.info('HTML5 event: ended');
+          if (isLiveTs && isCurrentPlayback()) {
+            setStatus('loading');
+            liveStreamRecovery.transportEnded('media-ended');
+            return;
+          }
           saveProgressNow();
           setStatus('idle');
           clearMediaSession();
@@ -447,7 +500,6 @@ export function usePlayer(): {
         });
       };
 
-      const isLiveTs = channel.contentType === 'livetv';
       const isRecording = channel.id.startsWith('recording_');
       // Recordings have a direct server URL; live/VOD go through stream proxy
       const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
@@ -461,7 +513,7 @@ export function usePlayer(): {
           ? `${apiBaseUrl}${iphoneVodPath}`
             : needsBrowserTranscode
             ? `${apiBaseUrl}${browserTranscodePath(channel.id, channel.id.startsWith('episode_') ? channel.url : undefined, resumePosition)}`
-            : getStreamUrl(channel.id, channel.url, false, isLiveTs);
+            : getStreamUrl(channel.id, channel.url, false, isLiveTs, audioOnly);
       log.info(`HTML5: playUrl=${playUrl}, contentType=${channel.contentType}`);
 
       if (isLiveTs) {
@@ -469,6 +521,7 @@ export function usePlayer(): {
         log.info('HTML5: loading mpegts.js for live MPEG-TS playback...');
         setupEvents();
         import('mpegts.js').then(({ default: mpegts }) => {
+          if (!isCurrentPlayback()) return;
           log.info(`HTML5: mpegts.js loaded, isSupported=${mpegts.isSupported()}`);
           if (!mpegts.isSupported()) {
             log.error('HTML5: mpegts.js not supported');
@@ -489,20 +542,31 @@ export function usePlayer(): {
             liveBufferLatencyChasing: false,     // Disable — hard seeks cause jumpy playback on start
           });
           activeMpegtsPlayer = player;
+          let lastDecodedFrames = -1;
 
           // Register all event handlers BEFORE attaching/loading
           player.on(mpegts.Events.ERROR, (type: string, detail: string, info: unknown) => {
+            if (!isCurrentPlayback() || activeMpegtsPlayer !== player) return;
             log.error(`mpegts ERROR: type=${type} detail=${detail}`, info);
-            setError(`Live stream error: ${detail}`);
+            setStatus('loading');
+            liveStreamRecovery.transportEnded('mpegts-error');
           });
           player.on(mpegts.Events.LOADING_COMPLETE, () => {
+            if (!isCurrentPlayback() || activeMpegtsPlayer !== player) return;
             log.info('mpegts: loading complete');
+            setStatus('loading');
+            liveStreamRecovery.transportEnded('loading-complete');
           });
           player.on(mpegts.Events.MEDIA_INFO, (info: unknown) => {
             log.info('mpegts: media info received', info);
           });
           player.on(mpegts.Events.STATISTICS_INFO, (info: unknown) => {
             log.debug('mpegts: stats', info);
+            const decodedFrames = (info as { decodedFrames?: number }).decodedFrames;
+            if (typeof decodedFrames === 'number' && decodedFrames > lastDecodedFrames) {
+              lastDecodedFrames = decodedFrames;
+              liveStreamRecovery.progress();
+            }
           });
 
           try {
@@ -512,7 +576,7 @@ export function usePlayer(): {
             log.info('HTML5: mpegts.js load() called — waiting for canplay to start playback');
           } catch (e) {
             log.error('HTML5: mpegts.js attach/load/play threw', e);
-            setError('Failed to start live stream');
+            liveStreamRecovery.transportEnded('mpegts-error');
           }
         }).catch((e) => { log.error('HTML5: failed to import mpegts.js', e); setError('Failed to load live TV player'); });
       } else {
@@ -588,9 +652,12 @@ export function usePlayer(): {
     } else {
       const video = document.getElementById('av-player') as HTMLVideoElement | null;
       if (video) {
+        const isLive = usePlayerStore.getState().currentChannel?.contentType === 'livetv';
         if (video.paused) {
+          if (isLive) liveStreamRecovery.resume();
           video.play().catch((err) => toast(`Play failed: ${err}`));
         } else {
+          if (isLive) liveStreamRecovery.suspend();
           video.pause();
         }
       }
