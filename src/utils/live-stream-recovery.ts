@@ -34,6 +34,7 @@ export class LiveStreamRecovery {
   private retryCount = 0;
   private watchdogTimer: TimerHandle | null = null;
   private retryTimer: TimerHandle | null = null;
+  private retryReason: LiveRecoveryReason | null = null;
   private readonly onRecover: (reason: LiveRecoveryReason, attempt: number) => void;
 
   constructor(
@@ -63,6 +64,13 @@ export class LiveStreamRecovery {
 
   progress(): void {
     if (!this.active || this.paused) return;
+    if (this.retryReason && this.retryReason !== 'stalled') {
+      // Buffered frames may continue after transport EOF. They do not prove the
+      // replacement connection is healthy and must not reset retry backoff.
+      this.lastProgressAt = this.now();
+      return;
+    }
+    if (this.retryReason === 'stalled') this.clearRetryTimer();
     this.lastProgressAt = this.now();
     this.retryCount = 0;
     this.armWatchdog(this.stallTimeoutMs);
@@ -124,8 +132,10 @@ export class LiveStreamRecovery {
     const attempt = this.retryCount + 1;
     const delay = this.retryDelaysMs[Math.min(this.retryCount, this.retryDelaysMs.length - 1)];
     this.retryCount = attempt;
+    this.retryReason = reason;
     this.retryTimer = this.setTimer(() => {
       this.retryTimer = null;
+      this.retryReason = null;
       if (this.active) this.onRecover(reason, attempt);
     }, delay);
   }
@@ -140,5 +150,6 @@ export class LiveStreamRecovery {
     if (!this.retryTimer) return;
     this.clearTimer(this.retryTimer);
     this.retryTimer = null;
+    this.retryReason = null;
   }
 }

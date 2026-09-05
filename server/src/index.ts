@@ -47,7 +47,13 @@ import { selectIosVodFallback } from './ios-vod.js';
 import { parseByteRange } from './ranges.js';
 import { allowedProxyHostsFromConfig, maskConfigResponse, normalizeAllowedOrigins, requireAuth, validateExternalHttpUrl } from './security.js';
 import { isDatabaseCorruptionError } from './db-lifecycle.js';
-import { buildLiveMpegTsArgs } from './live-stream.js';
+import {
+  ConcurrentStreamLimiter,
+  LIVE_MPEG_TS_CONTENT_TYPE,
+  buildLiveMpegTsArgs,
+  liveFfmpegExitAction,
+  selectLivePipeline,
+} from './live-stream.js';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001', 10);
@@ -57,6 +63,7 @@ const IOS_HLS_MAX_LIFETIME_MS = 4 * 60 * 60_000;
 const IOS_HLS_MAX_STORAGE_BYTES = 4 * 1024 * 1024 * 1024;
 const IOS_HLS_TICKET_TTL_MS = 30_000;
 const MAX_IOS_HLS_SESSIONS = 2;
+const liveAudioTranscodes = new ConcurrentStreamLimiter(2);
 const iosHlsTicketSecret = randomBytes(32).toString('hex');
 const iosHlsTicketNonces = new Map<string, number>();
 const iosHlsAuthorizationLimiter = new FixedWindowRateLimiter(12, 60_000);
@@ -1082,7 +1089,12 @@ app.get('/api/stream/:channelId', async (req, res) => {
     res.status(upstream.statusCode);
     setStreamSocketOpts(res);
 
-    if (isM3u8) {
+    const audioOnly = isLive && req.query.audio === '1';
+    const pipeline = isLive
+      ? selectLivePipeline({ isM3u8, audioOnly, keepSubtitles: req.query.subs === '1' })
+      : isM3u8 ? 'hls-manifest' : 'binary';
+
+    if (pipeline === 'hls-manifest') {
       // M3U8 is text — read body to string, rewrite URLs, send.
       const chunks: Buffer[] = [];
       for await (const chunk of upstream.body) chunks.push(chunk as Buffer);
@@ -1094,54 +1106,77 @@ app.get('/api/stream/:channelId', async (req, res) => {
       }
       const rewritten = rewriteHlsManifest(body, upstream.finalUrl || streamUrl);
       res.send(rewritten);
-    } else if (isLive && (req.query.audio === '1' || req.query.subs !== '1')) {
-      // Live MPEG-TS: pipe through ffmpeg to drop subtitle PIDs (`-sn`) and
-      // CEA-608/708 SEI NAL units (filter_units bitstream filter). AVPlay
-      // on Tizen renders DVB/teletext subs and embedded captions natively
-      // without exposing controls to the web app. Stripping the packets
-      // and SEI here is the only reliable way to suppress them. `-c copy`
-      // = no transcoding, only demuxer/muxer overhead. Skip when the
-      // client opts in to keeping subs via `?subs=1`.
-      const audioOnly = req.query.audio === '1';
+    } else if (pipeline === 'ffmpeg-pipe' || pipeline === 'ffmpeg-url') {
+      const releaseAudioSlot = audioOnly ? liveAudioTranscodes.acquire() : () => {};
+      if (!releaseAudioSlot) {
+        await upstream.body.dump().catch(() => {});
+        res.removeHeader('Content-Length');
+        res.setHeader('Retry-After', '5');
+        res.status(503).json({ error: 'Audio-only capacity reached; retry shortly' });
+        return;
+      }
+
+      // HLS manifests need a URL base for relative segments. Point ffmpeg at
+      // the loopback A/V proxy (without audio=1) so its segment requests retain
+      // StreamVault's validated host and CDN headers. Raw MPEG-TS stays on the
+      // already-open upstream pipe.
+      const ffmpegSource = pipeline === 'ffmpeg-url'
+        ? `http://127.0.0.1:${PORT}/api/stream/${encodeURIComponent(channelId)}`
+        : 'pipe:0';
+      if (pipeline === 'ffmpeg-url') await upstream.body.dump().catch(() => {});
+
       logger.info(`Stream proxy: ffmpeg ${audioOnly ? 'audio-only' : '-sn'} pipe for ${channelId} (content-type: ${contentType})`);
-      // ffmpeg's output length is unknown; never forward upstream Content-Length.
       res.removeHeader('Content-Length');
+      res.removeHeader('Content-Range');
+      res.removeHeader('Accept-Ranges');
+      res.setHeader('Content-Type', LIVE_MPEG_TS_CONTENT_TYPE);
       res.setHeader('Cache-Control', 'no-store');
       if (audioOnly) res.setHeader('X-StreamVault-Mode', 'audio-only');
 
-      // CEA-608/708 closed captions ride inside H.264 SEI NAL units (type 6)
-      // and HEVC SEI (types 39/40), so `-sn` alone won't drop them — that
-      // flag only filters separate subtitle PIDs. `filter_units` is a
-      // bitstream filter that strips matching NAL types from a copied
-      // stream without re-encoding. List both H.264 and HEVC SEI types so
-      // the same command works regardless of codec; non-matching types are
-      // silently ignored.
-      const ff = spawn('ffmpeg', buildLiveMpegTsArgs(audioOnly), { stdio: ['pipe', 'pipe', 'pipe'] });
+      const ff = spawn('ffmpeg', buildLiveMpegTsArgs(audioOnly, ffmpegSource), { stdio: ['pipe', 'pipe', 'pipe'] });
+      let clientClosed = false;
+      let processHandled = false;
 
       ff.stderr.on('data', (chunk) => {
         const msg = chunk.toString().trim();
         if (msg) logger.warn(`ffmpeg[${channelId}]: ${msg}`);
       });
       ff.on('error', (err) => {
+        if (processHandled) return;
+        processHandled = true;
+        releaseAudioSlot();
         logger.error(`ffmpeg spawn failed for ${channelId}: ${err.message}`);
-        if (!res.headersSent) res.status(500).json({ error: 'Stream processing failed' });
         upstream.body.destroy();
+        if (!res.headersSent) res.status(500).json({ error: 'Stream processing failed' });
+        else res.destroy(err);
       });
-      ff.on('exit', (code, signal) => {
-        logger.info(`ffmpeg exited ${channelId} code=${code} signal=${signal}`);
+      ff.on('close', (code, signal) => {
+        if (processHandled) return;
+        processHandled = true;
+        releaseAudioSlot();
+        const action = liveFfmpegExitAction(code, signal, clientClosed, res.headersSent);
+        const level = code === 0 || action === 'ignore' ? 'info' : 'error';
+        logger[level](`ffmpeg exited ${channelId} code=${code} signal=${signal}`);
+        if (action === 'end') res.end();
+        else if (action === 'send-502') res.status(502).json({ error: 'Live stream processing failed' });
+        else if (action === 'destroy') res.destroy(new Error('Live stream processing failed'));
       });
 
-      // Upstream → ffmpeg stdin → response. Default pipe end:true closes ff.stdin
-      // on upstream EOF, which is what we want for live drops.
-      upstream.body.pipe(ff.stdin);
-      ff.stdout.pipe(res);
+      // Keep the HTTP response open until the child closes so a nonzero ffmpeg
+      // exit can become a 502 instead of a successful empty/truncated response.
+      ff.stdout.pipe(res, { end: false });
+      if (pipeline === 'ffmpeg-pipe') upstream.body.pipe(ff.stdin);
+      else ff.stdin.end();
 
-      // Suppress EPIPE noise when the other side of these pipes closes first
       ff.stdin.on('error', () => {});
       ff.stdout.on('error', () => {});
-      upstream.body.on('error', (err) => logger.warn(`upstream error ${channelId}: ${err.message}`));
+      upstream.body.on('error', (err) => {
+        if (!clientClosed) logger.warn(`upstream error ${channelId}: ${err.message}`);
+      });
 
-      req.on('close', () => {
+      res.on('close', () => {
+        if (res.writableEnded) return;
+        clientClosed = true;
         logger.info(`Stream proxy: client disconnected from ${channelId}`);
         upstream.body.destroy();
         if (!ff.killed) ff.kill('SIGKILL');

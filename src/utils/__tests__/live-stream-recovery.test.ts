@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LiveStreamRecovery } from '../live-stream-recovery';
-import { withLiveStreamOptions } from '../live-stream-options';
+import { hasDecodedFrameProgress, withLiveStreamOptions } from '../live-stream-options';
 
 describe('withLiveStreamOptions', () => {
   it('adds audio-only mode while preserving existing query parameters', () => {
@@ -13,6 +13,15 @@ describe('withLiveStreamOptions', () => {
     expect(withLiveStreamOptions('/api/stream/live_1015944', false)).toBe(
       '/api/stream/live_1015944',
     );
+  });
+});
+
+describe('hasDecodedFrameProgress', () => {
+  it('requires decoded frames to increase beyond zero', () => {
+    expect(hasDecodedFrameProgress(0, 0)).toBe(false);
+    expect(hasDecodedFrameProgress(0, 1)).toBe(true);
+    expect(hasDecodedFrameProgress(12, 12)).toBe(false);
+    expect(hasDecodedFrameProgress(12, undefined)).toBe(false);
   });
 });
 
@@ -68,6 +77,40 @@ describe('LiveStreamRecovery', () => {
     vi.advanceTimersByTime(1);
 
     expect(recover).toHaveBeenCalledWith('stalled', 1);
+  });
+
+  it('cancels a pending stall reconnect when real progress resumes during backoff', () => {
+    const recover = vi.fn();
+    const recovery = new LiveStreamRecovery(recover, {
+      stallTimeoutMs: 10_000,
+      retryDelaysMs: [1_000],
+    });
+
+    recovery.begin('live_1015944');
+    vi.advanceTimersByTime(10_000);
+    vi.advanceTimersByTime(500);
+    recovery.progress();
+    vi.advanceTimersByTime(1_000);
+
+    expect(recover).not.toHaveBeenCalled();
+  });
+
+  it('still reconnects after a terminal EOF without treating buffered media as a retry reset', () => {
+    const recover = vi.fn();
+    const recovery = new LiveStreamRecovery(recover, { retryDelaysMs: [1_000, 2_000] });
+
+    recovery.begin('live_1015944');
+    recovery.transportEnded('loading-complete');
+    recovery.progress();
+    vi.advanceTimersByTime(1_000);
+    expect(recover).toHaveBeenCalledWith('loading-complete', 1);
+
+    recovery.begin('live_1015944');
+    recovery.transportEnded('loading-complete');
+    vi.advanceTimersByTime(1_999);
+    expect(recover).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1);
+    expect(recover).toHaveBeenLastCalledWith('loading-complete', 2);
   });
 
   it('backs off repeated failures and resets after real progress', () => {

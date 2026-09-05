@@ -12,7 +12,7 @@ import { browserTranscodePath, iphoneVodPlaybackPath, toAbsolutePlayerUrl } from
 import { isIPhone } from '../utils/platform';
 import { getHtml5WatchProgress } from '../utils/media-progress';
 import { LiveStreamRecovery } from '../utils/live-stream-recovery';
-import { withLiveStreamOptions } from '../utils/live-stream-options';
+import { hasDecodedFrameProgress, withLiveStreamOptions } from '../utils/live-stream-options';
 
 const toast = (msg: string) => useAppStore.getState().showToastMessage(msg);
 
@@ -34,6 +34,11 @@ const liveStreamRecovery = new LiveStreamRecovery((reason, attempt) => {
   usePlayerStore.getState().setStatus('loading');
   restartActiveLiveStream?.();
 });
+
+function disableLiveStreamRecovery() {
+  restartActiveLiveStream = null;
+  liveStreamRecovery.stop();
+}
 
 // Tizen AVPlay live-stream resilience: auto-retry on stalls and unexpected
 // stream completions. Throttled so a permanently-broken stream stops looping.
@@ -139,8 +144,7 @@ function stopPlayback() {
 
   stopBgProgressTracking();
   html5PlaybackGeneration += 1;
-  restartActiveLiveStream = null;
-  liveStreamRecovery.stop();
+  disableLiveStreamRecovery();
 
   if (bgBufferTimer) { clearTimeout(bgBufferTimer); bgBufferTimer = null; }
 
@@ -433,6 +437,7 @@ export function usePlayer(): {
             setStatus('playing');
           }).catch((e) => {
             log.error('HTML5: play() rejected on canplay', e);
+            if (isLiveTs && isCurrentPlayback()) disableLiveStreamRecovery();
             setError('Playback blocked — tap to retry');
           });
         };
@@ -446,7 +451,6 @@ export function usePlayer(): {
           log.info('HTML5 event: playing');
           if (bgBufferTimer) { clearTimeout(bgBufferTimer); bgBufferTimer = null; }
           setStatus('playing');
-          if (isLiveTs) liveStreamRecovery.progress();
           setupMediaSession(channel.name);
         };
         video.ontimeupdate = () => {
@@ -482,7 +486,7 @@ export function usePlayer(): {
           setStatus('idle');
           clearMediaSession();
         };
-        video.textTracks.addEventListener('addtrack', () => {
+        video.textTracks.onaddtrack = () => {
           const tracks: SubtitleTrack[] = [];
           for (let i = 0; i < video.textTracks.length; i++) {
             const t = video.textTracks[i];
@@ -497,7 +501,7 @@ export function usePlayer(): {
             video.textTracks[i].mode = i === targetIdx ? 'showing' : 'hidden';
           }
           setCurrentSubtitleIndex(targetIdx);
-        });
+        };
       };
 
       const isRecording = channel.id.startsWith('recording_');
@@ -525,6 +529,7 @@ export function usePlayer(): {
           log.info(`HTML5: mpegts.js loaded, isSupported=${mpegts.isSupported()}`);
           if (!mpegts.isSupported()) {
             log.error('HTML5: mpegts.js not supported');
+            disableLiveStreamRecovery();
             setError('Live TV playback not supported on this browser');
             return;
           }
@@ -542,7 +547,7 @@ export function usePlayer(): {
             liveBufferLatencyChasing: false,     // Disable — hard seeks cause jumpy playback on start
           });
           activeMpegtsPlayer = player;
-          let lastDecodedFrames = -1;
+          let lastDecodedFrames = 0;
 
           // Register all event handlers BEFORE attaching/loading
           player.on(mpegts.Events.ERROR, (type: string, detail: string, info: unknown) => {
@@ -561,9 +566,10 @@ export function usePlayer(): {
             log.info('mpegts: media info received', info);
           });
           player.on(mpegts.Events.STATISTICS_INFO, (info: unknown) => {
+            if (!isCurrentPlayback() || activeMpegtsPlayer !== player) return;
             log.debug('mpegts: stats', info);
             const decodedFrames = (info as { decodedFrames?: number }).decodedFrames;
-            if (typeof decodedFrames === 'number' && decodedFrames > lastDecodedFrames) {
+            if (hasDecodedFrameProgress(lastDecodedFrames, decodedFrames)) {
               lastDecodedFrames = decodedFrames;
               liveStreamRecovery.progress();
             }
@@ -578,7 +584,12 @@ export function usePlayer(): {
             log.error('HTML5: mpegts.js attach/load/play threw', e);
             liveStreamRecovery.transportEnded('mpegts-error');
           }
-        }).catch((e) => { log.error('HTML5: failed to import mpegts.js', e); setError('Failed to load live TV player'); });
+        }).catch((e) => {
+          if (!isCurrentPlayback()) return;
+          log.error('HTML5: failed to import mpegts.js', e);
+          disableLiveStreamRecovery();
+          setError('Failed to load live TV player');
+        });
       } else {
         // VOD (MP4, etc) — direct URL (no proxy needed, browser handles it)
         log.info(`HTML5: direct video playback, setting src=${playUrl}`);
