@@ -192,14 +192,16 @@ export default function FocusZone({ children, className, onEnter, onBack }: Focu
       }
 
       // Determine direction
-      let direction: Direction | null = null;
-      switch (e.keyCode) {
-        case KEY_CODES.UP: direction = 'up'; break;
-        case KEY_CODES.DOWN: direction = 'down'; break;
-        case KEY_CODES.LEFT: direction = 'left'; break;
-        case KEY_CODES.RIGHT: direction = 'right'; break;
-        default: return;
-      }
+      const direction: Direction | null = (() => {
+        switch (e.keyCode) {
+          case KEY_CODES.UP: return 'up';
+          case KEY_CODES.DOWN: return 'down';
+          case KEY_CODES.LEFT: return 'left';
+          case KEY_CODES.RIGHT: return 'right';
+          default: return null;
+        }
+      })();
+      if (!direction) return;
 
       // Text inputs: let LEFT/RIGHT through for cursor movement
       if (isTextInput(active) && (direction === 'left' || direction === 'right')) {

@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import type { UIEvent } from 'react';
 import type { Channel, ContentType, Category } from '../types';
 import { usePlayerStore } from '../stores/playerStore';
 import { useChannelStore, SAME_ORIGIN } from '../stores/channelStore';
@@ -331,6 +332,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
   const searchRef = useRef<HTMLInputElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const fetchIdRef = useRef(0); // to discard stale responses
+  const loadingMoreRef = useRef(false);
 
   // Fetch categories on mount
   useEffect(() => {
@@ -367,9 +369,10 @@ export default function ChannelList({ contentType }: ChannelListProps) {
 
   // Load the next page (triggered by scroll proximity)
   const loadNextPage = useCallback(async () => {
-    if (loadingMore || !nextCursor) return;
+    if (loadingMoreRef.current || !nextCursor) return;
     const id = fetchIdRef.current;
     const group = selectedGroup && selectedGroup !== 'All' ? selectedGroup : undefined;
+    loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
       const data = await apiBrowse(contentType, group, PAGE_SIZE, nextCursor);
@@ -380,9 +383,10 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     } catch (err) {
       showToast(`Failed to load more: ${err}`);
     } finally {
+      loadingMoreRef.current = false;
       if (fetchIdRef.current === id) setLoadingMore(false);
     }
-  }, [loadingMore, nextCursor, selectedGroup, contentType, showToast]);
+  }, [nextCursor, selectedGroup, contentType, showToast]);
 
   // Mobile infinite scroll: observe the sentinel near the bottom of the list
   useEffect(() => {
@@ -399,15 +403,18 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     return () => observer.disconnect();
   }, [nextCursor, loadNextPage]);
 
-  // TV infinite scroll: when the viewport approaches the end of loaded rows, fetch more
-  useEffect(() => {
+  // TV infinite scroll: paginate from the scroll event instead of an effect so
+  // loading remains tied to the external event that changed the viewport.
+  const handleGridScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    const nextScrollOffset = event.currentTarget.scrollTop;
+    setScrollOffset(nextScrollOffset);
     if (MOBILE || !nextCursor) return;
     const loadedRows = Math.ceil(channels.length / COLUMN_COUNT);
-    const visibleEndRow = Math.ceil((scrollOffset + CONTAINER_HEIGHT) / ROW_HEIGHT);
+    const visibleEndRow = Math.ceil((nextScrollOffset + CONTAINER_HEIGHT) / ROW_HEIGHT);
     if (visibleEndRow >= loadedRows - BUFFER) {
-      loadNextPage();
+      void loadNextPage();
     }
-  }, [scrollOffset, channels.length, nextCursor, loadNextPage]);
+  }, [channels.length, nextCursor, loadNextPage]);
 
   // Debounce search
   useEffect(() => {
@@ -779,7 +786,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
       <div
         className="h-[900px] overflow-y-auto relative py-2 px-1 [content-visibility:auto]"
         ref={gridRef}
-        onScroll={(e) => setScrollOffset((e.target as HTMLDivElement).scrollTop)}
+        onScroll={handleGridScroll}
       >
         {channels.length === 0 ? (
           <div className="text-center py-10 lg:py-20 text-base lg:text-22 text-[#444] col-span-full">{emptyMessage}</div>

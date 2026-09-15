@@ -146,7 +146,7 @@ export default function Home() {
       if (items[i] === active) { idx = i; break; }
     }
 
-    let next = idx;
+    let next: number;
     if (e.keyCode === KEY_CODES.DOWN) {
       next = Math.min(idx + 1, items.length - 1);
     } else if (e.keyCode === KEY_CODES.UP) {

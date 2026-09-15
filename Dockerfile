@@ -1,5 +1,5 @@
 ## Stage 1: Build frontend
-FROM node:24-slim AS frontend-build
+FROM node:26-slim@sha256:14bf3eac4bf209d906d3c41256597d3ab1f926b2e93a79e9bdfe1efd32454239 AS frontend-build
 
 WORKDIR /app
 
@@ -14,7 +14,7 @@ COPY public/ public/
 RUN VITE_SERVER_URL="" npm run build
 
 ## Stage 2: Build server native deps
-FROM node:24-slim AS server-build
+FROM node:26-slim@sha256:14bf3eac4bf209d906d3c41256597d3ab1f926b2e93a79e9bdfe1efd32454239 AS server-build
 
 RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
 
@@ -24,7 +24,7 @@ COPY server/package.json server/package-lock.json ./
 RUN npm ci --omit=dev
 
 ## Stage 3: Runtime
-FROM node:24-slim
+FROM node:26-slim@sha256:14bf3eac4bf209d906d3c41256597d3ab1f926b2e93a79e9bdfe1efd32454239
 
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 

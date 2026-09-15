@@ -16,18 +16,19 @@ beforeEach(() => {
   storage.clear();
   vi.useFakeTimers();
   vi.setSystemTime(0);
-  globalThis.localStorage = {
+  vi.stubGlobal('localStorage', {
     getItem: (key: string) => storage.get(key) ?? null,
     setItem: (key: string, value: string) => { storage.set(key, value); },
     removeItem: (key: string) => { storage.delete(key); },
     clear: () => { storage.clear(); },
     key: () => null,
     get length() { return storage.size; },
-  };
+  });
 });
 
 afterEach(() => {
   clearAllWatchProgress();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 

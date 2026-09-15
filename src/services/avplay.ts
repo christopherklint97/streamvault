@@ -97,7 +97,8 @@ export class TizenPlayer implements PlayerBackend {
       );
     } catch (e) {
       throw new Error(
-        'AVPlay open failed: ' + (e instanceof Error ? e.message : String(e))
+        'AVPlay open failed: ' + (e instanceof Error ? e.message : String(e)),
+        { cause: e },
       );
     }
   }
@@ -111,7 +112,8 @@ export class TizenPlayer implements PlayerBackend {
       }
     } catch (e) {
       throw new Error(
-        'AVPlay play failed: ' + (e instanceof Error ? e.message : String(e))
+        'AVPlay play failed: ' + (e instanceof Error ? e.message : String(e)),
+        { cause: e },
       );
     }
   }
@@ -125,7 +127,8 @@ export class TizenPlayer implements PlayerBackend {
       }
     } catch (e) {
       throw new Error(
-        'AVPlay pause failed: ' + (e instanceof Error ? e.message : String(e))
+        'AVPlay pause failed: ' + (e instanceof Error ? e.message : String(e)),
+        { cause: e },
       );
     }
   }
@@ -144,7 +147,8 @@ export class TizenPlayer implements PlayerBackend {
       }
     } catch (e) {
       throw new Error(
-        'AVPlay stop failed: ' + (e instanceof Error ? e.message : String(e))
+        'AVPlay stop failed: ' + (e instanceof Error ? e.message : String(e)),
+        { cause: e },
       );
     }
   }
@@ -161,7 +165,8 @@ export class TizenPlayer implements PlayerBackend {
       this.preventScreenSaver(false);
     } catch (e) {
       throw new Error(
-        'AVPlay close failed: ' + (e instanceof Error ? e.message : String(e))
+        'AVPlay close failed: ' + (e instanceof Error ? e.message : String(e)),
+        { cause: e },
       );
     }
   }
@@ -174,7 +179,8 @@ export class TizenPlayer implements PlayerBackend {
       }
     } catch (e) {
       throw new Error(
-        'AVPlay seekTo failed: ' + (e instanceof Error ? e.message : String(e))
+        'AVPlay seekTo failed: ' + (e instanceof Error ? e.message : String(e)),
+        { cause: e },
       );
     }
   }

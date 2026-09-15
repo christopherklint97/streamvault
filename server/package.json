@@ -10,18 +10,18 @@
     "audit:prod": "npm audit --omit=dev"
   },
   "dependencies": {
-    "better-sqlite3": "12.9.0",
+    "better-sqlite3": "13.0.3",
     "cors": "2.8.6",
     "express": "^5.2.1",
     "path-to-regexp": "^8.4.2",
     "qs": "6.16.0",
-    "tsx": "^4.23.1",
-    "undici": "^6.26.0"
+    "tsx": "^4.23.13",
+    "undici": "^8.10.2"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "7.6.13",
+    "@types/better-sqlite3": "9.6.0",
     "@types/cors": "2.8.19",
     "@types/express": "5.0.6",
-    "vitest": "^4.1.0"
+    "vitest": "^5.0.1"
   }
 }

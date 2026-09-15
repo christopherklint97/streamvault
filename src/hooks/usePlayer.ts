@@ -328,7 +328,7 @@ export function usePlayer(): {
   // that the media element actually detects, with Off enforced by track mode.
   const keepSubsRef = useRef(getSubtitlesEnabled());
 
-  const play = useCallback(() => {
+  const play = useCallback(function play() {
     const channel = usePlayerStore.getState().currentChannel;
     if (!channel) {
       log.warn('play() called but no currentChannel set');

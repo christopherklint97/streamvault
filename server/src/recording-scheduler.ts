@@ -80,12 +80,9 @@ export function matchRules(): void {
 
     for (const program of programs) {
       // Check title match
-      let matches = false;
-      if (rule.match_type === 'exact') {
-        matches = program.title.toLowerCase() === rule.match_title.toLowerCase();
-      } else {
-        matches = program.title.toLowerCase().includes(rule.match_title.toLowerCase());
-      }
+      const matches = rule.match_type === 'exact'
+        ? program.title.toLowerCase() === rule.match_title.toLowerCase()
+        : program.title.toLowerCase().includes(rule.match_title.toLowerCase());
       if (!matches) continue;
 
       // Check for duplicate (same channel, overlapping time)

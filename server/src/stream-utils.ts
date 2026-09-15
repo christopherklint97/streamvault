@@ -69,7 +69,6 @@ export async function requestStream(
     const resp: Dispatcher.ResponseData = await request(currentUrl, {
       method: 'GET',
       headers,
-      maxRedirections: 0,
       headersTimeout: timeoutMs,
       bodyTimeout: 0,
     });
