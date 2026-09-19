@@ -55,7 +55,9 @@ XMLEOF
 
 # Step 1: Build
 echo "Building StreamVault..."
-npm run build
+# TIZEN_TARGET=5 builds the Tizen 5.0/5.5 (Chromium 63) flavour; anything else
+# the default Tizen 6.5+ / PWA build.
+if [ "${TIZEN_TARGET:-}" = "5" ]; then npm run build:tizen5; else npm run build; fi
 
 # Step 2: Sign and package WGT
 echo "Signing and packaging WGT..."

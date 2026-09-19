@@ -1,0 +1,134 @@
+name: Build Tizen WGT
+
+# Builds and signs a StreamVault widget for sideloading onto a Samsung TV in
+# developer mode. Manual only: pick the flavour, and optionally publish it as a
+# GitHub release. Nothing here is secret — the author certificate is created
+# on the runner and the distributor certificate is the stock one Tizen Studio
+# ships, which is all a developer-mode TV asks for.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Widget flavour: tizen5 (5.0/5.5, Chromium 63) or default (6.5+)'
+        type: choice
+        options: [tizen5, default]
+        default: tizen5
+      release:
+        description: 'Also publish the .wgt as a GitHub release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  TIZEN_STUDIO_VER: 5.5
+
+jobs:
+  wgt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Install Tizen Studio CLI
+        run: |
+          curl -fsSL -o tizen-installer "https://download.tizen.org/sdk/Installer/tizen-studio_${TIZEN_STUDIO_VER}/web-cli_Tizen_Studio_${TIZEN_STUDIO_VER}_ubuntu-64.bin"
+          chmod +x tizen-installer
+          ./tizen-installer --accept-license "${GITHUB_WORKSPACE}/tizen-studio"
+          rm tizen-installer
+          echo "${GITHUB_WORKSPACE}/tizen-studio/tools/ide/bin" >> "$GITHUB_PATH"
+
+      - name: Create signing profile
+        # A throwaway author certificate registered next to Tizen Studio's stock
+        # distributor certificate. `security-profiles add` stores the passwords
+        # in .pwd files that the same CLI then cannot read back, so they are
+        # written into profiles.xml in the clear (nothing here is secret) — and
+        # `tizen package` prompts for them anyway, which the package step
+        # answers with expect.
+        run: |
+          sudo apt-get install -y expect
+          tizen certificate -a StreamVault -p 1234 -c US -s California -ct SanFrancisco -o StreamVault -n StreamVault -e streamvault@example.org -f streamvault
+          tizen security-profiles add -n StreamVault -a "${GITHUB_WORKSPACE}/tizen-studio-data/keystore/author/streamvault.p12" -p 1234
+          PROFILES="${GITHUB_WORKSPACE}/tizen-studio-data/profile/profiles.xml"
+          tizen cli-config "profiles.path=$PROFILES"
+          sed -i "s|${GITHUB_WORKSPACE}/tizen-studio-data/keystore/author/streamvault.pwd|1234|g" "$PROFILES"
+          sed -i "s|${GITHUB_WORKSPACE}/tizen-studio-data/tools/certificate-generator/certificates/distributor/tizen-distributor-signer.pwd|tizenpkcs12passfordsigner|g" "$PROFILES"
+          sed -i 's|password=""|password="tizenpkcs12passfordsigner"|g' "$PROFILES"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (${{ inputs.target }})
+        run: |
+          if [ "${{ inputs.target }}" = "tizen5" ]; then npm run build:tizen5; else npm run build; fi
+          test -f dist/config.xml || { echo "::error::dist/config.xml missing — public/config.xml did not make it into the build."; exit 1; }
+          test -f dist/index.html || { echo "::error::dist/index.html missing."; exit 1; }
+          ls -la dist dist/assets
+
+      - name: Sign and package
+        # `tizen package` stops for the author and distributor passwords and
+        # offers to save them; expect answers all four prompts. The timeout is
+        # the guard against a prompt this script does not know: the job fails
+        # here instead of sitting on stdin until the job limit.
+        run: |
+          cat > package.exp <<'EXP'
+          #!/usr/bin/expect -f
+          set timeout 300
+          spawn tizen package -t wgt -s StreamVault -- $env(GITHUB_WORKSPACE)/dist
+          expect {
+            "Author password:"            { send "1234\r"; exp_continue }
+            "Save author password"        { send "n\r"; exp_continue }
+            "Distributor1 password:"      { send "tizenpkcs12passfordsigner\r"; exp_continue }
+            "Save distributor1 password"  { send "n\r"; exp_continue }
+            "Yes: (Y), No: (N) ?"         { send "Y\r"; exp_continue }
+            eof
+          }
+          lassign [wait] pid spawnid os_error value
+          exit $value
+          EXP
+          timeout 600 expect -f package.exp
+          WGT="$(find dist -maxdepth 1 -name '*.wgt' | head -n1)"
+          [ -n "$WGT" ] || { echo "::error::No .wgt produced in dist/."; exit 1; }
+          mkdir -p out
+          mv "$WGT" "out/StreamVault-${{ inputs.target }}.wgt"
+          unzip -l "out/StreamVault-${{ inputs.target }}.wgt"
+          # Both signatures must be present, or the TV refuses the install.
+          unzip -l "out/StreamVault-${{ inputs.target }}.wgt" | grep -q author-signature.xml
+          unzip -l "out/StreamVault-${{ inputs.target }}.wgt" | grep -q signature1.xml
+
+      - name: Tizen CLI log
+        if: failure()
+        run: cat "${GITHUB_WORKSPACE}/tizen-studio-data/cli/logs/cli.log" || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: StreamVault-${{ inputs.target }}-wgt
+          path: out/*.wgt
+          if-no-files-found: error
+
+      - name: Version
+        if: ${{ inputs.release }}
+        id: version
+        run: |
+          VERSION="$(grep -o 'version="[^"]*"' public/config.xml | head -n1 | sed -E 's/version="([^"]*)"/\1/')"
+          echo "version=${VERSION:-0.0.0}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +'%Y%m%d-%H%M')" >> "$GITHUB_OUTPUT"
+
+      - name: Release
+        if: ${{ inputs.release }}
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: wgt-${{ inputs.target }}-v${{ steps.version.outputs.version }}-${{ steps.version.outputs.date }}
+          name: StreamVault ${{ inputs.target }} widget v${{ steps.version.outputs.version }} (${{ steps.version.outputs.date }})
+          files: out/*.wgt
+          body: |
+            Signed `.wgt` for sideloading onto a Samsung TV in developer mode
+            (`${{ inputs.target }}` flavour, built from `${{ github.sha }}`).
+            Install with Tizen Studio, `sdb install`, or `scripts/deploy-tv.sh`.

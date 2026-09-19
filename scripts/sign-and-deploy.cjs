@@ -21,7 +21,8 @@ const REMOTE_PATH = '/home/owner/share/tmp/sdk_tools/StreamVault.wgt';
 
 // Step 1: Build
 console.log('Building StreamVault...');
-execSync('npm run build', { cwd: PROJECT_DIR, stdio: 'inherit' });
+// TIZEN_TARGET=5 builds the Tizen 5.0/5.5 (Chromium 63) flavour.
+execSync(process.env.TIZEN_TARGET === '5' ? 'npm run build:tizen5' : 'npm run build', { cwd: PROJECT_DIR, stdio: 'inherit' });
 
 // Step 2: Sign using tizen-tv-dev-cli's signPackage (skip the buggy buildPackage)
 console.log('Signing package...');
