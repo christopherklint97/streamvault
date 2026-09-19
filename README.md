@@ -45,7 +45,8 @@ scripts/        # Tizen signing, packaging, and deployment
 ```bash
 npm install
 npm run dev       # Start frontend dev server
-npm run build     # TypeScript check + Vite build
+npm run build     # TypeScript check + Vite build (PWA + Tizen 6.5+ widget)
+npm run build:tizen5  # Tizen 5.0/5.5 widget (Chromium 63) — legacy bundle, no PWA
 npm run lint      # ESLint
 npm run typecheck # TypeScript only
 npm run test      # Run tests
