@@ -353,3 +353,24 @@ html[data-tizen] #av-player[data-active] {
 @utility tap-none {
   -webkit-tap-highlight-color: transparent;
 }
+
+/* ============================
+   TV focus ring
+   Remote navigation needs the focused element to be unmistakable, and
+   `outline` cannot draw it on a TV: Chromium only started following
+   border-radius for outlines in version 94, so on every Tizen WebView
+   (Chromium 63 on 5.x through 85 on 6.5) a rounded card gets a square ring
+   with the corners poking out. box-shadow follows the radius on all of them.
+   Scoped to html[data-tizen] so the mobile PWA keeps the browser's own
+   focus behaviour and the per-element `focus:` utilities.
+   ============================ */
+html[data-tizen] [data-focusable]:focus,
+html[data-tizen] button:focus,
+html[data-tizen] a:focus,
+html[data-tizen] input:focus,
+html[data-tizen] select:focus {
+  outline: none;
+  box-shadow:
+    0 0 0 3px var(--color-accent),
+    0 0 14px 3px rgba(0, 212, 255, 0.45);
+}
