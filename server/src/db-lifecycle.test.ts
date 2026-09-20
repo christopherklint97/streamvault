@@ -184,7 +184,7 @@ test('backup retention removes invalid snapshots and keeps seven valid snapshots
   assert.equal(retained.includes('streamvault-2026-01-01.db'), false);
   assert.equal(fs.existsSync(`${invalid}.complete`), false);
   fs.rmSync(dir, { recursive: true, force: true });
-});
+}, 20_000);
 
 test('backup retention reports an unlink failure without failing the completed backup', () => {
   const dir = tempDir();

@@ -1,5 +1,6 @@
 import type { DBCategory, DBChannel, DBProgram } from './db.js';
 import { logger } from './logger.js';
+import { buildAiringKey, buildContentKey } from './epg-identity.js';
 
 // ---------- Xtream JSON API types ----------
 
@@ -143,7 +144,7 @@ export interface SeriesInfoResult {
   }>>;
 }
 
-interface XtreamEpgEntry {
+export interface XtreamEpgEntry {
   id: string;
   epg_id: string;
   title: string;
@@ -151,6 +152,16 @@ interface XtreamEpgEntry {
   start: string;
   end: string;
   channel_id: string;
+  subtitle?: string;
+  sub_title?: string;
+  episode_num?: string;
+  content_id?: string;
+  episode_id?: string;
+  original_air_date?: string;
+  is_live?: unknown;
+  is_new?: unknown;
+  is_repeat?: unknown;
+  [key: string]: unknown;
 }
 
 interface XtreamShortEpg {
@@ -499,6 +510,7 @@ export async function fetchXtreamShortEpg(
   config: XtreamConfig,
   streamIds: number[],
   channelIdPrefix = '',
+  limit = 100,
 ): Promise<DBProgram[]> {
   const programs: DBProgram[] = [];
   const BATCH = 10;
@@ -508,7 +520,7 @@ export async function fetchXtreamShortEpg(
     const results = await Promise.all(
       batch.map(id =>
         fetchJson<XtreamShortEpg>(
-          apiUrl(config, `get_short_epg&stream_id=${id}&limit=10`),
+          apiUrl(config, `get_short_epg&stream_id=${id}&limit=${Math.max(1, Math.trunc(limit))}`),
           AbortSignal.timeout(30_000),
           `epg ${id}`,
         ).then(data => ({ id, data }))
@@ -518,19 +530,10 @@ export async function fetchXtreamShortEpg(
 
     for (const { id: streamId, data: result } of results) {
       for (const e of result.epg_listings) {
-        const start = parseEpgTimestamp(e.start);
-        const stop = parseEpgTimestamp(e.end);
-        if (!start || !stop) continue;
         // Use our channel ID format (live_12345) when prefix provided, otherwise use EPG's channel_id
         const channelId = channelIdPrefix ? `${channelIdPrefix}${streamId}` : (e.channel_id || e.epg_id);
-        programs.push({
-          channel_id: channelId,
-          title: decodeBase64Maybe(e.title) || 'No Title',
-          description: decodeBase64Maybe(e.description) || '',
-          start_time: start,
-          stop_time: stop,
-          category: '',
-        });
+        const program = mapXtreamEpgEntry(e, channelId);
+        if (program) programs.push(program);
       }
     }
   }
@@ -544,6 +547,7 @@ export async function fetchEpgForStreams(
   streamIds: number[],
   onBatchDone: (programs: DBProgram[]) => void,
   signal?: AbortSignal,
+  limit = 100,
 ): Promise<number> {
   let totalPrograms = 0;
   const BATCH = 10;
@@ -552,7 +556,7 @@ export async function fetchEpgForStreams(
     if (signal?.aborted) break;
     const batch = streamIds.slice(i, i + BATCH);
     try {
-      const programs = await fetchXtreamShortEpg(config, batch, 'live_');
+      const programs = await fetchXtreamShortEpg(config, batch, 'live_', limit);
       if (programs.length > 0) {
         onBatchDone(programs);
         totalPrograms += programs.length;
@@ -576,11 +580,63 @@ function parseEpgTimestamp(str: string): number | null {
   return isNaN(d.getTime()) ? null : d.getTime();
 }
 
-function decodeBase64Maybe(str: string): string {
+function triState(value: unknown): number | null {
+  if (value === true || value === 1 || value === '1' || value === 'true') return 1;
+  if (value === false || value === 0 || value === '0' || value === 'false') return 0;
+  return null;
+}
+
+export function mapXtreamEpgEntry(e: XtreamEpgEntry, channelId: string, now = Date.now()): DBProgram | null {
+  const start = parseEpgTimestamp(e.start);
+  const stop = parseEpgTimestamp(e.end);
+  if (start === null || stop === null || stop <= start) return null;
+  const eventId = e.id ? String(e.id) : null;
+  const explicitContentId = e.content_id || e.episode_id;
+  const episodeNumbers = e.episode_num
+    ? [{ system: 'xtream', value: String(e.episode_num) }]
+    : [];
+  return {
+    channel_id: channelId,
+    title: decodeBase64Maybe(String(e.title || '')) || 'No Title',
+    description: decodeBase64Maybe(String(e.description || '')),
+    start_time: start,
+    stop_time: stop,
+    category: '',
+    source: 'xtream',
+    source_channel_id: String(e.channel_id || e.epg_id || channelId),
+    provider_event_id: eventId,
+    provider_epg_id: e.epg_id ? String(e.epg_id) : null,
+    subtitle: decodeBase64Maybe(String(e.subtitle || e.sub_title || '')),
+    episode_numbers_json: JSON.stringify(episodeNumbers),
+    is_repeat: triState(e.is_repeat),
+    is_new: triState(e.is_new),
+    is_live: triState(e.is_live),
+    original_air_date: e.original_air_date ? String(e.original_air_date) : null,
+    raw_metadata: JSON.stringify(e),
+    airing_key: buildAiringKey('xtream', channelId, eventId, start, stop),
+    content_key: buildContentKey('xtream', explicitContentId ? String(explicitContentId) : null),
+    categories_json: '[]',
+    timezone: /(?:Z|[+-]\d\d:?\d\d)$/.exec(e.start)?.[0] || '',
+    first_seen: now,
+    last_seen: now,
+    schedule_revision: now,
+  };
+}
+
+export function decodeBase64Maybe(str: string): string {
   if (!str) return '';
   try {
-    if (/^[A-Za-z0-9+/]+=*$/.test(str) && str.length > 10) {
-      return Buffer.from(str, 'base64').toString('utf-8');
+    if (/^[A-Za-z0-9+/]+={0,2}$/.test(str) && str.length >= 4 && str.length % 4 === 0) {
+      const bytes = Buffer.from(str, 'base64');
+      const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      const canonical = bytes.toString('base64').replace(/=+$/, '');
+      const hasUnsafeControl = [...decoded].some(character => {
+        const code = character.charCodeAt(0);
+        return code <= 8 || code === 11 || code === 12 || (code >= 14 && code <= 31) || code === 127;
+      });
+      if (canonical === str.replace(/=+$/, '') && decoded.length > 0 && !hasUnsafeControl) {
+        return decoded;
+      }
     }
   } catch { /* not base64 */ }
   return str;

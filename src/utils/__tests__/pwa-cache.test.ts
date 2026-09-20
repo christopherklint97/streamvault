@@ -12,6 +12,7 @@ describe('CACHEABLE_API_PATTERN', () => {
       '/api/subtitles/episode_1?url=http%3A%2F%2Fprovider.example%2Fepisode.mkv',
       '/api/subtitles/episode_1/3.vtt?url=http%3A%2F%2Fprovider.example%2Fepisode.mkv',
       '/api/recordings/recording_1',
+      '/api/recordings/recording_1/commercial-segments',
       '/api/ios-hls/vod_1/index.m3u8',
       '/api/ios-hls-authorize/vod_1/index.m3u8',
       '/api/ios-hls-assets/session/init.mp4',

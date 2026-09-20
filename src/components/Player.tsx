@@ -22,6 +22,8 @@ import { fetchBatchEpg, getCurrentEpg, type EpgProgram, type EpgMap } from '../u
 import type { Channel } from '../types';
 import { getAbsoluteSkipTarget } from '../utils/media-progress';
 import { shouldStartPlayerPlayback } from '../utils/player-lifecycle';
+import { getCommercialMarkers } from '../utils/commercial-markers';
+import { formatCommercialBreakSummary, getCommercialPlayerUiState, isCommercialUndoKey } from '../utils/commercial-player-ui';
 
 const OSD_TIMEOUT = 5000;
 const MOBILE = isMobile();
@@ -146,7 +148,24 @@ function LiveChannelList({ channels, currentId, onSelect }: {
 }
 
 export default function Player() {
-  const { play, stop, retry, togglePlay, seek, getVideoElement, playerState, subtitleTracks, currentSubtitleIndex, subtitleText, selectSubtitleTrack } = usePlayer();
+  const {
+    play,
+    stop,
+    retry,
+    togglePlay,
+    beginManualSeek,
+    seek,
+    getVideoElement,
+    playbackPosition,
+    playbackDuration,
+    commercialSkip,
+    undoCommercialSkip,
+    playerState,
+    subtitleTracks,
+    currentSubtitleIndex,
+    subtitleText,
+    selectSubtitleTrack,
+  } = usePlayer();
   const currentChannel = usePlayerStore((s) => s.currentChannel);
   const groupChannels = usePlayerStore((s) => s.groupChannels);
   const switchToChannel = usePlayerStore((s) => s.switchToChannel);
@@ -164,12 +183,9 @@ export default function Player() {
   const [showOSD, setShowOSD] = useState(true);
   const osdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isPaused, setIsPaused] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekValue, setSeekValue] = useState(0);
   const seekBarRef = useRef<HTMLInputElement | null>(null);
-  const timeUpdateRef = useRef<number>(0);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [showSubtitleMenu, setShowSubtitleMenu] = useState(false);
   const [subtitleMenuCursor, setSubtitleMenuCursor] = useState(0);
@@ -180,6 +196,8 @@ export default function Player() {
   const currentSubtitleLabel = subtitleTracks.find((track) => track.index === currentSubtitleIndex)?.label;
 
   const isLive = currentChannel?.contentType === 'livetv';
+  const currentTime = playbackPosition;
+  const duration = playbackDuration;
   const hasDuration = isFinite(duration) && duration > 0;
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -239,44 +257,19 @@ export default function Player() {
     }
   }, [isLive]);
 
-  // Track video time for seek bar
+  // HTML5 pause state; position and duration come from the cross-platform clock.
   useEffect(() => {
     const video = getVideoElement();
-    if (!video) return;
-
-    const streamOffset = () => Number(video.dataset.streamOffset || '0');
-    const displayDuration = () => currentChannel?.duration || video.duration || 0;
-    const onTimeUpdate = () => {
-      if (!isSeeking) {
-        setCurrentTime(streamOffset() + video.currentTime);
-        setDuration(displayDuration());
-      }
-    };
+    if (!video || (typeof webapis !== 'undefined' && webapis.avplay)) return;
     const onPlay = () => setIsPaused(false);
     const onPause = () => setIsPaused(true);
-    const onDurationChange = () => setDuration(displayDuration());
-
-    video.addEventListener('timeupdate', onTimeUpdate);
     video.addEventListener('play', onPlay);
     video.addEventListener('pause', onPause);
-    video.addEventListener('durationchange', onDurationChange);
-
-    // Poll as fallback for mpegts.js streams (timeupdate may not fire)
-    timeUpdateRef.current = window.setInterval(() => {
-      if (!isSeeking && video.currentTime > 0) {
-        setCurrentTime(Number(video.dataset.streamOffset || '0') + video.currentTime);
-        setDuration(currentChannel?.duration || video.duration);
-      }
-    }, 500);
-
     return () => {
-      video.removeEventListener('timeupdate', onTimeUpdate);
       video.removeEventListener('play', onPlay);
       video.removeEventListener('pause', onPause);
-      video.removeEventListener('durationchange', onDurationChange);
-      clearInterval(timeUpdateRef.current);
     };
-  }, [getVideoElement, isSeeking, playerState.status, currentChannel?.duration]);
+  }, [getVideoElement, playerState.status]);
 
   // EPG progress for live (only used when currentProgram is rendered)
   const [liveProgress, setLiveProgress] = useState(0);
@@ -381,12 +374,14 @@ export default function Player() {
   }, [togglePlay, resetOSDTimer]);
 
   const handleSeekStart = useCallback(() => {
+    beginManualSeek();
     setIsSeeking(true);
-  }, []);
+  }, [beginManualSeek]);
 
   const handleSeekChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    beginManualSeek();
     setSeekValue(parseFloat(e.target.value));
-  }, []);
+  }, [beginManualSeek]);
 
   const handleSeekEnd = useCallback(() => {
     seek(seekValue);
@@ -394,19 +389,22 @@ export default function Player() {
     resetOSDTimer();
   }, [seek, seekValue, resetOSDTimer]);
 
-  const handleSkip = useCallback((delta: number) => {
-    const video = getVideoElement();
-    if (video) {
-      seek(getAbsoluteSkipTarget(
-        video.currentTime,
-        delta,
-        video.duration,
-        Number(video.dataset.streamOffset || '0'),
-        currentChannel?.duration,
-      ));
-      resetOSDTimer();
+  const handleSeekKeyUp = useCallback((event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (['ArrowLeft', 'ArrowRight', 'PageDown', 'PageUp', 'Home', 'End'].includes(event.key)) {
+      handleSeekEnd();
     }
-  }, [currentChannel?.duration, getVideoElement, seek, resetOSDTimer]);
+  }, [handleSeekEnd]);
+
+  const handleSkip = useCallback((delta: number) => {
+    seek(getAbsoluteSkipTarget(
+      currentTime,
+      delta,
+      duration,
+      0,
+      duration,
+    ));
+    resetOSDTimer();
+  }, [currentTime, duration, seek, resetOSDTimer]);
 
   // Cast + AirPlay availability (driven by SDK / WebKit events)
   const [castState, setCastState] = useState<'NO_DEVICES_AVAILABLE' | 'NOT_CONNECTED' | 'CONNECTING' | 'CONNECTED'>('NO_DEVICES_AVAILABLE');
@@ -425,26 +423,24 @@ export default function Player() {
   const handleCast = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     if (!currentChannel) return;
-    const isRecording = currentChannel.id.startsWith('recording_');
-    const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
+    const isRecording = Boolean(currentChannel.recordingId);
     const streamUrl = isRecording
-      ? `${apiBaseUrl}${currentChannel.url}`
+      ? currentChannel.url
       : getStreamUrl(currentChannel.id, currentChannel.url);
     // Cast receiver needs an absolute URL
     const absoluteUrl = streamUrl.startsWith('http') ? streamUrl : `${window.location.origin}${streamUrl}`;
     const contentType: 'livetv' | 'movies' | 'series' | 'recording' = isRecording
       ? 'recording'
       : (currentChannel.contentType as 'livetv' | 'movies' | 'series');
-    const video = getVideoElement();
     castMedia({
       url: absoluteUrl,
       title: currentProgram?.title || currentChannel.name,
       mimeType: pickCastMime(contentType),
       isLive: currentChannel.contentType === 'livetv',
-      startTime: video && !isCastConnected() ? video.currentTime : undefined,
+      startTime: !isCastConnected() ? currentTime : undefined,
       poster: currentChannel.logo,
     }).catch((err) => showToast(`Cast failed: ${err?.message || err}`));
-  }, [currentChannel, currentProgram, getVideoElement, showToast]);
+  }, [currentChannel, currentProgram, currentTime, showToast]);
 
   const handleAirPlay = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -455,6 +451,24 @@ export default function Player() {
   const showCastButton = MOBILE && castState !== 'NO_DEVICES_AVAILABLE';
   const showAirPlayButton = MOBILE && airPlayAvailable;
   const castActive = castState === 'CONNECTED' || castState === 'CONNECTING';
+  const commercialUi = useMemo(
+    () => getCommercialPlayerUiState(commercialSkip, currentChannel?.recordingId, castActive),
+    [commercialSkip, currentChannel?.recordingId, castActive],
+  );
+  const commercialMarkers = useMemo(
+    () => commercialUi.visible ? getCommercialMarkers(commercialSkip.segments, duration) : [],
+    [commercialUi.visible, commercialSkip.segments, duration],
+  );
+  const commercialBreakSummary = useMemo(
+    () => formatCommercialBreakSummary(commercialSkip.segments),
+    [commercialSkip.segments],
+  );
+
+  const handleUndoCommercialSkip = useCallback(async () => {
+    if (!commercialUi.canUndo) return;
+    const undone = await undoCommercialSkip();
+    if (!undone) useAppStore.getState().showToastMessage('Unable to undo commercial skip');
+  }, [commercialUi.canUndo, undoCommercialSkip]);
 
   // Fullscreen: container-level on Android/iPad, native video fullscreen on iPhone
   const handleFullscreen = useCallback((e: React.MouseEvent) => {
@@ -661,9 +675,15 @@ export default function Player() {
           if (showSubtitleMenu) setShowSubtitleMenu(false);
           else openSubtitleMenu();
           break;
+        case KEY_CODES.YELLOW:
+          if (isCommercialUndoKey(e.keyCode, commercialUi.canUndo)) {
+            e.preventDefault();
+            void handleUndoCommercialSkip();
+          }
+          break;
       }
     },
-    [chooseSubtitle, handleSkip, openSubtitleMenu, playerState.status, resetOSDTimer, retry, showSubtitleMenu, showToast, stop, subtitleMenuCursor, subtitleOptions, togglePlay]
+    [chooseSubtitle, commercialUi.canUndo, handleSkip, handleUndoCommercialSkip, openSubtitleMenu, playerState.status, resetOSDTimer, retry, showSubtitleMenu, showToast, stop, subtitleMenuCursor, subtitleOptions, togglePlay]
   );
 
   const handleChannelSelect = useCallback((ch: Channel) => {
@@ -748,6 +768,29 @@ export default function Player() {
             )}
           </div>
         )}
+
+        <div
+          data-commercial-skip-announcement
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className="pointer-events-none absolute left-1/2 top-[calc(14px+env(safe-area-inset-top,0px))] z-[9] -translate-x-1/2"
+        >
+          {commercialUi.canUndo && (
+            <button
+              type="button"
+              data-commercial-undo
+              aria-label="Commercial break skipped. Undo skip"
+              className="pointer-events-auto rounded-full border border-amber-300/50 bg-black/90 px-5 py-3 text-sm font-semibold text-white shadow-2xl tap-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
+              onClick={(event) => {
+                event.stopPropagation();
+                void handleUndoCommercialSkip();
+              }}
+            >
+              Commercial break skipped — <span className="text-amber-300 underline">Undo</span>
+            </button>
+          )}
+        </div>
 
         {/* Subtitle text overlay */}
         {currentSubtitleIndex !== -1 && subtitleText && (
@@ -988,24 +1031,43 @@ export default function Player() {
               {/* Seek bar for VOD */}
               {!isLive && hasDuration && (
                 <div data-player-controls>
-                  <input
-                    ref={seekBarRef}
-                    className="seek-bar w-full h-1 rounded-sm mb-2"
-                    style={{ background: `linear-gradient(to right, #00d4ff 0%, #00d4ff ${duration > 0 ? (seekDisplay / duration) * 100 : 0}%, rgba(255,255,255,0.2) ${duration > 0 ? (seekDisplay / duration) * 100 : 0}%, rgba(255,255,255,0.2) 100%)` }}
-                    type="range"
-                    min={0}
-                    max={duration}
-                    step={0.5}
-                    value={seekDisplay}
-                    onMouseDown={handleSeekStart}
-                    onTouchStart={handleSeekStart}
-                    onChange={handleSeekChange}
-                    onMouseUp={handleSeekEnd}
-                    onTouchEnd={handleSeekEnd}
-                    onClick={(e) => e.stopPropagation()}
-                  />
-                  <div className="flex items-center justify-between">
+                  <div className="relative h-3 mb-1">
+                    <input
+                      ref={seekBarRef}
+                      className="seek-bar relative z-[1] w-full h-1 rounded-sm"
+                      style={{ background: `linear-gradient(to right, #00d4ff 0%, #00d4ff ${duration > 0 ? (seekDisplay / duration) * 100 : 0}%, rgba(255,255,255,0.2) ${duration > 0 ? (seekDisplay / duration) * 100 : 0}%, rgba(255,255,255,0.2) 100%)` }}
+                      type="range"
+                      min={0}
+                      max={duration}
+                      step={0.5}
+                      value={seekDisplay}
+                      onMouseDown={handleSeekStart}
+                      onTouchStart={handleSeekStart}
+                      onKeyDown={handleSeekStart}
+                      onChange={handleSeekChange}
+                      onMouseUp={handleSeekEnd}
+                      onTouchEnd={handleSeekEnd}
+                      onKeyUp={handleSeekKeyUp}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                    {commercialMarkers.map((marker) => (
+                      <span
+                        key={marker.id}
+                        data-commercial-marker={marker.id}
+                        aria-hidden="true"
+                        className="pointer-events-none absolute z-[2] top-1/2 h-2 min-w-0.5 -translate-y-1/2 rounded-sm bg-amber-400/90"
+                        style={{ left: `${marker.leftPercent}%`, width: `${marker.widthPercent}%` }}
+                      />
+                    ))}
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
                     <span className="text-12 text-[#aaa] tabular-nums">{formatTime(seekDisplay)}</span>
+                    {commercialUi.visible && (
+                      <span className="flex flex-col items-center text-11 text-amber-300/90">
+                        <span data-commercial-skip-state>{commercialUi.statusLabel}</span>
+                        <span data-commercial-break-summary>{commercialBreakSummary}</span>
+                      </span>
+                    )}
                     <span className="text-12 text-[#aaa] tabular-nums">-{formatTime(remaining)}</span>
                   </div>
                 </div>
@@ -1031,6 +1093,7 @@ export default function Player() {
                 <div className="flex items-center gap-4 mt-1 text-sm text-[#555]">
                   <span><span className="inline-block w-2.5 h-2.5 rounded-full bg-[#ef4444] mr-1.5 align-middle" />Refresh</span>
                   <span><span className="inline-block w-2.5 h-2.5 rounded-full bg-[#22c55e] mr-1.5 align-middle" />{currentSubtitleIndex === -1 ? 'Subtitles' : `Subs: ${currentSubtitleLabel || 'On'}`}</span>
+                  {commercialUi.canUndo && <span><span className="inline-block w-2.5 h-2.5 rounded-full bg-[#eab308] mr-1.5 align-middle" />Undo skip</span>}
                 </div>
               )}
               {!MOBILE && !IS_TV && (

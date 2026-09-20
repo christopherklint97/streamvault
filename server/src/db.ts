@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url';
 import { logger } from './logger.js';
 import { ensureBrowseIndexes } from './db-indexes.js';
 import { createCategorySnapshotWriter } from './channel-snapshot.js';
+import { ensureRecordingSchema } from './db-migrations.js';
+import { createCommercialStore, type CommercialSegmentWrite, type DBCommercialSegment } from './commercial-store.js';
+import { createProgramStore } from './program-store.js';
 import {
   backupDatabaseInWorker,
   checkDatabaseReadable,
@@ -176,6 +179,12 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_recordings_rule_id ON recordings(rule_id);
   CREATE INDEX IF NOT EXISTS idx_recording_rules_channel_id ON recording_rules(channel_id);
 `);
+
+// Additive migrations run only after all legacy base tables exist. They are
+// transactional and safe to execute on every startup.
+ensureRecordingSchema(db);
+const commercialStore = createCommercialStore(db);
+const programStore = createProgramStore(db);
 
 // ---------- Lifecycle / backup helpers ----------
 
@@ -493,48 +502,40 @@ export function getContentTypeCounts(): Record<string, number> {
 // ---------- Program helpers ----------
 
 export interface DBProgram {
+  id?: number;
   channel_id: string;
   title: string;
   description: string;
   start_time: number;
   stop_time: number;
   category: string;
+  source?: string;
+  source_channel_id?: string;
+  provider_event_id?: string | null;
+  provider_epg_id?: string | null;
+  subtitle?: string;
+  episode_numbers_json?: string;
+  is_repeat?: number | null;
+  is_new?: number | null;
+  is_live?: number | null;
+  original_air_date?: string | null;
+  raw_metadata?: string;
+  airing_key?: string;
+  content_key?: string | null;
+  categories_json?: string;
+  timezone?: string;
+  first_seen?: number;
+  last_seen?: number;
+  schedule_revision?: number;
 }
-
-const insertProgram = db.prepare(
-  'INSERT INTO programs (channel_id, title, description, start_time, stop_time, category) VALUES (?, ?, ?, ?, ?, ?)'
-);
-
-const clearPrograms = db.prepare('DELETE FROM programs');
-
-const insertProgramsBatch = db.transaction((programs: DBProgram[]) => {
-  clearPrograms.run();
-  for (const p of programs) {
-    insertProgram.run(p.channel_id, p.title, p.description, p.start_time, p.stop_time, p.category);
-  }
-});
 
 export function savePrograms(programs: DBProgram[]): void {
-  insertProgramsBatch(programs);
+  programStore.saveSnapshot(programs);
 }
 
-/** Save programs for specific channels without clearing the entire table */
-const clearProgramsByChannel = db.prepare('DELETE FROM programs WHERE channel_id = ?');
-
-const saveProgramsForChannelsBatch = db.transaction((programs: DBProgram[]) => {
-  // Collect unique channel IDs and clear their existing programs
-  const channelIds = new Set(programs.map(p => p.channel_id));
-  for (const cid of channelIds) {
-    clearProgramsByChannel.run(cid);
-  }
-  for (const p of programs) {
-    insertProgram.run(p.channel_id, p.title, p.description, p.start_time, p.stop_time, p.category);
-  }
-});
-
-export function saveProgramsForChannels(programs: DBProgram[]): void {
-  if (programs.length === 0) return;
-  saveProgramsForChannelsBatch(programs);
+/** Save a completed program snapshot for specific channels without touching other channels. */
+export function saveProgramsForChannels(programs: DBProgram[], channelIds?: string[]): void {
+  programStore.saveSnapshot(programs, Date.now(), channelIds ?? [...new Set(programs.map(program => program.channel_id))]);
 }
 
 export function getPrograms(from?: number, to?: number): DBProgram[] {
@@ -567,9 +568,24 @@ export function getProgramsByChannel(channelId: string, from?: number, to?: numb
       'SELECT * FROM programs WHERE channel_id = ? AND start_time < ? AND stop_time > ? ORDER BY start_time'
     ).all(channelId, to, from) as DBProgram[];
   }
+  if (from !== undefined) {
+    return db.prepare(
+      'SELECT * FROM programs WHERE channel_id = ? AND stop_time > ? ORDER BY start_time'
+    ).all(channelId, from) as DBProgram[];
+  }
   return db.prepare(
     'SELECT * FROM programs WHERE channel_id = ? ORDER BY start_time'
   ).all(channelId) as DBProgram[];
+}
+
+export function getProgramByAiringKey(airingKey: string): DBProgram | undefined {
+  return db.prepare('SELECT * FROM programs WHERE airing_key = ? ORDER BY last_seen DESC LIMIT 1').get(airingKey) as DBProgram | undefined;
+}
+
+export function getProgramByLegacyIdentity(channelId: string, startTime: number, stopTime: number): DBProgram | undefined {
+  return db.prepare(
+    'SELECT * FROM programs WHERE channel_id = ? AND start_time = ? AND stop_time = ? ORDER BY last_seen DESC LIMIT 1'
+  ).get(channelId, startTime, stopTime) as DBProgram | undefined;
 }
 
 export function getProgramCount(): number {
@@ -596,13 +612,57 @@ export interface DBRecording {
   rule_id: string | null;
   program_title: string | null;
   created_at: number;
+  airing_key?: string | null;
+  content_key?: string | null;
+  master_file_path?: string | null;
+  derivative_file_path?: string | null;
+  derivative_error?: string | null;
+  analysis_state?: string;
+  analysis_error?: string | null;
+  analysis_requested_at?: number | null;
+  analysis_started_at?: number | null;
+  analysis_completed_at?: number | null;
+  analysis_profile?: string | null;
+  commercial_skip_override?: number | null;
+  commercial_segment_count?: number;
+  commercial_seconds?: number;
 }
 
 export function insertRecording(rec: DBRecording): void {
   db.prepare(`
-    INSERT INTO recordings (id, channel_id, channel_name, title, status, start_time, end_time, actual_start, actual_end, file_path, file_size, duration, error, rule_id, program_title, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(rec.id, rec.channel_id, rec.channel_name, rec.title, rec.status, rec.start_time, rec.end_time, rec.actual_start, rec.actual_end, rec.file_path, rec.file_size, rec.duration, rec.error, rec.rule_id, rec.program_title, rec.created_at);
+    INSERT INTO recordings (
+      id, channel_id, channel_name, title, status, start_time, end_time, actual_start, actual_end,
+      file_path, file_size, duration, error, rule_id, program_title, created_at, airing_key, content_key,
+      master_file_path, derivative_file_path, derivative_error, analysis_state, analysis_error,
+      analysis_requested_at, analysis_started_at, analysis_completed_at, analysis_profile, commercial_skip_override
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    rec.id, rec.channel_id, rec.channel_name, rec.title, rec.status, rec.start_time, rec.end_time,
+    rec.actual_start, rec.actual_end, rec.file_path, rec.file_size, rec.duration, rec.error, rec.rule_id,
+    rec.program_title, rec.created_at, rec.airing_key ?? null, rec.content_key ?? null,
+    rec.master_file_path ?? null, rec.derivative_file_path ?? null, rec.derivative_error ?? null,
+    rec.analysis_state ?? 'not_requested', rec.analysis_error ?? null, rec.analysis_requested_at ?? null,
+    rec.analysis_started_at ?? null, rec.analysis_completed_at ?? null, rec.analysis_profile ?? null,
+    rec.commercial_skip_override ?? null,
+  );
+}
+
+const insertRecordingForAiringTransaction = db.transaction((recording: DBRecording): DBRecording => {
+  if (!recording.airing_key) throw new Error('Idempotent recording insert requires an airing key');
+  const existing = getRecordingByAiringKey(recording.airing_key);
+  if (existing) return existing;
+  try {
+    insertRecording(recording);
+    return recording;
+  } catch (error) {
+    const raced = getRecordingByAiringKey(recording.airing_key);
+    if (raced) return raced;
+    throw error;
+  }
+});
+
+export function insertRecordingForAiring(recording: DBRecording): DBRecording {
+  return insertRecordingForAiringTransaction(recording);
 }
 
 export function updateRecording(id: string, updates: Partial<Omit<DBRecording, 'id'>>): void {
@@ -617,16 +677,35 @@ export function updateRecording(id: string, updates: Partial<Omit<DBRecording, '
   db.prepare(`UPDATE recordings SET ${fields.join(', ')} WHERE id = ?`).run(...values);
 }
 
-export function deleteRecording(id: string): void {
-  db.prepare('DELETE FROM recordings WHERE id = ?').run(id);
+export function updateRecordingIfStatus(
+  id: string,
+  expectedStatuses: string[],
+  updates: Partial<Omit<DBRecording, 'id'>>,
+): boolean {
+  if (expectedStatuses.length === 0) return false;
+  const fields = Object.keys(updates);
+  if (fields.length === 0) return false;
+  const values = Object.values(updates).map(value => value ?? null);
+  const placeholders = expectedStatuses.map(() => '?').join(',');
+  return db.prepare(`UPDATE recordings SET ${fields.map(field => `${field}=?`).join(',')} WHERE id=? AND status IN (${placeholders})`)
+    .run(...values, id, ...expectedStatuses).changes === 1;
 }
 
+export function deleteRecording(id: string): void {
+  commercialStore.deleteRecordingWithSegments(id);
+}
+
+const recordingSelect = `SELECT recordings.*,
+  (SELECT COUNT(*) FROM commercial_segments WHERE recording_id = recordings.id) AS commercial_segment_count,
+  COALESCE((SELECT SUM(end_seconds - start_seconds) FROM commercial_segments WHERE recording_id = recordings.id), 0) AS commercial_seconds
+  FROM recordings`;
+
 export function getRecording(id: string): DBRecording | undefined {
-  return db.prepare('SELECT * FROM recordings WHERE id = ?').get(id) as DBRecording | undefined;
+  return db.prepare(`${recordingSelect} WHERE recordings.id = ?`).get(id) as DBRecording | undefined;
 }
 
 export function getRecordings(filter?: { status?: string; limit?: number; offset?: number }): DBRecording[] {
-  let sql = 'SELECT * FROM recordings';
+  let sql = recordingSelect;
   const params: unknown[] = [];
   if (filter?.status) {
     sql += ' WHERE status = ?';
@@ -660,6 +739,62 @@ export function getRecordingsByRuleId(ruleId: string): DBRecording[] {
   return db.prepare('SELECT * FROM recordings WHERE rule_id = ? ORDER BY start_time DESC').all(ruleId) as DBRecording[];
 }
 
+export function getRecordedContentKeysByRuleId(ruleId: string): Set<string> {
+  const rows = db.prepare(`
+    SELECT DISTINCT content_key FROM recordings
+    WHERE rule_id=? AND content_key IS NOT NULL AND status NOT IN ('cancelled', 'failed')
+  `).all(ruleId) as Array<{ content_key: string }>;
+  return new Set(rows.map(row => row.content_key));
+}
+
+export function getRecordingByAiringKey(airingKey: string): DBRecording | undefined {
+  return db.prepare("SELECT * FROM recordings WHERE airing_key = ? AND status != 'cancelled' ORDER BY created_at LIMIT 1")
+    .get(airingKey) as DBRecording | undefined;
+}
+
+export function getCommercialSegments(recordingId: string): DBCommercialSegment[] {
+  return commercialStore.getSegments(recordingId);
+}
+
+export function replaceCommercialSegments(recordingId: string, segments: CommercialSegmentWrite[]): void {
+  commercialStore.replaceSegments(recordingId, segments);
+}
+
+export function queueCommercialAnalysis(recordingId: string, now: number): boolean {
+  return commercialStore.queueAnalysis(recordingId, now);
+}
+
+export function replaceCommercialSegmentsIfIdle(
+  recordingId: string,
+  segments: CommercialSegmentWrite[],
+  state: 'review_needed' | 'ready',
+  now: number,
+): boolean {
+  return commercialStore.replaceSegmentsIfIdle(recordingId, segments, state, now);
+}
+
+export function recoverStaleCommercialAnalysis(): number {
+  return commercialStore.recoverStaleAnalysis();
+}
+
+export function claimNextQueuedAnalysis(now: number): DBRecording | undefined {
+  return commercialStore.claimNextQueuedAnalysis(now) as unknown as DBRecording | undefined;
+}
+
+export function failCommercialAnalysis(id: string, message: string, now: number): boolean {
+  return commercialStore.failAnalysis(id, message, now);
+}
+
+export function completeCommercialAnalysis(
+  id: string,
+  segments: CommercialSegmentWrite[],
+  state: 'review_needed' | 'ready',
+  profile: string,
+  now: number,
+): boolean {
+  return commercialStore.completeAnalysis(id, segments, state, profile, now);
+}
+
 // ---------- Recording Rule helpers ----------
 
 export interface DBRecordingRule {
@@ -672,14 +807,21 @@ export interface DBRecordingRule {
   padding_before: number;
   padding_after: number;
   max_recordings: number;
+  airing_policy: string;
+  repeat_policy: 'all' | 'include_unknown' | 'new_only';
   created_at: number;
 }
 
 export function insertRecordingRule(rule: DBRecordingRule): void {
   db.prepare(`
-    INSERT INTO recording_rules (id, channel_id, channel_name, match_title, match_type, enabled, padding_before, padding_after, max_recordings, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(rule.id, rule.channel_id, rule.channel_name, rule.match_title, rule.match_type, rule.enabled, rule.padding_before, rule.padding_after, rule.max_recordings, rule.created_at);
+    INSERT INTO recording_rules (
+      id, channel_id, channel_name, match_title, match_type, enabled,
+      padding_before, padding_after, max_recordings, airing_policy, repeat_policy, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    rule.id, rule.channel_id, rule.channel_name, rule.match_title, rule.match_type, rule.enabled,
+    rule.padding_before, rule.padding_after, rule.max_recordings, rule.airing_policy, rule.repeat_policy, rule.created_at,
+  );
 }
 
 export function updateRecordingRule(id: string, updates: Partial<Omit<DBRecordingRule, 'id'>>): void {

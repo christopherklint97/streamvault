@@ -1,0 +1,242 @@
+import type { DBRecording } from './db.js';
+import type { CommercialSegmentWrite, DBCommercialSegment } from './commercial-store.js';
+import { buildAiringKey } from './epg-identity.js';
+import { validateCommercialIntervals } from './commercial-intervals.js';
+
+export type CommercialAnalysisStatus =
+  | 'not_analyzed'
+  | 'queued'
+  | 'analyzing'
+  | 'review_needed'
+  | 'ready'
+  | 'failed';
+
+const analysisStates = new Set<CommercialAnalysisStatus>([
+  'not_analyzed', 'queued', 'analyzing', 'review_needed', 'ready', 'failed',
+]);
+const reviewStates = new Set(['suggested', 'accepted', 'rejected']);
+
+export function normalizeCommercialAnalysisStatus(value: string | null | undefined): CommercialAnalysisStatus {
+  if (!value || value === 'not_requested') return 'not_analyzed';
+  return analysisStates.has(value as CommercialAnalysisStatus)
+    ? value as CommercialAnalysisStatus
+    : 'failed';
+}
+
+function overrideValue(value: number | null | undefined): boolean | null {
+  return value === null || value === undefined ? null : value === 1;
+}
+
+export function mapRecordingForApi(recording: DBRecording) {
+  return {
+    ...recording,
+    master_path: recording.master_file_path ?? null,
+    commercial_analysis_status: normalizeCommercialAnalysisStatus(recording.analysis_state),
+    commercial_analysis_error: recording.analysis_error ?? null,
+    commercial_segment_count: recording.commercial_segment_count ?? 0,
+    commercial_total_seconds: recording.commercial_seconds ?? 0,
+    commercial_skip_override: overrideValue(recording.commercial_skip_override),
+  };
+}
+
+function segmentSource(detector: string): string {
+  return detector === 'comskip' ? 'detector' : detector;
+}
+
+export function mapCommercialSegmentsResponse(
+  recording: DBRecording,
+  segments: DBCommercialSegment[],
+  globalAutoSkip: boolean,
+) {
+  const override = overrideValue(recording.commercial_skip_override);
+  return {
+    analysis: {
+      status: normalizeCommercialAnalysisStatus(recording.analysis_state),
+      error: recording.analysis_error ?? null,
+      detector: segments[0]?.detector ?? (recording.analysis_profile ? 'comskip' : null),
+      profileVersion: recording.analysis_profile ?? null,
+    },
+    segments: segments.map(segment => ({
+      id: String(segment.id),
+      startSeconds: segment.start_seconds,
+      endSeconds: segment.end_seconds,
+      source: segmentSource(segment.detector),
+      confidence: segment.confidence,
+      state: segment.review_state,
+      detectorVersion: segment.detector_version,
+      profileVersion: recording.analysis_profile ?? undefined,
+    })),
+    autoSkipOverride: override,
+    effectiveAutoSkip: override ?? globalAutoSkip,
+  };
+}
+
+interface SegmentRequest {
+  startSeconds?: unknown;
+  endSeconds?: unknown;
+  source?: unknown;
+  confidence?: unknown;
+  state?: unknown;
+  detectorVersion?: unknown;
+}
+
+export function validateCommercialSegmentReplacement(value: unknown, durationSeconds: number): CommercialSegmentWrite[] {
+  if (!Array.isArray(value)) throw new Error('segments must be an array');
+  if (value.length > 1000) throw new Error('too many segments (maximum 1000)');
+  const converted = value.map((entry, index): CommercialSegmentWrite => {
+    if (!entry || typeof entry !== 'object') throw new Error(`segment ${index} must be an object`);
+    const candidate = entry as SegmentRequest;
+    if (typeof candidate.startSeconds !== 'number' || typeof candidate.endSeconds !== 'number') {
+      throw new Error(`segment ${index} boundaries must be numbers`);
+    }
+    if (typeof candidate.state !== 'string' || !reviewStates.has(candidate.state)) {
+      throw new Error(`segment ${index} state is invalid`);
+    }
+    if (typeof candidate.source !== 'string' || !candidate.source.trim()) {
+      throw new Error(`segment ${index} source is required`);
+    }
+    const confidence = candidate.confidence === undefined || candidate.confidence === null
+      ? null
+      : candidate.confidence;
+    if (confidence !== null &&
+        (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 0 || confidence > 1)) {
+      throw new Error(`segment ${index} confidence must be between 0 and 1`);
+    }
+    const detector = candidate.source === 'detector' ? 'comskip' : candidate.source;
+    const detectorVersion = detector === 'manual'
+      ? 'manual-v1'
+      : typeof candidate.detectorVersion === 'string' ? candidate.detectorVersion : '';
+    return {
+      startSeconds: candidate.startSeconds,
+      endSeconds: candidate.endSeconds,
+      detector,
+      confidence,
+      detectorVersion,
+      reviewState: candidate.state,
+    };
+  });
+  return validateCommercialIntervals(converted, durationSeconds);
+}
+
+export interface ProgramAiringIdentity {
+  airing_key?: string | null;
+  source?: string;
+  channel_id: string;
+  provider_event_id?: string | null;
+  start_time: number;
+  stop_time: number;
+}
+
+export function deriveProgramAiringKey(program: ProgramAiringIdentity): string {
+  return program.airing_key ?? buildAiringKey(
+    program.source ?? 'legacy',
+    program.channel_id,
+    program.provider_event_id,
+    program.start_time,
+    program.stop_time,
+  );
+}
+
+export function validateFromProgramLookup(value: unknown):
+  | { kind: 'airingKey'; airingKey: string }
+  | { kind: 'legacy'; channelId: string; programStart: number; programStop: number } {
+  if (!value || typeof value !== 'object') throw new Error('request body is required');
+  const body = value as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(body, 'airingKey')) {
+    if (typeof body.airingKey !== 'string' || !body.airingKey.trim()) {
+      throw new Error('airingKey must be a non-empty string');
+    }
+    return { kind: 'airingKey', airingKey: body.airingKey };
+  }
+  if (typeof body.channelId !== 'string' || !body.channelId.trim()) {
+    throw new Error('channelId is required for legacy program lookup');
+  }
+  if (typeof body.programStart !== 'number' || !Number.isFinite(body.programStart)) {
+    throw new Error('programStart must be finite');
+  }
+  if (typeof body.programStop !== 'number' || !Number.isFinite(body.programStop) || body.programStop <= body.programStart) {
+    throw new Error('programStop must be finite and greater than programStart');
+  }
+  return {
+    kind: 'legacy',
+    channelId: body.channelId,
+    programStart: body.programStart,
+    programStop: body.programStop,
+  };
+}
+
+export function validateCommercialSkipOverride(value: unknown): boolean | null {
+  if (value === null || typeof value === 'boolean') return value;
+  throw new Error('enabled must be a boolean or null');
+}
+
+export function parseBooleanConfig(value: string, fallback: boolean): boolean {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return fallback;
+}
+
+const MATCH_TYPES = new Set(['contains', 'exact', 'startsWith']);
+const REPEAT_POLICIES = new Set(['all', 'include_unknown', 'new_only']);
+const MAX_RULE_PADDING_MS = 24 * 60 * 60_000;
+
+function boundedInteger(value: unknown, name: string, minimum: number, maximum: number): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`);
+  }
+  return value;
+}
+
+function boundedText(value: unknown, name: string, maximum: number): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > maximum) {
+    throw new Error(`${name} must be a non-empty string no longer than ${maximum} characters`);
+  }
+  return value.trim();
+}
+
+export interface ValidatedRecordingRulePayload {
+  channel_id?: string;
+  channel_name?: string;
+  match_title?: string;
+  match_type?: string;
+  repeat_policy?: string;
+  enabled?: number;
+  padding_before?: number;
+  padding_after?: number;
+  max_recordings?: number;
+}
+
+export function validateRecordingRulePayload(value: unknown, partial: boolean): ValidatedRecordingRulePayload {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('request body is required');
+  const body = value as Record<string, unknown>;
+  const output: ValidatedRecordingRulePayload = {};
+  if (!partial || body.channelId !== undefined) output.channel_id = boundedText(body.channelId, 'channelId', 512);
+  if (!partial || body.matchTitle !== undefined) output.match_title = boundedText(body.matchTitle, 'matchTitle', 500);
+  if (body.channelName !== undefined) output.channel_name = boundedText(body.channelName, 'channelName', 500);
+  else if (!partial) output.channel_name = output.channel_id;
+
+  const matchType = body.matchType ?? (partial ? undefined : 'contains');
+  if (matchType !== undefined) {
+    if (typeof matchType !== 'string' || !MATCH_TYPES.has(matchType)) throw new Error('matchType is invalid');
+    output.match_type = matchType;
+  }
+  const repeatPolicy = body.repeatPolicy ?? (partial ? undefined : 'include_unknown');
+  if (repeatPolicy !== undefined) {
+    if (typeof repeatPolicy !== 'string' || !REPEAT_POLICIES.has(repeatPolicy)) throw new Error('repeatPolicy is invalid');
+    output.repeat_policy = repeatPolicy;
+  }
+  if (body.enabled !== undefined) {
+    if (typeof body.enabled !== 'boolean') throw new Error('enabled must be a boolean');
+    output.enabled = body.enabled ? 1 : 0;
+  }
+  if (!partial || body.paddingBefore !== undefined) {
+    output.padding_before = boundedInteger(body.paddingBefore ?? 120_000, 'paddingBefore', 0, MAX_RULE_PADDING_MS);
+  }
+  if (!partial || body.paddingAfter !== undefined) {
+    output.padding_after = boundedInteger(body.paddingAfter ?? 300_000, 'paddingAfter', 0, MAX_RULE_PADDING_MS);
+  }
+  if (!partial || body.maxRecordings !== undefined) {
+    output.max_recordings = boundedInteger(body.maxRecordings ?? 0, 'maxRecordings', 0, 10_000);
+  }
+  return output;
+}

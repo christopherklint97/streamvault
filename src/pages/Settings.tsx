@@ -49,6 +49,7 @@ export default function Settings() {
   const crawlProgress = useChannelStore((s) => s.crawlProgress);
   const lastCrawlTime = useChannelStore((s) => s.lastCrawlTime);
   const apiBaseUrl = useChannelStore((s) => s.apiBaseUrl);
+  const commercialAutoSkip = useChannelStore((s) => s.commercialAutoSkip);
   const setApiBaseUrl = useChannelStore((s) => s.setApiBaseUrl);
   const saveConfig = useChannelStore((s) => s.saveConfig);
   const triggerSync = useChannelStore((s) => s.triggerSync);
@@ -66,6 +67,7 @@ export default function Settings() {
   const [localPlaylistUrl, setLocalPlaylistUrl] = useState(playlistUrl);
   const [localEpgUrl, setLocalEpgUrl] = useState(epgUrl);
   const [fieldError, setFieldError] = useState('');
+  const [commercialAutoSkipSaving, setCommercialAutoSkipSaving] = useState(false);
 
   const handleConnectServer = useCallback(async () => {
     if (!localApiUrl.trim()) { setFieldError('Please enter a server URL'); return; }
@@ -144,6 +146,18 @@ export default function Settings() {
     setSubtitlesOn(next);
     showToastMessage(`Subtitles ${next ? 'on' : 'off'}`);
   }, [subtitlesOn, showToastMessage]);
+
+  const handleToggleCommercialAutoSkip = useCallback(async () => {
+    if (commercialAutoSkipSaving) return;
+    const next = !commercialAutoSkip;
+    setCommercialAutoSkipSaving(true);
+    try {
+      const saved = await saveConfig({ commercialAutoSkip: next });
+      if (saved) showToastMessage(`Automatic commercial skipping ${next ? 'on' : 'off'}`);
+    } finally {
+      setCommercialAutoSkipSaving(false);
+    }
+  }, [commercialAutoSkip, commercialAutoSkipSaving, saveConfig, showToastMessage]);
 
   const handleForceUpdate = useCallback(() => {
     showToastMessage('Reloading...');
@@ -398,6 +412,23 @@ export default function Settings() {
           {/* Playback */}
           <div className="flex flex-col gap-3">
             <h2 className="text-base lg:text-20 font-bold text-accent">Playback</h2>
+            <button
+              className="py-2.5 px-5 lg:py-3 lg:px-7 bg-surface-hover border-2 border-[#222] rounded-lg text-sm lg:text-17 font-semibold text-[#ccc] self-start transition-all duration-150 tap-none focus:border-accent focus:text-white focus:scale-[1.02] disabled:opacity-40"
+              data-focusable
+              tabIndex={0}
+              role="switch"
+              aria-checked={commercialAutoSkip}
+              aria-busy={commercialAutoSkipSaving}
+              disabled={commercialAutoSkipSaving}
+              onClick={handleToggleCommercialAutoSkip}
+            >
+              {commercialAutoSkipSaving
+                ? 'Saving automatic commercial skipping…'
+                : `Automatically skip approved commercial breaks: ${commercialAutoSkip ? 'On' : 'Off'}`}
+            </button>
+            <p className="text-13 text-[#777] leading-snug">
+              Off by default. Only intervals you approve are skipped, and every skip can be undone.
+            </p>
             <button className="py-2.5 px-5 lg:py-3 lg:px-7 bg-surface-hover border-2 border-[#222] rounded-lg text-sm lg:text-17 font-semibold text-[#ccc] self-start transition-all duration-150 tap-none focus:border-accent focus:text-white focus:scale-[1.02] disabled:opacity-40" data-focusable tabIndex={0} onClick={handleToggleSubtitles}>
               Subtitles: {subtitlesOn ? 'On' : 'Off'}
             </button>

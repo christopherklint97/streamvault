@@ -12,6 +12,8 @@ export interface Channel {
   duration?: number;
   /** Parent series ID for an episode. */
   seriesId?: string;
+  /** Explicit recording identity; avoids inferring it from a synthetic channel ID. */
+  recordingId?: string;
 }
 
 export interface Program {
@@ -23,7 +25,7 @@ export interface Program {
   category: string;
 }
 
-export type View = 'home' | 'channels' | 'movies' | 'series' | 'player' | 'settings' | 'seriesDetail' | 'movieDetail' | 'guide' | 'recordings';
+export type View = 'home' | 'channels' | 'movies' | 'series' | 'player' | 'settings' | 'seriesDetail' | 'movieDetail' | 'guide' | 'recordings' | 'recordingDetail';
 
 export interface MovieInfo {
   name: string;
@@ -110,19 +112,91 @@ export interface Recording {
   rule_id: string | null;
   program_title: string | null;
   created_at: number;
+  master_file_path?: string | null;
+  derivative_file_path?: string | null;
+  derivative_error?: string | null;
+  analysis_state?: CommercialAnalysisStatus;
+  analysis_error?: string | null;
+  analysis_profile?: string | null;
+  commercial_segment_count?: number;
+  commercial_seconds?: number;
+  commercial_skip_override?: boolean | 0 | 1 | null;
 }
+
+export type CommercialAnalysisStatus =
+  | 'not_requested'
+  | 'not_analyzed'
+  | 'queued'
+  | 'analyzing'
+  | 'completed'
+  | 'review_needed'
+  | 'ready'
+  | 'failed';
+
+export type CommercialSegmentState = 'suggested' | 'accepted' | 'rejected';
+export type CommercialSegmentSource = 'manual' | 'detector' | 'scte35' | string;
+
+export interface CommercialSegment {
+  id: string;
+  startSeconds: number;
+  endSeconds: number;
+  source: CommercialSegmentSource;
+  confidence: number | null;
+  state: CommercialSegmentState;
+  detectorVersion?: string;
+  profileVersion?: string;
+}
+
+export interface CommercialAnalysisInfo {
+  status: CommercialAnalysisStatus;
+  error: string | null;
+  detector: string | null;
+  profileVersion: string | null;
+}
+
+export interface CommercialSegmentsResponse {
+  analysis: CommercialAnalysisInfo;
+  segments: CommercialSegment[];
+  autoSkipOverride: boolean | null;
+  effectiveAutoSkip: boolean;
+}
+
+export type RecordingRuleMatchType = 'exact' | 'startsWith' | 'contains';
+export type RecordingRepeatPolicy = 'all' | 'include_unknown' | 'new_only';
 
 export interface RecordingRule {
   id: string;
   channel_id: string;
   channel_name: string;
   match_title: string;
-  match_type: 'exact' | 'contains';
+  match_type: RecordingRuleMatchType;
+  repeat_policy: RecordingRepeatPolicy;
   enabled: number;
   padding_before: number;
   padding_after: number;
   max_recordings: number;
   created_at: number;
+}
+
+export interface CreateRecordingRuleInput {
+  channelId: string;
+  channelName: string;
+  matchTitle: string;
+  matchType: RecordingRuleMatchType;
+  paddingBefore: number;
+  paddingAfter: number;
+  repeatPolicy: RecordingRepeatPolicy;
+  maxRecordings: number;
+}
+
+export interface UpdateRecordingRuleInput {
+  matchTitle: string;
+  matchType: RecordingRuleMatchType;
+  enabled: boolean;
+  paddingBefore: number;
+  paddingAfter: number;
+  repeatPolicy: RecordingRepeatPolicy;
+  maxRecordings: number;
 }
 
 export interface RecordingStatusInfo {
