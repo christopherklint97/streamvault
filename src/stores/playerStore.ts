@@ -65,15 +65,17 @@ export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((s
   },
 
   fetchGroupChannels: async (group: string) => {
+    const { apiBaseUrl: base, backendGeneration } = useChannelStore.getState();
     set({ groupChannelsLoading: true });
     try {
-      const base = useChannelStore.getState().apiBaseUrl;
       const res = await fetch(`${base}/api/channels?group=${encodeURIComponent(group)}`);
       if (!res.ok) throw new Error('Failed to fetch group channels');
       const data = await res.json();
+      if (useChannelStore.getState().backendGeneration !== backendGeneration) return;
       const channels: Channel[] = data.channels || [];
       set({ groupChannels: channels, groupChannelsLoading: false });
     } catch {
+      if (useChannelStore.getState().backendGeneration !== backendGeneration) return;
       set({ groupChannelsLoading: false });
     }
   },
@@ -112,3 +114,15 @@ export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((s
     set({ audioOnly });
   },
 }));
+
+export function resetPlayerBackendState(): void {
+  usePlayerStore.setState({
+    status: 'idle',
+    currentChannel: null,
+    errorMessage: '',
+    groupChannels: [],
+    groupChannelsLoading: false,
+    channelListVisible: true,
+    audioOnly: false,
+  });
+}

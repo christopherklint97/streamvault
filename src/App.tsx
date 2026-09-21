@@ -1,7 +1,8 @@
-import { useEffect, useCallback, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useCallback, useRef, useState } from 'react';
 import { useAppStore } from './stores/appStore';
 import { useChannelStore } from './stores/channelStore';
 import { usePlayerStore } from './stores/playerStore';
+import { resetBackendScopedStores } from './stores/backendReset';
 import { useRemoteKeys } from './hooks/useRemoteKeys';
 import { useNetworkStatus } from './hooks/useNetworkStatus';
 import { KEY_CODES } from './utils/keys';
@@ -91,9 +92,19 @@ function AppContent() {
   const loadingPhase = useChannelStore((s) => s.loadingPhase);
   const cancelSync = useChannelStore((s) => s.cancelSync);
   const hydrate = useChannelStore((s) => s.hydrate);
+  const backendGeneration = useChannelStore((s) => s.backendGeneration);
+  const apiBaseUrl = useChannelStore((s) => s.apiBaseUrl);
+  const previousBackendUrl = useRef(apiBaseUrl);
   const { isOnline } = useNetworkStatus();
 
   useRemoteKeys();
+
+  useLayoutEffect(() => {
+    if (backendGeneration > 0) {
+      resetBackendScopedStores(previousBackendUrl.current !== apiBaseUrl);
+      previousBackendUrl.current = apiBaseUrl;
+    }
+  }, [apiBaseUrl, backendGeneration]);
 
   // Browser back button support (mobile PWA)
   useEffect(() => {
@@ -242,6 +253,7 @@ function AppContent() {
       )}
       {currentView !== 'player' && <Sidebar />}
       <main
+        key={backendGeneration}
         data-app-content
         {...(currentView === 'player' ? { 'data-fullscreen': '' } : {})}
         className={cn(
@@ -264,7 +276,7 @@ function AppContent() {
       {/* Persistent video element — stays in the DOM across view changes so
           playback continues in the background when navigating away from the player */}
       {!(typeof webapis !== 'undefined' && webapis.avplay) && (
-        <AvPlayerVideo currentView={currentView} />
+        <AvPlayerVideo key={backendGeneration} currentView={currentView} />
       )}
       <Toast />
       <ExitDialog />

@@ -281,7 +281,7 @@ function setupMediaSession(channelName: string) {
     navigator.mediaSession.playbackState = 'paused';
   });
   navigator.mediaSession.setActionHandler('stop', () => {
-    stopPlayback();
+    stopActivePlayback();
   });
   navigator.mediaSession.setActionHandler('seekbackward', () => {
     const v = getVideo();
@@ -311,7 +311,7 @@ function clearMediaSession() {
 }
 
 /** Fully stop playback — called from hook stop() and Media Session stop handler */
-function stopPlayback() {
+export function stopActivePlayback() {
   log.info('⏹ stopPlayback()');
 
   stopBgProgressTracking();
@@ -327,14 +327,23 @@ function stopPlayback() {
 
   if (activeMpegtsPlayer) {
     log.info('Destroying mpegts.js player');
-    activeMpegtsPlayer.destroy();
+    const player = activeMpegtsPlayer;
     activeMpegtsPlayer = null;
+    try {
+      player.destroy();
+    } catch (err) {
+      toast(`Player cleanup error: ${err}`);
+    }
   }
 
   if (typeof webapis !== 'undefined' && webapis.avplay) {
     clearAvplayStallTimer();
     try {
       webapis.avplay.stop();
+    } catch (err) {
+      toast(`Player cleanup error: ${err}`);
+    }
+    try {
       webapis.avplay.close();
     } catch (err) {
       toast(`Player cleanup error: ${err}`);
@@ -342,10 +351,14 @@ function stopPlayback() {
   } else {
     const v = document.getElementById('av-player') as HTMLVideoElement | null;
     if (v) {
-      v.pause();
-      v.removeAttribute('src');
-      delete v.dataset.channelId;
-      v.load();
+      try {
+        v.pause();
+        v.removeAttribute('src');
+        delete v.dataset.channelId;
+        v.load();
+      } catch (err) {
+        toast(`Player cleanup error: ${err}`);
+      }
     }
   }
 
@@ -951,7 +964,7 @@ export function usePlayer(): {
     setSubtitleTracks([]);
     setCurrentSubtitleIndex(-1);
     setSubtitleText('');
-    stopPlayback();
+    stopActivePlayback();
   }, []);
 
   const retry = useCallback(() => {

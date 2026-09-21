@@ -1,5 +1,4 @@
 import { defineConfig, type Plugin } from 'vite'
-import { execSync } from 'child_process'
 import { readFileSync, writeFileSync } from 'fs'
 import { resolve } from 'path'
 import { fileURLToPath } from 'url'
@@ -11,12 +10,12 @@ import postcss from 'postcss'
 import postcssPresetEnv from 'postcss-preset-env'
 import type { Plugin as PostcssPlugin, Declaration as PostcssDeclaration } from 'postcss'
 import { CACHEABLE_API_PATTERN } from './src/utils/pwa-cache.ts'
+import { resolveBuildServerUrl } from './src/utils/server-connection.ts'
 
-// When VITE_SERVER_URL is explicitly set (e.g. "" for Docker/PWA), use it.
-// Otherwise detect LAN IP for Tizen TV dev builds.
-const serverUrl = process.env.VITE_SERVER_URL !== undefined
-  ? process.env.VITE_SERVER_URL
-  : `http://${process.env.VITE_SERVER_IP || execSync('hostname -I').toString().trim().split(/\s+/)[0]}:3002`;
+// Public builds must not inherit the build machine's private LAN address.
+// Developers can still opt into a preconfigured TV build with VITE_SERVER_IP
+// or provide a complete URL with VITE_SERVER_URL.
+const serverUrl = resolveBuildServerUrl(process.env);
 
 /**
  * Lower modern CSS to syntax old Samsung Tizen browsers understand.

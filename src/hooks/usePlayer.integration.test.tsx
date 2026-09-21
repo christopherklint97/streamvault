@@ -1,7 +1,7 @@
 import { act, createRef, forwardRef, useImperativeHandle, type RefObject } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { seekRecordingPlayback, usePlayer } from './usePlayer';
+import { seekRecordingPlayback, stopActivePlayback, usePlayer } from './usePlayer';
 import { commercialSkipSession } from '../services/commercialSkipSession';
 import { usePlayerStore } from '../stores/playerStore';
 import { useAppStore } from '../stores/appStore';
@@ -51,6 +51,20 @@ describe('usePlayer manual seek integration', () => {
     vi.useRealTimers();
     localStorage.clear();
     useAppStore.setState({ showToast: false, toastMessage: '' });
+  });
+
+  it('still closes AVPlay when stop throws during backend cleanup', () => {
+    const close = vi.fn();
+    (globalThis as typeof globalThis & { webapis: WebApis }).webapis = {
+      avplay: {
+        stop: vi.fn(() => { throw new Error('stop failed'); }),
+        close,
+      },
+    } as unknown as WebApis;
+
+    expect(() => stopActivePlayback()).not.toThrow();
+    expect(close).toHaveBeenCalledOnce();
+    expect(usePlayerStore.getState().status).toBe('idle');
   });
 
   it('invalidates a pending automatic skip as soon as scrubbing begins and before every manual seek', async () => {

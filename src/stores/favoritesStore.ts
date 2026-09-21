@@ -120,3 +120,11 @@ export const useFavoritesStore = create<FavoritesState & FavoritesActions>()((se
     return allChannels.filter(ch => idSet.has(ch.id));
   },
 }));
+
+export function resetFavoritesBackendState(): void {
+  const favoriteIds = new Set<string>();
+  const lists: FavoriteList[] = [];
+  useFavoritesStore.setState({ favoriteIds, lists });
+  persistFavorites(favoriteIds);
+  persistLists(lists);
+}

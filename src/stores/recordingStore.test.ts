@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChannelStore } from './channelStore';
-import { useRecordingStore } from './recordingStore';
+import { resetRecordingBackendState, useRecordingStore } from './recordingStore';
 import type { CommercialSegment, CommercialSegmentsResponse } from '../types';
+import { rotateBackendRequestScope } from '../services/api';
 
 function metadata(id: string): CommercialSegmentsResponse {
   const segment: CommercialSegment = {
@@ -30,6 +31,7 @@ function json(value: unknown): Response {
 describe('recording commercial metadata ordering', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    rotateBackendRequestScope();
     useChannelStore.setState({ apiBaseUrl: '' });
     useRecordingStore.setState({
       recordings: [],
@@ -37,6 +39,17 @@ describe('recording commercial metadata ordering', () => {
       commercialSegmentsLoading: {},
       commercialSegmentsError: {},
     });
+  });
+
+  it('does not let an old backend rule mutation repopulate the reset store', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      resetRecordingBackendState();
+      useRecordingStore.setState({ rules: [{ id: 'new-rule' } as never] });
+      return json({ rule: { id: 'old-rule' } });
+    });
+
+    await expect(useRecordingStore.getState().createRule({ match_title: 'Old' } as never)).resolves.toBeNull();
+    expect(useRecordingStore.getState().rules).toEqual([{ id: 'new-rule' }]);
   });
 
   it('uses the PUT response directly and ignores an older GET that finishes afterward', async () => {
@@ -96,6 +109,7 @@ describe('recording commercial metadata ordering', () => {
 describe('recording rule mutations', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    rotateBackendRequestScope();
     useChannelStore.setState({ apiBaseUrl: '' });
     useRecordingStore.setState({ rules: [] });
   });

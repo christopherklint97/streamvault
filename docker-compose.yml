@@ -12,8 +12,8 @@ services:
       - streamvault_recordings:/app/data/recordings
     environment:
       - LOG_LEVEL=info
-      # Optional hardening. If set, browser clients must store the same value
-      # in localStorage key `streamvault_auth_token` for protected API calls.
+      # Optional hardening. If set, browser clients must enter the same value
+      # in Settings under Backend token.
       - STREAMVAULT_AUTH_TOKEN=${STREAMVAULT_AUTH_TOKEN:-}
       # Comma-separated extra hosts allowed for /api/proxy, in addition to the
       # configured Xtream server host.

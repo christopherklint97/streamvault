@@ -158,6 +158,11 @@ export function clearAllWatchProgress(): void {
   setItem(WATCH_PROGRESS_KEY, {});
 }
 
+export function clearBackendWatchState(): void {
+  clearRecentChannels();
+  clearAllWatchProgress();
+}
+
 // --- Subtitles Preference ---
 
 export function getSubtitlesEnabled(): boolean {
