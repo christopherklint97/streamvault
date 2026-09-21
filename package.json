@@ -13,6 +13,7 @@
     "smoke:api": "node scripts/smoke-api.mjs",
     "typecheck": "tsc -b",
     "sign": "npm run build && node scripts/sign-wgt.cjs",
+    "sign:tizen5": "npm run build:tizen5 && node scripts/sign-wgt.cjs",
     "deploy": "node scripts/sign-wgt.cjs && ./scripts/deploy-tv.sh"
   },
   "dependencies": {

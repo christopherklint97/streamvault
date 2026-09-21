@@ -1,0 +1,147 @@
+name: Build Tizen WGT
+
+# Builds a StreamVault widget for a Samsung TV and uploads it UNSIGNED. Manual
+# only: pick the flavour, and optionally publish it as a GitHub release.
+#
+# Why unsigned: a Samsung TV installs a widget only when its distributor
+# signature comes from a Samsung certificate that names that TV's DUID, and it
+# updates one only when the author signature matches the previous install.
+# Neither can come from a shared runner — the first is per TV, the second has
+# to stay the same forever. So the runner does the part that is the same for
+# everyone (build + package) and the person installing signs with their own
+# Certificate Manager profile:
+#
+#   tizen package -t wgt -s <your profile> -- StreamVault-<target>-unsigned.wgt
+#
+# or, with the certificates this repo's scripts expect, unzip it into dist/ and
+# run `node scripts/sign-wgt.cjs`. Either way the widget is signed once, on the
+# machine that has the certificates, and every later build updates in place.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Widget flavour: tizen5 (5.0/5.5, Chromium 63) or default (6.5+)'
+        type: choice
+        options: [tizen5, default]
+        default: tizen5
+      release:
+        description: 'Also publish the unsigned .wgt as a GitHub release'
+        type: boolean
+        default: false
+
+# Nothing by default; each job asks for what it needs. The build job — the
+# one that runs a downloaded toolchain and npm lifecycle scripts — never holds
+# a token that can write to the repository.
+permissions: {}
+
+# No `run:` step in this file interpolates a ${{ }} expression: everything a
+# script reads arrives through env, so a value from the repository (the widget
+# version) is data to the shell, never part of the command.
+jobs:
+  wgt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      TARGET: ${{ inputs.target }}
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      stamp: ${{ steps.meta.outputs.stamp }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (${{ inputs.target }})
+        run: |
+          if [ "$TARGET" = "tizen5" ]; then npm run build:tizen5; else npm run build; fi
+          test -f dist/config.xml || { echo "::error::dist/config.xml missing — public/config.xml did not make it into the build."; exit 1; }
+          test -f dist/index.html || { echo "::error::dist/index.html missing."; exit 1; }
+
+      - name: Check the manifest matches the flavour
+        # The version floor is set per flavour at build time (vite.config.ts);
+        # a widget declaring 5.0 with the module bundle inside, or 6.5 with the
+        # legacy bundle, would install where it cannot run.
+        run: |
+          FLOOR="$(grep -o 'required_version="[^"]*"' dist/config.xml | sed -E 's/.*"([^"]*)"/\1/')"
+          WANT=6.5; [ "$TARGET" = "tizen5" ] && WANT=5.0
+          [ "$FLOOR" = "$WANT" ] || { echo "::error::dist/config.xml says required_version=$FLOOR, expected $WANT for $TARGET"; exit 1; }
+          if [ "$TARGET" = "tizen5" ]; then
+            grep -q '<script type="module"' dist/index.html && { echo "::error::tizen5 index.html still loads a module script"; exit 1; }
+            ls dist/assets/*-legacy*.js >/dev/null
+          fi
+          echo "required_version=$FLOOR"
+
+      - name: Package (unsigned)
+        # A .wgt is a zip of the widget root. Without author-signature.xml and
+        # signature1.xml it is exactly what `tizen package -s <profile>` takes
+        # as input, so this is the artifact a person signs on their own machine.
+        run: |
+          mkdir -p out
+          WGT="out/StreamVault-$TARGET-unsigned.wgt"
+          (cd dist && zip -q -r -X "../$WGT" .)
+          unzip -l "$WGT"
+          unzip -l "$WGT" | grep -q ' config.xml$'
+          unzip -l "$WGT" | grep -q ' index.html$'
+          ! unzip -l "$WGT" | grep -q 'signature'
+
+      - name: Release metadata
+        id: meta
+        run: |
+          # The <widget> element's version, not the XML prolog's.
+          VERSION="$(tr -d '\n' < public/config.xml | grep -o '<widget[^>]*' | grep -o ' version="[^"]*"' | sed -E 's/.*"([^"]*)"/\1/')"
+          VERSION="${VERSION:-0.0.0}"
+          # This ends up in a git tag and a release title, so accept nothing
+          # but a version: digits and dots, no shell metacharacters, no spaces.
+          printf '%s' "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+){0,3}$' || {
+            echo "::error::public/config.xml has an unusable widget version: $VERSION"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "stamp=$(date -u +'%Y%m%d-%H%M')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: StreamVault-${{ inputs.target }}-unsigned-wgt
+          path: out/*.wgt
+          if-no-files-found: error
+
+  release:
+    if: ${{ inputs.release }}
+    needs: wgt
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: StreamVault-${{ inputs.target }}-unsigned-wgt
+          path: out
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          TARGET: ${{ inputs.target }}
+          VERSION: ${{ needs.wgt.outputs.version }}
+          STAMP: ${{ needs.wgt.outputs.stamp }}
+        run: |
+          TAG="wgt-$TARGET-v$VERSION-$STAMP"
+          {
+            printf 'Unsigned `.wgt` for a Samsung TV (`%s` flavour, built from `%s`).\n\n' "$TARGET" "$SHA"
+            printf 'A TV only installs a widget signed with a Samsung distributor certificate for that TV, so sign this once with your own Certificate Manager profile:\n\n'
+            printf '    tizen package -t wgt -s <your profile> -- StreamVault-%s-unsigned.wgt\n\n' "$TARGET"
+            printf 'then install with Tizen Studio, `sdb install`, or `scripts/deploy-tv.sh`. Later builds signed with the same profile update in place.\n'
+          } > notes.md
+          gh release create "$TAG" out/*.wgt \
+            --repo "$REPO" \
+            --title "StreamVault $TARGET widget v$VERSION ($STAMP)" \
+            --notes-file notes.md

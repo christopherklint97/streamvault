@@ -114,6 +114,10 @@ docker compose up -d --build
 
 `npm run sign` signs `dist/` with OpenSSL rather than bundling vulnerable JS certificate parsers. Provide certificate paths via `CERT_AUTHOR_P12` and `CERT_DIST_P12`, or place them at `certs/author.p12` and `certs/distributor.p12`. `CERT_AUTHOR_PASSWORD` and `CERT_DIST_PASSWORD` are required.
 
+`npm run sign:tizen5` does the same for the Tizen 5.0/5.5 widget, and `TIZEN_TARGET=5` switches `scripts/package-wgt.sh`, `scripts/deploy-tv.sh` and `scripts/sign-and-deploy.cjs` to that build. `public/config.xml` declares `required_version="6.5"` for the default widget; the tizen5 build lowers its own copy to `5.0` at build time, so each flavour installs only where it runs.
+
+The **Build Tizen WGT** workflow (Actions → Run workflow) builds either flavour on GitHub and uploads it as an **unsigned** `.wgt`, optionally as a release. A Samsung TV installs a widget only when it is signed with a Samsung distributor certificate for that TV, and updates it only under the same author certificate as before, so signing stays on your machine: `tizen package -t wgt -s <your profile> -- StreamVault-tizen5-unsigned.wgt`, or unzip it into `dist/` and run `node scripts/sign-wgt.cjs`.
+
 ## Deployment
 
 ```bash

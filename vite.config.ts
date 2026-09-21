@@ -1,6 +1,7 @@
 import { defineConfig, type Plugin } from 'vite'
 import { execSync } from 'child_process'
-import { readFileSync } from 'fs'
+import { readFileSync, writeFileSync } from 'fs'
+import { resolve } from 'path'
 import { fileURLToPath } from 'url'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
@@ -261,6 +262,29 @@ function tizenGradientInterpolation(): PostcssPlugin {
 }
 
 /**
+ * public/config.xml declares `required_version="6.5"`, which is what the
+ * default widget — module scripts, PWA plumbing — needs. The tizen5 flavour
+ * is the one built to run on 5.0, so only its copy of the manifest says so:
+ * rewritten in the output after Vite has copied public/ there, never in the
+ * source, so the two flavours cannot share a version floor by accident.
+ */
+function tizenWidgetVersionFloor(version: string): Plugin {
+  let manifest = ''
+  return {
+    name: 'tizen-widget-version-floor',
+    configResolved(config) {
+      manifest = resolve(config.root, config.build.outDir, 'config.xml')
+    },
+    closeBundle() {
+      const xml = readFileSync(manifest, 'utf8')
+      const next = xml.replace(/(<tizen:application\b[^>]*\brequired_version=")[^"]*(")/, `$1${version}$2`)
+      if (next === xml) throw new Error(`${manifest}: no <tizen:application required_version> to set to ${version}`)
+      writeFileSync(manifest, next)
+    },
+  }
+}
+
+/**
  * Inline scripts/tizen5-flex-gap.js into the widget's index.html, in <head>,
  * so it is already observing when the bundle renders its first element. See
  * tizenGapAlias() for the CSS half it depends on.
@@ -377,6 +401,7 @@ export default defineConfig(({ mode }) => {
             }),
             tizenLegacyOnly(),
             tizenFlexGapRuntime(),
+            tizenWidgetVersionFloor('5.0'),
           ]
         : [
             VitePWA({
