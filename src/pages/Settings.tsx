@@ -33,6 +33,12 @@ function isValidUrl(url: string): boolean {
 }
 
 export default function Settings() {
+  const apiBaseUrl = useChannelStore((s) => s.apiBaseUrl);
+  const backendConnection = useChannelStore((s) => s.backendConnection);
+  return <SettingsContent key={`${apiBaseUrl}:${backendConnection}`} />;
+}
+
+function SettingsContent() {
   const inputMode = useChannelStore((s) => s.inputMode);
   const xtreamCredentials = useChannelStore((s) => s.xtreamCredentials);
   const playlistUrl = useChannelStore((s) => s.playlistUrl);
@@ -49,18 +55,19 @@ export default function Settings() {
   const crawlProgress = useChannelStore((s) => s.crawlProgress);
   const lastCrawlTime = useChannelStore((s) => s.lastCrawlTime);
   const apiBaseUrl = useChannelStore((s) => s.apiBaseUrl);
+  const backendConnection = useChannelStore((s) => s.backendConnection);
   const commercialAutoSkip = useChannelStore((s) => s.commercialAutoSkip);
-  const setApiBaseUrl = useChannelStore((s) => s.setApiBaseUrl);
+  const connectBackend = useChannelStore((s) => s.connectBackend);
   const saveConfig = useChannelStore((s) => s.saveConfig);
   const triggerSync = useChannelStore((s) => s.triggerSync);
   const cancelSync = useChannelStore((s) => s.cancelSync);
   const triggerCrawl = useChannelStore((s) => s.triggerCrawl);
   const cancelCrawl = useChannelStore((s) => s.cancelCrawl);
-  const hydrate = useChannelStore((s) => s.hydrate);
   const showToastMessage = useAppStore((s) => s.showToastMessage);
 
   const [subtitlesOn, setSubtitlesOn] = useState(getSubtitlesEnabled());
   const [localApiUrl, setLocalApiUrl] = useState(apiBaseUrl);
+  const [localApiToken, setLocalApiToken] = useState('');
   const [localServerUrl, setLocalServerUrl] = useState(xtreamCredentials.serverUrl);
   const [localUsername, setLocalUsername] = useState(xtreamCredentials.username);
   const [localPassword, setLocalPassword] = useState(xtreamCredentials.password);
@@ -70,22 +77,17 @@ export default function Settings() {
   const [commercialAutoSkipSaving, setCommercialAutoSkipSaving] = useState(false);
 
   const handleConnectServer = useCallback(async () => {
-    if (!localApiUrl.trim()) { setFieldError('Please enter a server URL'); return; }
-    if (!isValidUrl(localApiUrl)) { setFieldError('Server URL must start with http:// or https://'); return; }
+    if (!SAME_ORIGIN && !localApiUrl.trim()) { setFieldError('Please enter a server URL'); return; }
+    if (!SAME_ORIGIN && !isValidUrl(localApiUrl)) { setFieldError('Server URL must start with http:// or https://'); return; }
     setFieldError('');
-    const url = localApiUrl.trim().replace(/\/+$/, '');
-    setApiBaseUrl(url);
-    // Test connection + load data
-    try {
-      const response = await fetch(`${url}/api/status`);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      showToastMessage('Connected to server');
-      // Trigger full hydration
-      setTimeout(() => hydrate(), 100);
-    } catch {
-      setFieldError('Cannot connect to server');
+    const url = SAME_ORIGIN ? '' : localApiUrl.trim().replace(/\/+$/, '');
+    const connected = await connectBackend(url, localApiToken);
+    if (!connected) {
+      setFieldError(useChannelStore.getState().error || 'Cannot connect to the StreamVault backend');
+      return;
     }
-  }, [localApiUrl, setApiBaseUrl, showToastMessage, hydrate]);
+    showToastMessage('Connected to StreamVault backend');
+  }, [localApiUrl, localApiToken, connectBackend, showToastMessage]);
 
   const handleModeSwitch = useCallback(async (mode: InputMode) => {
     setFieldError('');
@@ -98,12 +100,13 @@ export default function Settings() {
     if (!localUsername.trim()) { setFieldError('Please enter a username'); return; }
     if (!localPassword.trim()) { setFieldError('Please enter a password'); return; }
     setFieldError('');
-    await saveConfig({
+    const saved = await saveConfig({
       inputMode: 'xtream',
       xtreamServer: localServerUrl.trim(),
       xtreamUsername: localUsername.trim(),
       xtreamPassword: localPassword.trim(),
     });
+    if (!saved) return;
     await triggerSync();
   }, [localServerUrl, localUsername, localPassword, saveConfig, triggerSync]);
 
@@ -111,11 +114,12 @@ export default function Settings() {
     if (!localPlaylistUrl.trim()) { setFieldError('Please enter a playlist URL'); return; }
     if (!isValidUrl(localPlaylistUrl)) { setFieldError('URL must start with http:// or https://'); return; }
     setFieldError('');
-    await saveConfig({
+    const saved = await saveConfig({
       inputMode: 'manual',
       playlistUrl: localPlaylistUrl.trim(),
       epgUrl: localEpgUrl.trim(),
     });
+    if (!saved) return;
     await triggerSync();
   }, [localPlaylistUrl, localEpgUrl, saveConfig, triggerSync]);
 
@@ -169,12 +173,12 @@ export default function Settings() {
     const currentIndex = SYNC_OPTIONS.findIndex((o) => o.value === syncInterval);
     const nextIndex = (currentIndex + 1) % SYNC_OPTIONS.length;
     const next = SYNC_OPTIONS[nextIndex];
-    await saveConfig({ syncInterval: next.value });
-    showToastMessage(`Sync: ${next.label}`);
+    const saved = await saveConfig({ syncInterval: next.value });
+    if (saved) showToastMessage(`Sync: ${next.label}`);
   }, [syncInterval, saveConfig, showToastMessage]);
 
   const syncLabel = SYNC_OPTIONS.find((o) => o.value === syncInterval)?.label ?? 'Every 24 hours';
-  const isConnected = SAME_ORIGIN || !!apiBaseUrl;
+  const isConnected = backendConnection === 'connected';
 
   return (
     <FocusZone className="flex flex-col gap-5 lg:gap-7 max-w-full lg:max-w-[900px] outline-hidden animate-fade-in pb-6 lg:pb-0">
@@ -222,10 +226,10 @@ export default function Settings() {
         <div className="text-success">{loadingMessage}</div>
       )}
 
-      {/* Server Connection — hidden when PWA is served from same origin */}
-      {!SAME_ORIGIN && (
-        <div className="flex flex-col gap-3">
-          <h2 className="text-base lg:text-20 font-bold text-accent">Server</h2>
+      {/* Server URL is configurable on local widgets; hosted PWAs only need the optional token. */}
+      <div className="flex flex-col gap-3">
+        <h2 className="text-base lg:text-20 font-bold text-accent">Server</h2>
+        {!SAME_ORIGIN && (
           <div className="flex flex-col gap-1.5">
             <label className="text-sm lg:text-base text-[#666] font-semibold">StreamVault Server URL</label>
             <input
@@ -235,15 +239,29 @@ export default function Settings() {
               tabIndex={0}
               value={localApiUrl}
               onChange={(e) => setLocalApiUrl(e.target.value)}
-              placeholder="http://192.168.0.100:3001"
+              placeholder="http://backend-ip:3002"
             />
           </div>
-          {fieldError && !isConnected && <span className="text-[#ff4757] text-sm">{fieldError}</span>}
-          <button className="py-2.5 px-5 lg:py-3 lg:px-7 bg-surface-hover border-2 border-[#222] rounded-lg text-sm lg:text-17 font-semibold text-[#ccc] self-start transition-all duration-150 tap-none focus:border-accent focus:text-white focus:scale-[1.02] disabled:opacity-40" data-focusable tabIndex={0} onClick={handleConnectServer}>
-            {isConnected ? 'Reconnect' : 'Connect'}
-          </button>
+        )}
+        <div className="flex flex-col gap-1.5">
+          <label className="text-sm lg:text-base text-[#666] font-semibold">Backend token</label>
+          <input
+            className="py-2.5 px-3.5 lg:py-3 lg:px-4 text-base lg:text-20 bg-surface border-2 border-surface-border rounded-lg text-[#e8eaed] transition-colors duration-200 focus:border-accent"
+            type="password"
+            data-focusable
+            tabIndex={0}
+            value={localApiToken}
+            onChange={(e) => setLocalApiToken(e.target.value)}
+            placeholder="Optional backend token"
+            autoComplete="off"
+          />
+          <span className="text-xs lg:text-sm text-[#666]">Only needed when the backend uses STREAMVAULT_AUTH_TOKEN.</span>
         </div>
-      )}
+        {fieldError && !isConnected && <span className="text-[#ff4757] text-sm">{fieldError}</span>}
+        <button className="py-2.5 px-5 lg:py-3 lg:px-7 bg-surface-hover border-2 border-[#222] rounded-lg text-sm lg:text-17 font-semibold text-[#ccc] self-start transition-all duration-150 tap-none focus:border-accent focus:text-white focus:scale-[1.02] disabled:opacity-40" data-focusable tabIndex={0} onClick={handleConnectServer}>
+          {isConnected ? 'Reconnect' : 'Connect'}
+        </button>
+      </div>
 
       {isConnected && (
         <>

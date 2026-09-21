@@ -7,9 +7,25 @@
 
 declare const __SERVER_URL__: string;
 
+function readStoredServerUrl(): string {
+  if (typeof localStorage === 'undefined') return '';
+  try {
+    const raw = localStorage.getItem('streamvault_api_url');
+    if (!raw) return '';
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return typeof parsed === 'string' ? parsed : '';
+    } catch {
+      return raw;
+    }
+  } catch {
+    return '';
+  }
+}
+
 const SERVER_URL: string =
   (typeof __SERVER_URL__ !== 'undefined' && __SERVER_URL__) ||
-  (typeof localStorage !== 'undefined' && localStorage.getItem('streamvault_api_url')) ||
+  readStoredServerUrl() ||
   '';
 
 function send(level: 'debug' | 'info' | 'warn' | 'error', message: string): void {

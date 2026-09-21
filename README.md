@@ -2,6 +2,38 @@
 
 IPTV streaming app for Samsung Tizen smart TVs and mobile PWA. Built with React, TypeScript, and Vite, with a Node.js backend server.
 
+## Backend required
+
+StreamVault is not a standalone TV player. The Tizen widget is a frontend and
+requires the StreamVault backend to run on another device such as a PC, NAS,
+Raspberry Pi, Proxmox guest, or server. Installing a `.wgt`, including through
+Apps2Samsung, does not install that backend. The StreamVault backend URL is
+separate from the Xtream server URL supplied by an IPTV provider.
+
+Start the backend on a Docker host:
+
+```bash
+git clone https://github.com/christopherklint97/streamvault.git
+cd streamvault
+docker compose up -d --build
+```
+
+Verify it from another device on the same network, replacing `<backend-ip>`
+with the Docker host's LAN address:
+
+```bash
+curl --fail http://<backend-ip>:3002/api/health
+```
+
+In the TV app, open **Settings**, enter `http://<backend-ip>:3002` under
+**StreamVault Server URL**, and select **Connect**. Enter the provider's Xtream
+server URL and credentials only after the backend connection succeeds. Backend
+logs are available on the Docker host:
+
+```bash
+docker compose logs -f server
+```
+
 ## Features
 
 - **Live TV, Movies, Series** - Browse and play via Xtream Codes API or M3U playlists
@@ -57,13 +89,23 @@ npm run typecheck # TypeScript check for backend
 npm run audit:prod # Production dependency audit
 ```
 
+Public widget builds intentionally leave the StreamVault backend URL unset so
+each installation can configure its own server at runtime. For a private
+preconfigured widget, set either a complete URL or a LAN IP explicitly:
+
+```bash
+VITE_SERVER_URL=http://192.168.1.20:3002 npm run build:tizen5
+```
+
+```bash
+VITE_SERVER_IP=192.168.1.20 npm run build:tizen5
+```
+
 ## Optional API hardening
 
-Set `STREAMVAULT_AUTH_TOKEN` to protect config, sync/crawl, recordings, and recording-rule APIs. Browser clients include the token by storing it in localStorage:
+Set `STREAMVAULT_AUTH_TOKEN` to protect config, sync/crawl, recordings, and recording-rule APIs. Enter the same value in the optional **Backend token** field when connecting to the StreamVault backend. The client stores it locally only after the full connection check succeeds.
 
-```js
-localStorage.setItem('streamvault_auth_token', 'your-token')
-```
+Tokens are backend-specific. StreamVault never sends the active backend's token while probing a different origin, and a successful switch replaces or clears the stored token.
 
 The stream proxy validates URLs and blocks localhost/private/link-local targets. `/api/proxy` is limited to the configured Xtream server host plus optional `STREAMVAULT_PROXY_ALLOWED_HOSTS` entries.
 
