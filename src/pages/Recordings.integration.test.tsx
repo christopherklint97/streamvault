@@ -146,12 +146,13 @@ describe('Recordings integration', () => {
       padding_before: 180_000, padding_after: 420_000, max_recordings: 0,
       retention_count: 4, airing_policy: 'every' as const, created_at: 1,
     };
+    const legacyRule = { ...createdRule, id: 'existing', max_recordings: 1, retention_count: 0 };
     const createRule = vi.fn(async () => createdRule);
     const updateRule = vi.fn(async () => {});
     await act(async () => {
       useRecordingStore.setState({
         recordings: [],
-        rules: [{ ...createdRule, id: 'existing' }],
+        rules: [legacyRule],
         createRule,
         updateRule,
       });
@@ -166,9 +167,23 @@ describe('Recordings integration', () => {
       findButton(container, 'Rules (1)').dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(container.textContent).toContain('New only');
-    expect(container.textContent).toContain('Keep latest 4');
+    expect(container.textContent).toContain('Stops after 1');
+    expect(container.textContent).toContain('converts this legacy stop-after rule');
+    expect(container.textContent).toContain('deleted immediately and cannot be restored');
 
     const existingRetention = container.querySelector('input[aria-label="Keep latest for SportsCenter"]') as HTMLInputElement;
+    expect(existingRetention.value).toBe('1');
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      valueSetter?.call(existingRetention, '');
+      existingRetention.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(findButton(container, 'Save limit').disabled).toBe(false);
+    await act(async () => {
+      findButton(container, 'Save limit').click();
+    });
+    expect(updateRule).toHaveBeenCalledWith('existing', { retentionLimit: 0, maxRecordings: 0 });
+
     await act(async () => {
       const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
       valueSetter?.call(existingRetention, '6');
@@ -177,7 +192,7 @@ describe('Recordings integration', () => {
     await act(async () => {
       findButton(container, 'Save limit').click();
     });
-    expect(updateRule).toHaveBeenCalledWith('existing', { retentionLimit: 6 });
+    expect(updateRule).toHaveBeenLastCalledWith('existing', { retentionLimit: 6, maxRecordings: 0 });
 
     const channelSearch = container.querySelector('#rule-channel-search') as HTMLInputElement;
     await act(async () => {
