@@ -20,6 +20,7 @@ export interface RunProcessOptions {
   timeoutMs?: number;
   outputLimitBytes?: number;
   killGraceMs?: number;
+  backgroundPriority?: boolean;
 }
 
 export interface RecordingMediaPaths {
@@ -46,6 +47,10 @@ export function buildMasterCaptureArgs(
 ): string[] {
   const headerArgs = Object.entries(headers).flatMap(([key, value]) => ['-headers', `${key}: ${value}\r\n`]);
   return [
+    '-hide_banner',
+    '-loglevel', 'warning',
+    '-nostats',
+    '-nostdin',
     '-reconnect', '1',
     '-reconnect_streamed', '1',
     '-reconnect_delay_max', '30',
@@ -102,7 +107,7 @@ export function buildProbeDurationArgs(masterPath: string): string[] {
 
 export function parseConfiguredConcurrency(value: string, fallback: number): number {
   const parsed = Number.parseInt(value, 10);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+  return Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, 8) : fallback;
 }
 
 export function shouldRetryCapture(retryCount: number, now: number, endTime: number, _exitCode?: number | null): boolean {
@@ -202,7 +207,9 @@ export function runProcess(command: string, args: string[], options: RunProcessO
   const outputLimit = options.outputLimitBytes ?? PROCESS_OUTPUT_TAIL_BYTES;
   const killGraceMs = options.killGraceMs ?? 5_000;
   return new Promise(resolve => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = options.backgroundPriority
+      ? spawn('ionice', ['-c', '3', 'nice', '-n', '15', '--', command, ...args], { stdio: ['ignore', 'pipe', 'pipe'] })
+      : spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -267,11 +274,15 @@ export async function finalizeRecordingMedia(
 
   if (masterIsAuthoritative) {
     try { fileSystem.rmSync(paths.part, { force: true }); } catch { /* stale unpublished master part */ }
-  } else if (segments.length > 0) {
+  } else if (segments.length === 1) {
+    try { fileSystem.rmSync(paths.part, { force: true }); } catch { /* best effort */ }
+    fileSystem.renameSync(segments[0], paths.part);
+  } else if (segments.length > 1) {
     try { fileSystem.rmSync(paths.part, { force: true }); } catch { /* best effort */ }
     const concat = await run('ffmpeg', buildMasterConcatArgs(segments, paths.part), {
       signal: dependencies.signal,
       timeoutMs: REMUX_TIMEOUT_MS,
+      backgroundPriority: true,
     });
     if (concat.code !== 0) {
       try { fileSystem.rmSync(paths.part, { force: true }); } catch { /* best effort */ }
@@ -293,7 +304,9 @@ export async function finalizeRecordingMedia(
   const probe = await run('ffprobe', buildProbeDurationArgs(paths.master), {
     signal: dependencies.signal,
     timeoutMs: PROBE_TIMEOUT_MS,
+    backgroundPriority: true,
   });
+  if (probe.aborted || dependencies.signal?.aborted) throw new Error('Recording finalization aborted during duration probe');
   const probedDuration = probe.code === 0 ? Number.parseFloat(probe.stdout.trim()) : Number.NaN;
   const durationSeconds = Number.isFinite(probedDuration) && probedDuration >= 0
     ? Math.round(probedDuration)
@@ -302,7 +315,12 @@ export async function finalizeRecordingMedia(
   const derivativeResult = await run('ffmpeg', buildDerivativeArgs(paths.master, paths.derivativePart), {
     signal: dependencies.signal,
     timeoutMs: REMUX_TIMEOUT_MS,
+    backgroundPriority: true,
   });
+  if (derivativeResult.aborted || dependencies.signal?.aborted) {
+    try { fileSystem.rmSync(paths.derivativePart, { force: true }); } catch { /* best effort */ }
+    throw new Error('Recording finalization aborted during derivative remux');
+  }
   if (derivativeResult.code !== 0) {
     try { fileSystem.rmSync(paths.derivativePart, { force: true }); } catch { /* best effort */ }
     const detail = derivativeResult.aborted ? 'Derivative remux aborted' : derivativeResult.timedOut

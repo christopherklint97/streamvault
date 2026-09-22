@@ -48,6 +48,7 @@ vi.mock('./recorder.js', () => ({
   getActiveCount: () => 0,
   getRecordingsDiskUsage: () => 0,
   deleteRecordingFile: vi.fn(async () => 0),
+  enforceAllRuleRetentions: vi.fn(async () => {}),
 }));
 
 vi.mock('./xtream.js', () => ({ fetchXtreamShortEpg: vi.fn() }));
@@ -57,7 +58,7 @@ function rule(overrides: Partial<DBRecordingRule> = {}): DBRecordingRule {
   return {
     id: 'rule-1', channel_id: 'c1', channel_name: 'Channel', match_title: 'Show',
     match_type: 'exact', enabled: 1, padding_before: 0, padding_after: 0,
-    max_recordings: 0, airing_policy: 'every', repeat_policy: 'include_unknown', created_at: 1,
+    max_recordings: 0, retention_count: 0, airing_policy: 'every', repeat_policy: 'include_unknown', created_at: 1,
     ...overrides,
   };
 }
@@ -123,6 +124,41 @@ describe('recording scheduler rule integration', () => {
     matchRules();
 
     expect(state.inserted.map(item => item.airing_key)).toEqual(['retry-airing']);
+  });
+
+  it('keeps scheduling a rolling rule after its retained recording count is full', async () => {
+    state.rules = [rule({ retention_count: 1 })];
+    state.recordings = [recording({ airing_key: 'old-airing', content_key: 'old-episode' })];
+    state.programs = [program({ airing_key: 'new-airing', content_key: 'new-episode' })];
+    const { matchRules } = await import('./recording-scheduler.js');
+
+    matchRules();
+
+    expect(state.inserted.map(item => item.airing_key)).toEqual(['new-airing']);
+  });
+
+  it('schedules only the first eligible airing for a record-once rule', async () => {
+    state.rules = [rule({ airing_policy: 'once' })];
+    state.programs = [
+      program({ airing_key: 'first', start_time: 2_000, stop_time: 3_000 }),
+      program({ airing_key: 'second', start_time: 4_000, stop_time: 5_000 }),
+    ];
+    const { matchRules } = await import('./recording-scheduler.js');
+
+    matchRules();
+
+    expect(state.inserted.map(item => item.airing_key)).toEqual(['first']);
+  });
+
+  it('allows a record-once rule to retry after a failed attempt', async () => {
+    state.rules = [rule({ airing_policy: 'once' })];
+    state.recordings = [recording({ status: 'failed', airing_key: 'failed' })];
+    state.programs = [program({ airing_key: 'retry' })];
+    const { matchRules } = await import('./recording-scheduler.js');
+
+    matchRules();
+
+    expect(state.inserted.map(item => item.airing_key)).toEqual(['retry']);
   });
 
   it('uses the full future horizon, filters repeats/content duplicates, and still reconciles known airings', async () => {

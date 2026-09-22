@@ -29,6 +29,8 @@ describe('additive recording schema migration', () => {
     expect(recordingColumns.has('master_file_path')).toBe(true);
     expect(recordingColumns.has('analysis_state')).toBe(true);
     expect(recordingColumns.has('commercial_skip_override')).toBe(true);
+    const ruleColumns = new Set((db.pragma('table_info(recording_rules)') as Array<{ name: string }>).map(row => row.name));
+    expect(ruleColumns.has('retention_count')).toBe(true);
     expect(db.prepare('SELECT title FROM programs').get()).toEqual({ title: 'SportsCenter' });
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='commercial_segments'").get()).toEqual({ name: 'commercial_segments' });
     db.close();

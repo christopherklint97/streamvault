@@ -13,6 +13,8 @@ describe('recording rule creation defaults', () => {
   it('defaults to the repeat policy that records new and unknown episodes and explains every option', () => {
     const draft = createRecordingRuleDraft();
     expect(draft.repeatPolicy).toBe('include_unknown');
+    expect(draft.retentionLimit).toBe('');
+    expect(draft.recordOnce).toBe(false);
     expect(repeatPolicyDescription('all')).toContain('repeat');
     expect(repeatPolicyDescription('include_unknown')).toContain('unknown');
     expect(repeatPolicyDescription('new_only')).toContain('new');

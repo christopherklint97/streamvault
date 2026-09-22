@@ -120,10 +120,12 @@ describe('commercial API validation', () => {
   it('validates bounded recurring-rule payloads and repeat policy values', () => {
     expect(validateRecordingRulePayload({
       channelId: 'c1', channelName: 'ESPN', matchTitle: 'SportsCenter', matchType: 'exact',
-      repeatPolicy: 'new_only', paddingBefore: 1000, paddingAfter: 2000, maxRecordings: 10,
+      repeatPolicy: 'new_only', paddingBefore: 1000, paddingAfter: 2000, maxRecordings: 0,
+      retentionLimit: 10, airingPolicy: 'every',
     }, false)).toEqual({
       channel_id: 'c1', channel_name: 'ESPN', match_title: 'SportsCenter', match_type: 'exact',
-      repeat_policy: 'new_only', padding_before: 1000, padding_after: 2000, max_recordings: 10,
+      repeat_policy: 'new_only', padding_before: 1000, padding_after: 2000, max_recordings: 0,
+      retention_count: 10, airing_policy: 'every',
     });
     expect(validateRecordingRulePayload({ channelId: 'c1', matchTitle: 'T' }, false).repeat_policy).toBe('include_unknown');
     for (const repeatPolicy of ['all', 'include_unknown', 'new_only']) {
@@ -132,5 +134,10 @@ describe('commercial API validation', () => {
     expect(() => validateRecordingRulePayload({ repeatPolicy: 'sometimes' }, true)).toThrow(/repeatPolicy/i);
     expect(() => validateRecordingRulePayload({ channelId: 'c', matchTitle: 'T', paddingBefore: -1 }, false)).toThrow(/paddingBefore/i);
     expect(() => validateRecordingRulePayload({ channelId: 'c', matchTitle: 'T', maxRecordings: 1.5 }, false)).toThrow(/maxRecordings/i);
+    expect(() => validateRecordingRulePayload({ retentionLimit: -1 }, true)).toThrow(/retentionLimit/i);
+    expect(() => validateRecordingRulePayload({ airingPolicy: 'latest' }, true)).toThrow(/airingPolicy/i);
+    expect(validateRecordingRulePayload({ retentionLimit: 1, airingPolicy: 'once' }, true)).toEqual({
+      retention_count: 1, airing_policy: 'once',
+    });
   });
 });

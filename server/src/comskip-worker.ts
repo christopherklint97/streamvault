@@ -99,7 +99,7 @@ export function createCommercialAnalysisWorker(
         `--ini=${dependencies.profilePath}`,
         `--output=${outputDirectory}`,
         masterPath,
-      ], { signal: controller.signal, timeoutMs: COMSKIP_TIMEOUT_MS });
+      ], { signal: controller.signal, timeoutMs: COMSKIP_TIMEOUT_MS, backgroundPriority: true });
       if (stopped || controller.signal.aborted || result.aborted) return true;
       if (result.code !== 0) {
         const detail = result.timedOut

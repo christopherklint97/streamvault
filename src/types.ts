@@ -93,7 +93,7 @@ export interface FavoriteList {
   channelIds: string[];
 }
 
-export type RecordingStatus = 'scheduled' | 'recording' | 'completed' | 'failed' | 'cancelled';
+export type RecordingStatus = 'scheduled' | 'recording' | 'finalizing' | 'completed' | 'failed' | 'cancelled';
 
 export interface Recording {
   id: string;
@@ -163,6 +163,7 @@ export interface CommercialSegmentsResponse {
 
 export type RecordingRuleMatchType = 'exact' | 'startsWith' | 'contains';
 export type RecordingRepeatPolicy = 'all' | 'include_unknown' | 'new_only';
+export type RecordingAiringPolicy = 'every' | 'once';
 
 export interface RecordingRule {
   id: string;
@@ -175,6 +176,8 @@ export interface RecordingRule {
   padding_before: number;
   padding_after: number;
   max_recordings: number;
+  retention_count: number;
+  airing_policy: RecordingAiringPolicy;
   created_at: number;
 }
 
@@ -186,7 +189,8 @@ export interface CreateRecordingRuleInput {
   paddingBefore: number;
   paddingAfter: number;
   repeatPolicy: RecordingRepeatPolicy;
-  maxRecordings: number;
+  retentionLimit: number;
+  airingPolicy: RecordingAiringPolicy;
 }
 
 export interface UpdateRecordingRuleInput {
@@ -196,7 +200,8 @@ export interface UpdateRecordingRuleInput {
   paddingBefore: number;
   paddingAfter: number;
   repeatPolicy: RecordingRepeatPolicy;
-  maxRecordings: number;
+  retentionLimit: number;
+  airingPolicy: RecordingAiringPolicy;
 }
 
 export interface RecordingStatusInfo {

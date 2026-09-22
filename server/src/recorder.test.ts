@@ -4,11 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DBRecording } from './db.js';
+import type { DBRecording, DBRecordingRule } from './db.js';
 import type { RecordingMediaPaths, RunProcessOptions } from './recorder-media.js';
 
 const state = vi.hoisted(() => ({
   records: new Map<string, DBRecording>(),
+  rules: new Map<string, DBRecordingRule>(),
+  deleted: [] as string[],
   spawned: [] as Array<{ process: EventEmitter & Record<string, unknown>; args: string[] }>,
   finalize: undefined as undefined | ((paths: RecordingMediaPaths, dependencies?: { signal?: AbortSignal }) => Promise<{
     durationSeconds: number;
@@ -24,7 +26,14 @@ const state = vi.hoisted(() => ({
 vi.mock('./db.js', () => ({
   getConfig: (key: string, fallback = '') => key === 'max_concurrent_recordings' ? state.maxConcurrent : fallback,
   getRecording: (id: string) => state.records.get(id),
+  getRecordingRule: (id: string) => state.rules.get(id),
+  getRecordingRules: () => [...state.rules.values()],
+  getRecordingsByRuleId: (ruleId: string) => [...state.records.values()].filter(recording => recording.rule_id === ruleId),
   getRecordingsByStatus: (status: string) => [...state.records.values()].filter(recording => recording.status === status),
+  deleteRecording: (id: string) => {
+    state.deleted.push(id);
+    state.records.delete(id);
+  },
   updateRecording: (id: string, updates: Partial<DBRecording>) => {
     const current = state.records.get(id);
     if (current) state.records.set(id, { ...current, ...updates });
@@ -88,6 +97,15 @@ function recording(overrides: Partial<DBRecording> = {}): DBRecording {
   };
 }
 
+function rule(overrides: Partial<DBRecordingRule> = {}): DBRecordingRule {
+  return {
+    id: 'rule-1', channel_id: 'c1', channel_name: 'Channel', match_title: 'Show',
+    match_type: 'exact', enabled: 1, padding_before: 0, padding_after: 0,
+    max_recordings: 0, retention_count: 1, airing_policy: 'every', repeat_policy: 'include_unknown', created_at: 1,
+    ...overrides,
+  };
+}
+
 function finishCapture(index: number, code: number): void {
   const spawned = state.spawned[index];
   const output = spawned.args.at(-1)!;
@@ -109,6 +127,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(10_000);
   state.records.clear();
+  state.rules.clear();
+  state.deleted.length = 0;
   state.spawned.length = 0;
   state.analysisNotifications = 0;
   state.maxConcurrent = '3';
@@ -278,6 +298,180 @@ describe('recorder lifecycle integration', () => {
     expect(spawnCount).toBe(2);
   });
 
+  it('serializes finalization so simultaneous recordings do not create an I/O spike', async () => {
+    state.records.set('r1', recording());
+    state.records.set('r2', recording({ id: 'r2' }));
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>(resolve => { releaseFirst = resolve; });
+    const finalizationIds: string[] = [];
+    state.finalize = async paths => {
+      finalizationIds.push(path.basename(paths.master, '.ts.part'));
+      if (finalizationIds.length === 1) await firstBlocked;
+      fs.writeFileSync(paths.master, 'master');
+      fs.writeFileSync(paths.derivative, 'mp4');
+      return { durationSeconds: 30, masterSize: 6, derivativeSize: 3, derivativeError: null };
+    };
+    const recorder = await import('./recorder.js');
+
+    await recorder.startRecording('r1');
+    await recorder.startRecording('r2');
+    fs.writeFileSync(state.spawned[0].args.at(-1)!, 'captured-1');
+    fs.writeFileSync(state.spawned[1].args.at(-1)!, 'captured-2');
+    const stoppingFirst = recorder.stopRecording('r1');
+    const stoppingSecond = recorder.stopRecording('r2');
+    await flush();
+    const concurrentFinalizations = finalizationIds.length;
+    releaseFirst();
+    await Promise.all([stoppingFirst, stoppingSecond]);
+
+    expect(concurrentFinalizations).toBe(1);
+    expect(finalizationIds).toHaveLength(2);
+  });
+
+  it('cancels a queued finalization without waiting for an earlier remux', async () => {
+    state.records.set('r1', recording());
+    state.records.set('r2', recording({ id: 'r2' }));
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>(resolve => { releaseFirst = resolve; });
+    let finalizationCalls = 0;
+    state.finalize = async paths => {
+      finalizationCalls += 1;
+      if (finalizationCalls === 1) await firstBlocked;
+      fs.writeFileSync(paths.master, 'master');
+      fs.writeFileSync(paths.derivative, 'mp4');
+      return { durationSeconds: 30, masterSize: 6, derivativeSize: 3, derivativeError: null };
+    };
+    const recorder = await import('./recorder.js');
+
+    await recorder.startRecording('r1');
+    await recorder.startRecording('r2');
+    fs.writeFileSync(state.spawned[0].args.at(-1)!, 'captured-1');
+    fs.writeFileSync(state.spawned[1].args.at(-1)!, 'captured-2');
+    const stoppingFirst = recorder.stopRecording('r1');
+    await flush();
+    const stoppingSecond = recorder.stopRecording('r2');
+    await flush();
+    expect(finalizationCalls).toBe(1);
+
+    await recorder.cancelRecording('r2');
+
+    expect(state.records.get('r2')?.status).toBe('cancelled');
+    expect(recorder.isRecordingActive('r2')).toBe(false);
+    expect(finalizationCalls).toBe(1);
+    releaseFirst();
+    await Promise.all([stoppingFirst, stoppingSecond]);
+  });
+
+  it('deletes only the oldest completed media when a rolling retention limit is exceeded', async () => {
+    const nested = path.join(recordingsDir, '2026', '09', '20');
+    fs.mkdirSync(nested, { recursive: true });
+    state.rules.set('rule-1', rule({ retention_count: 2 }));
+    for (const [id, start] of [['oldest', 1_000], ['middle', 2_000], ['newest', 3_000]] as const) {
+      const relativePath = `2026/09/20/${id}.ts`;
+      fs.writeFileSync(path.join(recordingsDir, relativePath), id);
+      state.records.set(id, recording({
+        id, rule_id: 'rule-1', status: 'completed', start_time: start,
+        master_file_path: relativePath, file_path: relativePath,
+      }));
+    }
+    state.records.set('active', recording({ id: 'active', rule_id: 'rule-1', status: 'recording', start_time: 500 }));
+    const recorder = await import('./recorder.js');
+
+    await recorder.enforceRuleRetention('rule-1');
+
+    expect(state.deleted).toEqual(['oldest']);
+    expect(fs.existsSync(path.join(recordingsDir, '2026/09/20/oldest.ts'))).toBe(false);
+    expect([...state.records.keys()].sort()).toEqual(['active', 'middle', 'newest']);
+  });
+
+  it('serializes rule policy changes behind an in-flight destructive prune', async () => {
+    const nested = path.join(recordingsDir, '2026', '09', '20');
+    fs.mkdirSync(nested, { recursive: true });
+    state.rules.set('rule-1', rule({ retention_count: 1 }));
+    for (const [id, start] of [['oldest', 1_000], ['newest', 2_000]] as const) {
+      const relativePath = `2026/09/20/${id}.ts`;
+      fs.writeFileSync(path.join(recordingsDir, relativePath), id);
+      state.records.set(id, recording({ id, rule_id: 'rule-1', status: 'completed', start_time: start, file_path: relativePath }));
+    }
+    let releaseAnalysis!: () => void;
+    state.cancelAnalysis = () => new Promise<void>(resolve => { releaseAnalysis = resolve; });
+    const recorder = await import('./recorder.js');
+
+    const pruning = recorder.enforceRuleRetention('rule-1');
+    await flush();
+    let policyUpdated = false;
+    const updating = recorder.withRuleRetentionLock('rule-1', () => {
+      state.rules.set('rule-1', rule({ retention_count: 2 }));
+      policyUpdated = true;
+    });
+    await flush();
+
+    expect(policyUpdated).toBe(false);
+    releaseAnalysis();
+    await Promise.all([pruning, updating]);
+    expect(policyUpdated).toBe(true);
+  });
+
+  it('keeps database metadata when verified retention media deletion fails', async () => {
+    const nested = path.join(recordingsDir, '2026', '09', '20');
+    fs.mkdirSync(nested, { recursive: true });
+    state.rules.set('rule-1', rule({ retention_count: 1 }));
+    const oldRelative = '2026/09/20/oldest.ts';
+    fs.writeFileSync(path.join(recordingsDir, oldRelative), 'oldest');
+    state.records.set('oldest', recording({
+      id: 'oldest', rule_id: 'rule-1', status: 'completed', start_time: 1_000, file_path: oldRelative,
+    }));
+    state.records.set('newest', recording({
+      id: 'newest', rule_id: 'rule-1', status: 'completed', start_time: 2_000, file_path: 'newest.ts',
+    }));
+    const originalRmSync = fs.rmSync.bind(fs);
+    const rmSpy = vi.spyOn(fs, 'rmSync').mockImplementation(((target: fs.PathLike, options?: fs.RmDirOptions) => {
+      if (String(target).endsWith('oldest.ts')) throw new Error('permission denied');
+      return originalRmSync(target, options);
+    }) as typeof fs.rmSync);
+    const recorder = await import('./recorder.js');
+
+    await expect(recorder.enforceRuleRetention('rule-1')).rejects.toThrow(/retention cleanup incomplete/i);
+
+    expect(state.deleted).toEqual([]);
+    expect(state.records.has('oldest')).toBe(true);
+    rmSpy.mockRestore();
+  });
+
+  it('reconciles surplus scheduled airings when a rule changes to record once', async () => {
+    state.rules.set('rule-1', rule({ airing_policy: 'once' }));
+    state.records.set('first', recording({ id: 'first', rule_id: 'rule-1', status: 'scheduled', start_time: 1_000 }));
+    state.records.set('second', recording({ id: 'second', rule_id: 'rule-1', status: 'scheduled', start_time: 2_000 }));
+    state.records.set('third', recording({ id: 'third', rule_id: 'rule-1', status: 'scheduled', start_time: 3_000 }));
+    const recorder = await import('./recorder.js');
+
+    await recorder.reconcileRecordOnceRule('rule-1');
+
+    expect(state.records.get('first')?.status).toBe('scheduled');
+    expect(state.records.get('second')?.status).toBe('cancelled');
+    expect(state.records.get('third')?.status).toBe('cancelled');
+  });
+
+  it('can evict a just-finalized older airing without awaiting its own finalizer', async () => {
+    state.rules.set('rule-1', rule({ retention_count: 1 }));
+    state.records.set('newer', recording({
+      id: 'newer', rule_id: 'rule-1', status: 'completed', start_time: 3_000,
+      file_path: 'newer.ts', master_file_path: 'newer.ts',
+    }));
+    state.records.set('older', recording({
+      id: 'older', rule_id: 'rule-1', status: 'scheduled', start_time: 1_000,
+    }));
+    const recorder = await import('./recorder.js');
+
+    await recorder.startRecording('older');
+    fs.writeFileSync(state.spawned[0].args.at(-1)!, 'captured');
+    await recorder.stopRecording('older');
+
+    expect(state.deleted).toEqual(['older']);
+    expect(state.records.has('newer')).toBe(true);
+    expect(recorder.isRecordingActive('older')).toBe(false);
+  });
+
   it('recovers legacy partial capture data and finalizes it after the recording window', async () => {
     const nested = path.join(recordingsDir, '2026', '09', '20');
     fs.mkdirSync(nested, { recursive: true });
@@ -286,8 +480,8 @@ describe('recorder lifecycle integration', () => {
     const recorder = await import('./recorder.js');
 
     await recorder.recoverRecordings();
+    await vi.waitFor(() => expect(state.records.get('r1')?.status).toBe('completed'));
 
-    expect(state.records.get('r1')?.status).toBe('completed');
     expect(state.records.get('r1')?.master_file_path).toMatch(/r1\.ts$/);
     expect(state.analysisNotifications).toBe(1);
   });
@@ -325,17 +519,32 @@ describe('recorder lifecycle integration', () => {
     expect(liveStatusBeforeFinalization).toBe('scheduled');
   });
 
-  it('preserves a future-end capture as scheduled and resumable during shutdown', async () => {
+  it('defers live and expired captures for restart without entering finalization during shutdown', async () => {
     state.records.set('r1', recording({ end_time: 120_000 }));
+    state.records.set('r2', recording({ id: 'r2', end_time: 120_000 }));
+    let finalizationCalls = 0;
+    state.finalize = async paths => {
+      finalizationCalls += 1;
+      fs.writeFileSync(paths.master, 'master');
+      fs.writeFileSync(paths.derivative, 'mp4');
+      return { durationSeconds: 30, masterSize: 6, derivativeSize: 3, derivativeError: null };
+    };
     const recorder = await import('./recorder.js');
     await recorder.startRecording('r1');
-    const capturePath = state.spawned[0].args.at(-1)!;
-    fs.writeFileSync(capturePath, 'partial-at-shutdown');
+    await recorder.startRecording('r2');
+    state.records.set('r2', { ...state.records.get('r2')!, end_time: 5_000 });
+    const futureCapturePath = state.spawned[0].args.at(-1)!;
+    const expiredCapturePath = state.spawned[1].args.at(-1)!;
+    fs.writeFileSync(futureCapturePath, 'partial-at-shutdown');
+    fs.writeFileSync(expiredCapturePath, 'expired-at-shutdown');
 
     await recorder.stopAllRecordings();
 
     expect(state.records.get('r1')).toMatchObject({ status: 'scheduled', error: null });
-    expect(fs.readFileSync(capturePath, 'utf8')).toBe('partial-at-shutdown');
+    expect(state.records.get('r2')).toMatchObject({ status: 'finalizing', error: null });
+    expect(fs.readFileSync(futureCapturePath, 'utf8')).toBe('partial-at-shutdown');
+    expect(fs.readFileSync(expiredCapturePath, 'utf8')).toBe('expired-at-shutdown');
+    expect(finalizationCalls).toBe(0);
     expect(state.analysisNotifications).toBe(0);
   });
 });

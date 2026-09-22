@@ -8,7 +8,7 @@ export interface RecordingRuleDraft {
   paddingBeforeMinutes: number;
   paddingAfterMinutes: number;
   repeatPolicy: RecordingRepeatPolicy;
-  maxRecordings: string;
+  retentionLimit: string;
   recordOnce: boolean;
 }
 
@@ -24,7 +24,7 @@ export function createRecordingRuleDraft(
     paddingBeforeMinutes: 2,
     paddingAfterMinutes: 5,
     repeatPolicy: 'include_unknown',
-    maxRecordings: '',
+    retentionLimit: '',
     recordOnce: false,
   };
 }

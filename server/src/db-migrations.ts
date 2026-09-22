@@ -46,6 +46,7 @@ const RECORDING_COLUMNS: ColumnSpec[] = [
 const RULE_COLUMNS: ColumnSpec[] = [
   { name: 'airing_policy', definition: "TEXT NOT NULL DEFAULT 'every'" },
   { name: 'repeat_policy', definition: "TEXT NOT NULL DEFAULT 'include_unknown'" },
+  { name: 'retention_count', definition: 'INTEGER NOT NULL DEFAULT 0' },
 ];
 
 const COMMERCIAL_COLUMNS = [
