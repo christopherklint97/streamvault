@@ -202,6 +202,7 @@ export interface UpdateRecordingRuleInput {
   repeatPolicy: RecordingRepeatPolicy;
   retentionLimit: number;
   airingPolicy: RecordingAiringPolicy;
+  maxRecordings: number;
 }
 
 export interface RecordingStatusInfo {

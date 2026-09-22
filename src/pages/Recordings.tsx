@@ -150,9 +150,13 @@ function RuleCard({ rule, onToggle, onDelete, onRetentionChange }: {
   onDelete: () => void;
   onRetentionChange: (limit: number) => void;
 }) {
-  const [retentionValue, setRetentionValue] = useState(rule.retention_count > 0 ? String(rule.retention_count) : '');
+  const initialRetention = rule.retention_count > 0
+    ? rule.retention_count
+    : rule.max_recordings > 0 ? rule.max_recordings : 0;
+  const [retentionValue, setRetentionValue] = useState(initialRetention > 0 ? String(initialRetention) : '');
   const parsedRetention = retentionValue.trim() === '' ? 0 : Number(retentionValue);
   const validRetention = Number.isInteger(parsedRetention) && parsedRetention >= 0;
+  const retentionUnchanged = rule.max_recordings === 0 && parsedRetention === rule.retention_count;
   return (
     <div className="bg-surface-border rounded-[10px] p-3.5 flex flex-col gap-1.5">
       <div className="flex items-center gap-2">
@@ -180,7 +184,7 @@ function RuleCard({ rule, onToggle, onDelete, onRetentionChange }: {
           <span>Keep all</span>
         )}
       </div>
-      {rule.airing_policy === 'every' && rule.max_recordings === 0 && (
+      {rule.airing_policy === 'every' && (
         <div className="mt-1">
           <div className="flex items-end gap-2">
           <label className="min-w-0 flex-1 text-12 text-[#9ca3af]">
@@ -200,15 +204,22 @@ function RuleCard({ rule, onToggle, onDelete, onRetentionChange }: {
           </label>
           <button
             className="rounded bg-[#1d4ed8] px-3 py-1.5 text-12 font-semibold text-white disabled:opacity-40"
-            disabled={!validRetention || parsedRetention === rule.retention_count}
+            disabled={!validRetention || retentionUnchanged}
             onClick={() => onRetentionChange(parsedRetention)}
           >
             Save limit
           </button>
           </div>
           <p className="mt-1 text-11 text-[#f59e0b]">
-            Lowering this limit deletes older completed recordings immediately and cannot be undone.
+            {rule.max_recordings > 0
+              ? 'Saving converts this legacy stop-after rule to rolling retention.'
+              : 'Lowering this limit deletes older completed recordings immediately and cannot be undone.'}
           </p>
+          {rule.max_recordings > 0 && (
+            <p className="mt-1 text-11 text-[#f59e0b]">
+              If the new limit is below the completed count, older recordings are deleted immediately and cannot be restored.
+            </p>
+          )}
         </div>
       )}
       <div className="flex gap-1.5 mt-1">
@@ -814,7 +825,7 @@ export default function Recordings() {
                   rule={r}
                   onToggle={() => updateRule(r.id, { enabled: !r.enabled })}
                   onDelete={() => deleteRule(r.id)}
-                  onRetentionChange={(limit) => { void updateRule(r.id, { retentionLimit: limit }); }}
+                  onRetentionChange={(limit) => { void updateRule(r.id, { retentionLimit: limit, maxRecordings: 0 }); }}
                 />
               ))}
             </div>
