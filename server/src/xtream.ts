@@ -274,17 +274,20 @@ export async function fetchXtreamStreamsByCategory(
   categoryId: string,
   categoryName: string,
   timeoutMs = 180_000,
+  signal?: AbortSignal,
 ): Promise<DBChannel[]> {
   const parsed = parseCategoryId(categoryId);
   if (!parsed) throw new Error(`Invalid category ID: ${categoryId}`);
 
   const { type, rawId } = parsed;
   const channels: DBChannel[] = [];
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 
   if (type === 'live') {
     const streams = await fetchJson<XtreamLiveStream[]>(
       apiUrl(config, `get_live_streams&category_id=${rawId}`),
-      AbortSignal.timeout(timeoutMs),
+      requestSignal,
       `live streams cat ${rawId}`,
     );
     for (const s of streams) {
@@ -298,12 +301,13 @@ export async function fetchXtreamStreamsByCategory(
         content_type: 'livetv',
         category_id: categoryId,
         sort_order: s.num || 0,
+        epg_channel_id: s.epg_channel_id || '',
       });
     }
   } else if (type === 'vod') {
     const streams = await fetchJson<XtreamVodStream[]>(
       apiUrl(config, `get_vod_streams&category_id=${rawId}`),
-      AbortSignal.timeout(timeoutMs),
+      requestSignal,
       `vod streams cat ${rawId}`,
     );
     for (const s of streams) {
@@ -323,7 +327,7 @@ export async function fetchXtreamStreamsByCategory(
   } else {
     const series = await fetchJson<XtreamSeries[]>(
       apiUrl(config, `get_series&category_id=${rawId}`),
-      AbortSignal.timeout(timeoutMs),
+      requestSignal,
       `series cat ${rawId}`,
     );
     for (const s of series) {
@@ -348,7 +352,18 @@ export async function fetchXtreamStreamsByCategory(
 
 // ---------- Fetch all categories' streams with controlled parallelism ----------
 
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise(resolve => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal?.addEventListener('abort', finish, { once: true });
+  });
+}
 
 export async function fetchAllCategoryStreams(
   config: XtreamConfig,
@@ -372,7 +387,8 @@ export async function fetchAllCategoryStreams(
         if (signal?.aborted) return;
         const cat = q.shift()!;
         try {
-          const channels = await fetchXtreamStreamsByCategory(config, cat.id, cat.name, timeout);
+          const channels = await fetchXtreamStreamsByCategory(config, cat.id, cat.name, timeout, signal);
+          if (signal?.aborted) return;
           onCategoryDone(cat.id, channels);
           totalFetched += channels.length;
           completed++;
@@ -381,6 +397,7 @@ export async function fetchAllCategoryStreams(
             logger.info(`Stream crawl progress: ${completed}/${total} categories, ${totalFetched} streams`);
           }
         } catch (err) {
+          if (signal?.aborted) return;
           completed++;
           consecutiveErrors++;
           const msg = err instanceof Error ? err.message : 'Unknown error';
@@ -391,10 +408,10 @@ export async function fetchAllCategoryStreams(
           if (consecutiveErrors >= 3) {
             const backoff = Math.min(consecutiveErrors * 2000, 15000);
             logger.info(`Backing off ${backoff / 1000}s after ${consecutiveErrors} consecutive errors`);
-            await delay(backoff);
+            await delay(backoff, signal);
           }
         }
-        await delay(isRetry ? 2000 : 500);
+        await delay(isRetry ? 2000 : 500, signal);
       }
     }
 
@@ -410,7 +427,8 @@ export async function fetchAllCategoryStreams(
     if (signal?.aborted) break;
     const toRetry = retryQueue.splice(0);
     logger.info(`Retry pass ${attempt}: ${toRetry.length} failed categories (waiting 10s before starting)`);
-    await delay(10_000);
+    await delay(10_000, signal);
+    if (signal?.aborted) break;
     await processQueue(toRetry, true);
   }
 
@@ -418,7 +436,9 @@ export async function fetchAllCategoryStreams(
     logger.warn(`${retryQueue.length} categories still failed after ${MAX_RETRIES} retries: ${retryQueue.map(c => c.name).join(', ')}`);
   }
 
-  logger.info(`Stream crawl complete: ${totalFetched} streams from ${total} categories`);
+  if (!signal?.aborted) {
+    logger.info(`Stream crawl complete: ${totalFetched} streams from ${total} categories`);
+  }
   return totalFetched;
 }
 
@@ -511,23 +531,28 @@ export async function fetchXtreamShortEpg(
   streamIds: number[],
   channelIdPrefix = '',
   limit = 100,
+  signal?: AbortSignal,
 ): Promise<DBProgram[]> {
   const programs: DBProgram[] = [];
   const BATCH = 10;
 
   for (let i = 0; i < streamIds.length; i += BATCH) {
+    if (signal?.aborted) break;
     const batch = streamIds.slice(i, i + BATCH);
     const results = await Promise.all(
-      batch.map(id =>
-        fetchJson<XtreamShortEpg>(
+      batch.map(id => {
+        const timeoutSignal = AbortSignal.timeout(30_000);
+        const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+        return fetchJson<XtreamShortEpg>(
           apiUrl(config, `get_short_epg&stream_id=${id}&limit=${Math.max(1, Math.trunc(limit))}`),
-          AbortSignal.timeout(30_000),
+          requestSignal,
           `epg ${id}`,
         ).then(data => ({ id, data }))
-          .catch(() => ({ id, data: { epg_listings: [] } as XtreamShortEpg }))
-      )
+          .catch(() => ({ id, data: { epg_listings: [] } as XtreamShortEpg }));
+      })
     );
 
+    if (signal?.aborted) break;
     for (const { id: streamId, data: result } of results) {
       for (const e of result.epg_listings) {
         // Use our channel ID format (live_12345) when prefix provided, otherwise use EPG's channel_id
@@ -556,7 +581,8 @@ export async function fetchEpgForStreams(
     if (signal?.aborted) break;
     const batch = streamIds.slice(i, i + BATCH);
     try {
-      const programs = await fetchXtreamShortEpg(config, batch, 'live_', limit);
+      const programs = await fetchXtreamShortEpg(config, batch, 'live_', limit, signal);
+      if (signal?.aborted) break;
       if (programs.length > 0) {
         onBatchDone(programs);
         totalPrograms += programs.length;

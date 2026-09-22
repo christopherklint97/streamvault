@@ -40,12 +40,69 @@ describe('EPG snapshot reconciliation', () => {
     db.close();
   });
 
+  it('refreshes unchanged airings without rewriting all guide fields', () => {
+    const db = database();
+    const store = createProgramStore(db);
+    store.saveSnapshot([program()], 1_000);
+    db.exec(`
+      CREATE TABLE full_program_update_audit (count INTEGER NOT NULL);
+      INSERT INTO full_program_update_audit VALUES (0);
+      CREATE TRIGGER audit_full_program_update
+      BEFORE UPDATE OF title, description, start_time, stop_time, category, source,
+        source_channel_id, provider_event_id, provider_epg_id, subtitle,
+        episode_numbers_json, is_repeat, is_new, is_live, original_air_date,
+        raw_metadata, airing_key, content_key, categories_json, timezone
+      ON programs
+      BEGIN
+        UPDATE full_program_update_audit SET count = count + 1;
+      END;
+    `);
+
+    store.saveSnapshot([program()], 2_000);
+
+    expect(db.prepare('SELECT count FROM full_program_update_audit').get()).toEqual({ count: 0 });
+    expect(db.prepare('SELECT last_seen FROM programs').get()).toEqual({ last_seen: 2_000 });
+    db.close();
+  });
+
   it('does not erase cached guide data for an empty or failed snapshot', () => {
     const db = database();
     const store = createProgramStore(db);
     store.saveSnapshot([program()], 1_000);
     store.saveSnapshot([], 2_000);
     expect(db.prepare('SELECT title FROM programs').all()).toEqual([{ title: 'Show' }]);
+    db.close();
+  });
+
+  it('keeps separate programs that do not have a usable airing key', () => {
+    const db = database();
+    const store = createProgramStore(db);
+
+    store.saveSnapshot([
+      program({ airing_key: '', title: 'First', start_time: 100, stop_time: 200 }),
+      program({ airing_key: '', title: 'Second', start_time: 200, stop_time: 300 }),
+    ], 1_000, ['c1']);
+
+    expect(db.prepare('SELECT title FROM programs ORDER BY start_time').all()).toEqual([
+      { title: 'First' },
+      { title: 'Second' },
+    ]);
+    db.close();
+  });
+
+  it('removes stale rows for an explicitly completed empty channel snapshot', () => {
+    const db = database();
+    const store = createProgramStore(db);
+    store.saveSnapshot([
+      program(),
+      program({ channel_id: 'c2', source_channel_id: 'c2', airing_key: 'airing-2', title: 'Other' }),
+    ], 1_000);
+
+    store.saveSnapshot([], 2_000, ['c1']);
+
+    expect(db.prepare('SELECT channel_id,title FROM programs ORDER BY channel_id').all()).toEqual([
+      { channel_id: 'c2', title: 'Other' },
+    ]);
     db.close();
   });
 

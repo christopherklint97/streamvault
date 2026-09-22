@@ -56,6 +56,26 @@ describe('commercial auto-skip config', () => {
     });
   });
 
+  it('keeps a small forward program window refreshed across airing boundaries', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000);
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ programs: [] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+
+    await useChannelStore.getState().fetchPrograms();
+
+    const requestUrl = new URL(String(fetchMock.mock.calls[0][0]), 'https://streamvault.test');
+    expect(requestUrl.pathname).toBe('/api/programs');
+    expect(requestUrl.searchParams.get('from')).toBe('1000000');
+    expect(requestUrl.searchParams.get('to')).toBe('2800000');
+
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
   it('reports failure and leaves commercial auto-skip unchanged when persistence fails', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('nope', { status: 500, statusText: 'Broken' }));
 

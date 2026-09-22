@@ -19,6 +19,8 @@ export interface XtreamCredentials {
 }
 
 const PAGE_SIZE = 20;
+const PROGRAM_WINDOW_MS = 30 * 60 * 1000;
+const PROGRAM_REFRESH_MS = 15 * 60 * 1000;
 
 interface ChannelState {
   channels: Channel[];
@@ -168,6 +170,7 @@ interface ChannelActions {
 let pollInterval: ReturnType<typeof setTimeout> | null = null;
 let fetchAbortController: AbortController | null = null;
 let connectionAttempt = 0;
+let programRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 function stopPolling() {
   if (pollInterval) {
@@ -413,8 +416,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     if (!hasApi(apiBaseUrl)) return;
     try {
       const now = Date.now();
-      const to = now + 6 * 60 * 60 * 1000;
-      const data = await apiFetch<{ programs?: RawProgram[] }>(apiBaseUrl, `/api/programs?from=${now - 2 * 60 * 60 * 1000}&to=${to}`);
+      const data = await apiFetch<{ programs?: RawProgram[] }>(apiBaseUrl, `/api/programs?from=${now}&to=${now + PROGRAM_WINDOW_MS}`);
       if (!isCurrent()) return;
       const programs = parsePrograms(data.programs);
       set({
@@ -426,6 +428,11 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
       const msg = err instanceof Error ? err.message : 'Failed to fetch programs';
       set({ error: msg });
       throw err;
+    } finally {
+      if (programRefreshTimer) clearTimeout(programRefreshTimer);
+      programRefreshTimer = setTimeout(() => {
+        void get().fetchPrograms().catch(() => undefined);
+      }, PROGRAM_REFRESH_MS);
     }
   },
 

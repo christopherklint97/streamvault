@@ -16,7 +16,8 @@ function createTestDatabase(verbose?: (message?: unknown, ...additionalArgs: unk
       content_type TEXT DEFAULT 'livetv',
       category_id TEXT DEFAULT '',
       sort_order INTEGER DEFAULT 0,
-      added INTEGER DEFAULT 0
+      added INTEGER DEFAULT 0,
+      epg_channel_id TEXT DEFAULT ''
     );
     CREATE INDEX idx_channels_category_id ON channels(category_id);
   `);
@@ -28,11 +29,11 @@ describe('category channel snapshots', () => {
     const db = createTestDatabase();
     db.prepare(`
       INSERT INTO channels
-        (id, name, url, logo, grp, region, content_type, category_id, sort_order, added)
+        (id, name, url, logo, grp, region, content_type, category_id, sort_order, added, epg_channel_id)
       VALUES
-        ('keep-and-update', 'Old name', 'old-url', '', 'Old group', '', 'movies', 'vod_1', 1, 10),
-        ('remove', 'Stale', 'stale-url', '', 'Old group', '', 'movies', 'vod_1', 2, 20),
-        ('other-category', 'Other', 'other-url', '', 'Other group', '', 'movies', 'vod_2', 1, 30)
+        ('keep-and-update', 'Old name', 'old-url', '', 'Old group', '', 'movies', 'vod_1', 1, 10, ''),
+        ('remove', 'Stale', 'stale-url', '', 'Old group', '', 'movies', 'vod_1', 2, 20, ''),
+        ('other-category', 'Other', 'other-url', '', 'Other group', '', 'movies', 'vod_2', 1, 30, '')
     `).run();
 
     const writeSnapshot = createCategorySnapshotWriter(db);
@@ -48,6 +49,7 @@ describe('category channel snapshots', () => {
         category_id: 'ignored-input-category',
         sort_order: 5,
         added: 50,
+        epg_channel_id: 'guide-new',
       },
       {
         id: 'new',
@@ -64,21 +66,21 @@ describe('category channel snapshots', () => {
     ]);
 
     const rows = db.prepare(`
-      SELECT id, name, url, logo, grp, region, content_type, category_id, sort_order, added
+      SELECT id, name, url, logo, grp, region, content_type, category_id, sort_order, added, epg_channel_id
       FROM channels ORDER BY id
     `).all();
     expect(rows).toEqual([
       {
         id: 'keep-and-update', name: 'New name', url: 'new-url', logo: 'new-logo', grp: 'New group', region: 'SE',
-        content_type: 'movies', category_id: 'vod_1', sort_order: 5, added: 50,
+        content_type: 'movies', category_id: 'vod_1', sort_order: 5, added: 50, epg_channel_id: 'guide-new',
       },
       {
         id: 'new', name: 'New movie', url: 'movie-url', logo: '', grp: 'New group', region: '',
-        content_type: 'movies', category_id: 'vod_1', sort_order: 6, added: 60,
+        content_type: 'movies', category_id: 'vod_1', sort_order: 6, added: 60, epg_channel_id: '',
       },
       {
         id: 'other-category', name: 'Other', url: 'other-url', logo: '', grp: 'Other group', region: '',
-        content_type: 'movies', category_id: 'vod_2', sort_order: 1, added: 30,
+        content_type: 'movies', category_id: 'vod_2', sort_order: 1, added: 30, epg_channel_id: '',
       },
     ]);
     db.close();
