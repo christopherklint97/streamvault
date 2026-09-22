@@ -11,12 +11,13 @@ export interface CategorySnapshotChannel {
   category_id?: string;
   sort_order?: number;
   added?: number;
+  epg_channel_id?: string;
 }
 
 export function createCategorySnapshotWriter(db: InstanceType<typeof Database>) {
   const upsertSnapshot = db.prepare(`
     INSERT INTO channels
-      (id, name, url, logo, grp, region, content_type, category_id, sort_order, added)
+      (id, name, url, logo, grp, region, content_type, category_id, sort_order, added, epg_channel_id)
     SELECT
       json_extract(value, '$.id'),
       json_extract(value, '$.name'),
@@ -27,7 +28,8 @@ export function createCategorySnapshotWriter(db: InstanceType<typeof Database>) 
       COALESCE(json_extract(value, '$.content_type'), 'livetv'),
       ?,
       COALESCE(json_extract(value, '$.sort_order'), 0),
-      COALESCE(json_extract(value, '$.added'), 0)
+      COALESCE(json_extract(value, '$.added'), 0),
+      COALESCE(json_extract(value, '$.epg_channel_id'), '')
     FROM json_each(?)
     WHERE true
     ON CONFLICT(id) DO UPDATE SET
@@ -39,7 +41,8 @@ export function createCategorySnapshotWriter(db: InstanceType<typeof Database>) 
       content_type = excluded.content_type,
       category_id = excluded.category_id,
       sort_order = excluded.sort_order,
-      added = excluded.added
+      added = excluded.added,
+      epg_channel_id = excluded.epg_channel_id
     WHERE channels.name IS NOT excluded.name
        OR channels.url IS NOT excluded.url
        OR channels.logo IS NOT excluded.logo
@@ -49,6 +52,7 @@ export function createCategorySnapshotWriter(db: InstanceType<typeof Database>) 
        OR channels.category_id IS NOT excluded.category_id
        OR channels.sort_order IS NOT excluded.sort_order
        OR channels.added IS NOT excluded.added
+       OR channels.epg_channel_id IS NOT excluded.epg_channel_id
   `);
   const deleteStale = db.prepare(`
     DELETE FROM channels

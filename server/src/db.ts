@@ -8,6 +8,7 @@ import { createCategorySnapshotWriter } from './channel-snapshot.js';
 import { ensureRecordingSchema } from './db-migrations.js';
 import { createCommercialStore, type CommercialSegmentWrite, type DBCommercialSegment } from './commercial-store.js';
 import { createProgramStore } from './program-store.js';
+import { getProgramWindow } from './program-window.js';
 import {
   backupDatabaseInWorker,
   checkDatabaseReadable,
@@ -67,7 +68,8 @@ db.exec(`
     logo TEXT DEFAULT '',
     grp TEXT DEFAULT '',
     region TEXT DEFAULT '',
-    content_type TEXT DEFAULT 'livetv'
+    content_type TEXT DEFAULT 'livetv',
+    epg_channel_id TEXT DEFAULT ''
   );
 
   CREATE TABLE IF NOT EXISTS categories (
@@ -136,6 +138,15 @@ try {
 }
 
 db.exec('CREATE INDEX IF NOT EXISTS idx_channels_added ON channels(added)');
+
+try {
+  db.prepare('SELECT epg_channel_id FROM channels LIMIT 1').get();
+} catch {
+  db.exec("ALTER TABLE channels ADD COLUMN epg_channel_id TEXT DEFAULT ''");
+  logger.info('Migrated channels table: added epg_channel_id column');
+}
+
+db.exec("CREATE INDEX IF NOT EXISTS idx_channels_epg_available ON channels(id) WHERE content_type = 'livetv' AND epg_channel_id <> ''");
 ensureBrowseIndexes(db);
 
 // ---------- Recording tables ----------
@@ -311,10 +322,11 @@ export interface DBChannel {
   category_id?: string;
   sort_order?: number;
   added?: number;
+  epg_channel_id?: string;
 }
 
 const insertChannel = db.prepare(
-  'INSERT OR REPLACE INTO channels (id, name, url, logo, grp, region, content_type, category_id, sort_order, added) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  'INSERT OR REPLACE INTO channels (id, name, url, logo, grp, region, content_type, category_id, sort_order, added, epg_channel_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
 );
 
 const clearChannels = db.prepare('DELETE FROM channels');
@@ -322,7 +334,7 @@ const clearChannels = db.prepare('DELETE FROM channels');
 const insertChannelsBatch = db.transaction((channels: DBChannel[]) => {
   clearChannels.run();
   for (const ch of channels) {
-    insertChannel.run(ch.id, ch.name, ch.url, ch.logo, ch.grp, ch.region, ch.content_type, ch.category_id || '', ch.sort_order ?? 0, ch.added ?? 0);
+    insertChannel.run(ch.id, ch.name, ch.url, ch.logo, ch.grp, ch.region, ch.content_type, ch.category_id || '', ch.sort_order ?? 0, ch.added ?? 0, ch.epg_channel_id ?? '');
   }
 });
 
@@ -540,9 +552,7 @@ export function saveProgramsForChannels(programs: DBProgram[], channelIds?: stri
 
 export function getPrograms(from?: number, to?: number): DBProgram[] {
   if (from !== undefined && to !== undefined) {
-    return db.prepare(
-      'SELECT * FROM programs WHERE start_time < ? AND stop_time > ? ORDER BY channel_id, start_time'
-    ).all(to, from) as DBProgram[];
+    return getProgramWindow(db, from, to);
   }
   return db.prepare('SELECT * FROM programs ORDER BY channel_id, start_time').all() as DBProgram[];
 }

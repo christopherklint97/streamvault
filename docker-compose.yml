@@ -11,6 +11,7 @@ services:
       - streamvault_data:/app/data
       - streamvault_recordings:/app/data/recordings
     environment:
+      - TZ=Europe/Stockholm
       - LOG_LEVEL=info
       # Optional hardening. If set, browser clients must enter the same value
       # in Settings under Backend token.

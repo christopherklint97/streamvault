@@ -123,8 +123,9 @@ export async function startCrawl(): Promise<void> {
     return;
   }
 
-  crawlAbortController = new AbortController();
-  const { signal } = crawlAbortController;
+  const controller = new AbortController();
+  crawlAbortController = controller;
+  const { signal } = controller;
   state.isCrawling = true;
   state.crawlProgress = 'Starting full stream crawl...';
   logger.info('Starting full stream crawl...');
@@ -155,7 +156,7 @@ export async function startCrawl(): Promise<void> {
       logger.info('Starting EPG crawl for live channels...');
       try {
         const liveChannelRows = db.prepare(
-          "SELECT id FROM channels WHERE content_type = 'livetv'"
+          "SELECT id FROM channels WHERE content_type = 'livetv' AND epg_channel_id <> ''"
         ).all() as Array<{ id: string }>;
         // Extract numeric stream IDs from channel IDs (format: live_12345)
         const liveStreamIds = liveChannelRows
@@ -170,6 +171,7 @@ export async function startCrawl(): Promise<void> {
             (programs) => { saveProgramsForChannels(programs); },
             signal,
           );
+          if (signal.aborted) return;
           state.programCount = getProgramCount();
           logger.info(`EPG crawl complete: ${epgTotal} programs fetched`);
         }
@@ -201,20 +203,19 @@ export async function startCrawl(): Promise<void> {
       logger.error(`Crawl failed: ${msg}`);
     }
   } finally {
+    if (signal.aborted) state.crawlProgress = 'Crawl cancelled';
     state.isCrawling = false;
-    crawlAbortController = null;
+    if (crawlAbortController === controller) crawlAbortController = null;
     scheduleNextCrawl();
   }
 }
 
 export function cancelCrawl(): void {
-  if (crawlAbortController) {
+  if (crawlAbortController && !crawlAbortController.signal.aborted) {
     crawlAbortController.abort();
-    crawlAbortController = null;
+    state.crawlProgress = 'Cancelling crawl...';
+    logger.info('Crawl cancellation requested');
   }
-  state.isCrawling = false;
-  state.crawlProgress = 'Crawl cancelled';
-  logger.info('Crawl cancelled');
 }
 
 /** Schedule the expensive full catalog crawl once a day during the quietest hour. */

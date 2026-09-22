@@ -1,4 +1,4 @@
-export const CRAWL_HOUR = 3;
+export const CRAWL_HOUR = 4;
 
 /** Full catalog crawls are expensive, so run them once during the quietest hour. */
 export function nextScheduledCrawl(now: Date): Date {
