@@ -126,19 +126,34 @@ describe('Recordings integration', () => {
     expect(showToastMessage).toHaveBeenCalledWith('Unable to play recording: ticket unavailable');
   });
 
-  it('creates a recurring rule from searchable channels with explicit matching, repeat, padding, and record-once fields', async () => {
+  it('keeps finalizing recordings visible in the In Progress section', async () => {
+    await act(async () => {
+      useRecordingStore.setState({
+        recordings: [{ ...completedRecording, status: 'finalizing', file_path: null }],
+      });
+    });
+
+    expect(container.textContent).toContain('In Progress');
+    expect(container.textContent).toContain('Finalizing');
+    expect(findButton(container, 'Cancel')).toBeTruthy();
+  });
+
+  it('creates a rolling recurring rule from searchable channels with an explicit newest-N limit', async () => {
     vi.useFakeTimers();
     const createdRule = {
       id: 'rule-1', channel_id: 'espn', channel_name: 'ESPN', match_title: 'SportsCenter',
       match_type: 'startsWith' as const, repeat_policy: 'new_only' as const, enabled: 1,
-      padding_before: 180_000, padding_after: 420_000, max_recordings: 1, created_at: 1,
+      padding_before: 180_000, padding_after: 420_000, max_recordings: 0,
+      retention_count: 4, airing_policy: 'every' as const, created_at: 1,
     };
     const createRule = vi.fn(async () => createdRule);
+    const updateRule = vi.fn(async () => {});
     await act(async () => {
       useRecordingStore.setState({
         recordings: [],
         rules: [{ ...createdRule, id: 'existing' }],
         createRule,
+        updateRule,
       });
     });
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
@@ -151,6 +166,18 @@ describe('Recordings integration', () => {
       findButton(container, 'Rules (1)').dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(container.textContent).toContain('New only');
+    expect(container.textContent).toContain('Keep latest 4');
+
+    const existingRetention = container.querySelector('input[aria-label="Keep latest for SportsCenter"]') as HTMLInputElement;
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      valueSetter?.call(existingRetention, '6');
+      existingRetention.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      findButton(container, 'Save limit').click();
+    });
+    expect(updateRule).toHaveBeenCalledWith('existing', { retentionLimit: 6 });
 
     const channelSearch = container.querySelector('#rule-channel-search') as HTMLInputElement;
     await act(async () => {
@@ -182,9 +209,7 @@ describe('Recordings integration', () => {
       repeat.dispatchEvent(new Event('change', { bubbles: true }));
       setInput(container.querySelector('#rule-padding-before') as HTMLInputElement, '3');
       setInput(container.querySelector('#rule-padding-after') as HTMLInputElement, '7');
-      setInput(container.querySelector('#rule-max-recordings') as HTMLInputElement, '4');
-      (container.querySelector('#rule-record-once') as HTMLInputElement)
-        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      setInput(container.querySelector('#rule-retention-limit') as HTMLInputElement, '4');
     });
 
     await act(async () => {
@@ -200,7 +225,8 @@ describe('Recordings integration', () => {
       paddingBefore: 180_000,
       paddingAfter: 420_000,
       repeatPolicy: 'new_only',
-      maxRecordings: 1,
+      retentionLimit: 4,
+      airingPolicy: 'every',
     });
   });
 });

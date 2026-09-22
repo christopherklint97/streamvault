@@ -41,6 +41,7 @@ function formatDateTime(ms: number): string {
 const STATUS_LABELS: Record<string, string> = {
   scheduled: 'Scheduled',
   recording: 'Recording',
+  finalizing: 'Finalizing',
   completed: 'Completed',
   failed: 'Failed',
   cancelled: 'Cancelled',
@@ -49,6 +50,7 @@ const STATUS_LABELS: Record<string, string> = {
 const STATUS_COLORS: Record<string, string> = {
   scheduled: '#3b82f6',
   recording: '#ef4444',
+  finalizing: '#8b5cf6',
   completed: '#22c55e',
   failed: '#f59e0b',
   cancelled: '#6b7280',
@@ -133,7 +135,7 @@ function RecordingCard({ rec, onPlay, onCancel, onStop, onDelete, onAnalyze, onR
         {rec.status === 'recording' && (
           <button className="py-1 px-3 rounded text-12 font-semibold bg-[#b45309] text-white transition-colors duration-150 hover:bg-[#d97706]" onClick={onStop}>Stop</button>
         )}
-        {(rec.status === 'scheduled' || rec.status === 'recording') && (
+        {(rec.status === 'scheduled' || rec.status === 'recording' || rec.status === 'finalizing') && (
           <button className="py-1 px-3 rounded text-12 font-semibold bg-[#4b5563] text-white transition-colors duration-150 hover:bg-[#6b7280]" onClick={onCancel}>Cancel</button>
         )}
         <button className="py-1 px-3 rounded text-12 font-semibold bg-[#2a2a3e] text-[#ef4444] transition-colors duration-150 hover:bg-[#7f1d1d] hover:text-[#fca5a5]" onClick={onDelete}>Delete</button>
@@ -142,11 +144,15 @@ function RecordingCard({ rec, onPlay, onCancel, onStop, onDelete, onAnalyze, onR
   );
 }
 
-function RuleCard({ rule, onToggle, onDelete }: {
+function RuleCard({ rule, onToggle, onDelete, onRetentionChange }: {
   rule: RecordingRule;
   onToggle: () => void;
   onDelete: () => void;
+  onRetentionChange: (limit: number) => void;
 }) {
+  const [retentionValue, setRetentionValue] = useState(rule.retention_count > 0 ? String(rule.retention_count) : '');
+  const parsedRetention = retentionValue.trim() === '' ? 0 : Number(retentionValue);
+  const validRetention = Number.isInteger(parsedRetention) && parsedRetention >= 0;
   return (
     <div className="bg-surface-border rounded-[10px] p-3.5 flex flex-col gap-1.5">
       <div className="flex items-center gap-2">
@@ -164,8 +170,47 @@ function RuleCard({ rule, onToggle, onDelete }: {
       <div className="flex gap-3 text-12 text-[#6b7280]">
         <span>Pad: -{rule.padding_before / 60000}m / +{rule.padding_after / 60000}m</span>
         <span>{repeatPolicyLabel(rule.repeat_policy)}</span>
-        {rule.max_recordings > 0 && <span>Max: {rule.max_recordings}</span>}
+        {rule.airing_policy === 'once' ? (
+          <span>Record once</span>
+        ) : rule.retention_count > 0 ? (
+          <span>Keep latest {rule.retention_count}</span>
+        ) : rule.max_recordings > 0 ? (
+          <span>Stops after {rule.max_recordings}</span>
+        ) : (
+          <span>Keep all</span>
+        )}
       </div>
+      {rule.airing_policy === 'every' && rule.max_recordings === 0 && (
+        <div className="mt-1">
+          <div className="flex items-end gap-2">
+          <label className="min-w-0 flex-1 text-12 text-[#9ca3af]">
+            Keep latest
+            <input
+              data-focusable
+              aria-label={`Keep latest for ${rule.match_title}`}
+              type="number"
+              inputMode="numeric"
+              min={0}
+              step={1}
+              placeholder="All"
+              value={retentionValue}
+              onChange={(event) => setRetentionValue(event.target.value)}
+              className="mt-1 w-full rounded border border-[#333] bg-[#1a1a2e] px-2 py-1.5 text-13 text-white outline-none focus:border-[#3b82f6]"
+            />
+          </label>
+          <button
+            className="rounded bg-[#1d4ed8] px-3 py-1.5 text-12 font-semibold text-white disabled:opacity-40"
+            disabled={!validRetention || parsedRetention === rule.retention_count}
+            onClick={() => onRetentionChange(parsedRetention)}
+          >
+            Save limit
+          </button>
+          </div>
+          <p className="mt-1 text-11 text-[#f59e0b]">
+            Lowering this limit deletes older completed recordings immediately and cannot be undone.
+          </p>
+        </div>
+      )}
       <div className="flex gap-1.5 mt-1">
         <button className="py-1 px-3 rounded text-12 font-semibold bg-[#2a2a3e] text-[#d1d5db] transition-colors duration-150 hover:bg-[#3a3a5e]" onClick={onToggle}>
           {rule.enabled ? 'Disable' : 'Enable'}
@@ -411,9 +456,9 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
       setError('Padding must be zero or more minutes');
       return;
     }
-    const parsedMaximum = draft.maxRecordings.trim() === '' ? 0 : Number(draft.maxRecordings);
+    const parsedMaximum = draft.retentionLimit.trim() === '' ? 0 : Number(draft.retentionLimit);
     if (!draft.recordOnce && (!Number.isInteger(parsedMaximum) || parsedMaximum < 0)) {
-      setError('Maximum recordings must be a whole number or blank');
+      setError('Keep latest must be a whole number or blank');
       return;
     }
 
@@ -427,7 +472,8 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
       paddingBefore: Math.round(paddingBeforeMinutes * 60_000),
       paddingAfter: Math.round(paddingAfterMinutes * 60_000),
       repeatPolicy: draft.repeatPolicy,
-      maxRecordings: draft.recordOnce ? 1 : parsedMaximum,
+      retentionLimit: draft.recordOnce ? 0 : parsedMaximum,
+      airingPolicy: draft.recordOnce ? 'once' : 'every',
     });
     setSubmitting(false);
     if (!rule) {
@@ -540,8 +586,9 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
         </div>
 
         <div>
-          <label className="mb-1 block text-12 text-[#9ca3af]" htmlFor="rule-max-recordings">Maximum recordings</label>
-          <input id="rule-max-recordings" data-focusable type="number" inputMode="numeric" min={0} step={1} disabled={draft.recordOnce} placeholder="No limit" value={draft.maxRecordings} onChange={(event) => setDraft((current) => ({ ...current, maxRecordings: event.target.value }))} className="w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-14 text-white outline-none disabled:opacity-40 focus:border-[#3b82f6]" />
+          <label className="mb-1 block text-12 text-[#9ca3af]" htmlFor="rule-retention-limit">Keep latest completed recordings</label>
+          <input id="rule-retention-limit" data-focusable type="number" inputMode="numeric" min={0} step={1} disabled={draft.recordOnce} placeholder="Keep all" value={draft.retentionLimit} onChange={(event) => setDraft((current) => ({ ...current, retentionLimit: event.target.value }))} className="w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-14 text-white outline-none disabled:opacity-40 focus:border-[#3b82f6]" />
+          <p className="mt-1 text-12 text-[#6b7280]">Set 1 for newest only. Older completed recordings are removed after a newer one is ready.</p>
           <label className="mt-2 flex cursor-pointer items-center gap-2 text-13 text-[#d1d5db]" htmlFor="rule-record-once">
             <input id="rule-record-once" data-focusable type="checkbox" checked={draft.recordOnce} onChange={(event) => setDraft((current) => ({ ...current, recordOnce: event.target.checked }))} />
             Record once, then stop matching
@@ -624,7 +671,7 @@ export default function Recordings() {
     const failed: Recording[] = [];
     for (const r of recordings) {
       if (r.status === 'scheduled') upcoming.push(r);
-      else if (r.status === 'recording') inProgress.push(r);
+      else if (r.status === 'recording' || r.status === 'finalizing') inProgress.push(r);
       else if (r.status === 'completed') completed.push(r);
       else if (r.status === 'failed') failed.push(r);
     }
@@ -763,10 +810,11 @@ export default function Recordings() {
             <div className="grid grid-cols-1 lg:grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">
               {rules.map(r => (
                 <RuleCard
-                  key={r.id}
+                  key={`${r.id}:${r.retention_count}`}
                   rule={r}
                   onToggle={() => updateRule(r.id, { enabled: !r.enabled })}
                   onDelete={() => deleteRule(r.id)}
+                  onRetentionChange={(limit) => { void updateRule(r.id, { retentionLimit: limit }); }}
                 />
               ))}
             </div>

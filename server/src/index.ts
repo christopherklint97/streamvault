@@ -45,6 +45,9 @@ import {
   getRecordingFilePath,
   getRecordingMasterFilePath,
   recoverRecordings,
+  enforceRuleRetention,
+  reconcileRecordOnceRule,
+  withRuleRetentionLock,
 } from './recorder.js';
 import { startScheduler, stopScheduler, getSchedulerStatus, matchRules } from './recording-scheduler.js';
 import {
@@ -1887,7 +1890,8 @@ app.post('/api/recording-rules', requireAuth, (req, res) => {
     padding_before: payload.padding_before!,
     padding_after: payload.padding_after!,
     max_recordings: payload.max_recordings!,
-    airing_policy: 'every',
+    retention_count: payload.retention_count!,
+    airing_policy: payload.airing_policy!,
     repeat_policy: payload.repeat_policy as DBRecordingRule['repeat_policy'],
     created_at: Date.now(),
   });
@@ -1896,7 +1900,7 @@ app.post('/api/recording-rules', requireAuth, (req, res) => {
   res.json({ rule: getRecordingRule(id) });
 });
 
-app.put('/api/recording-rules/:id', requireAuth, (req, res) => {
+app.put('/api/recording-rules/:id', requireAuth, async (req, res) => {
   const ruleId = String(req.params.id);
   const rule = getRecordingRule(ruleId);
   if (!rule) {
@@ -1910,12 +1914,18 @@ app.put('/api/recording-rules/:id', requireAuth, (req, res) => {
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
     return;
   }
-  updateRecordingRule(ruleId, updates as Partial<Omit<DBRecordingRule, 'id'>>);
+  await withRuleRetentionLock(ruleId, async () => {
+    updateRecordingRule(ruleId, updates as Partial<Omit<DBRecordingRule, 'id'>>);
+    if (updates.airing_policy === 'once') await reconcileRecordOnceRule(ruleId);
+  });
+  if (updates.retention_count !== undefined) await enforceRuleRetention(ruleId);
+  matchRules();
   res.json({ rule: getRecordingRule(ruleId) });
 });
 
-app.delete('/api/recording-rules/:id', requireAuth, (req, res) => {
-  deleteRecordingRule(String(req.params.id));
+app.delete('/api/recording-rules/:id', requireAuth, async (req, res) => {
+  const ruleId = String(req.params.id);
+  await withRuleRetentionLock(ruleId, () => { deleteRecordingRule(ruleId); });
   res.json({ ok: true });
 });
 

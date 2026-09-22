@@ -74,12 +74,39 @@ describe('recording media finalization', () => {
     }, { run });
 
     expect(run).toHaveBeenCalledWith('ffmpeg', buildMasterConcatArgs(segments, masterPart), expect.any(Object));
+    expect(run.mock.calls.every(([, , options]) => options?.backgroundPriority === true)).toBe(true);
     expect(fs.readFileSync(master, 'utf8')).toBe('firstsecond');
     expect(result.masterSize).toBe(11);
     expect(fs.existsSync(firstPart)).toBe(false);
     expect(fs.existsSync(second)).toBe(false);
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it('promotes one capture segment without a full master remux', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'streamvault-recorder-'));
+    const segment = path.join(dir, 'single.segment-000000.ts.part');
+    const masterPart = path.join(dir, 'single.ts.part');
+    const master = path.join(dir, 'single.ts');
+    const derivativePart = path.join(dir, 'single.mp4.part');
+    const derivative = path.join(dir, 'single.mp4');
+    fs.writeFileSync(segment, 'captured-once');
+    const sourceInode = fs.statSync(segment).ino;
+    const run = vi.fn(async (command: string) => {
+      if (command === 'ffprobe') return { code: 0, stdout: '30', stderr: '' };
+      fs.writeFileSync(derivativePart, 'mp4');
+      return { code: 0, stdout: '', stderr: '' };
+    });
+
+    await finalizeRecordingMedia({
+      part: masterPart, master, derivativePart, derivative, segments: [segment],
+    }, { run });
+
+    expect(run.mock.calls.filter(([command]) => command === 'ffmpeg')).toHaveLength(1);
+    expect(fs.statSync(master).ino).toBe(sourceInode);
+    expect(fs.readFileSync(master, 'utf8')).toBe('captured-once');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('atomically publishes the master, probes duration, and publishes the derivative', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'streamvault-recorder-'));
     const part = path.join(dir, 'r1.ts.part');
@@ -99,6 +126,28 @@ describe('recording media finalization', () => {
     expect(fs.existsSync(part)).toBe(false);
     expect(fs.readFileSync(master, 'utf8')).toBe('master');
     expect(fs.readFileSync(derivative, 'utf8')).toBe('mp4');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('propagates cancellation instead of publishing an incomplete finalization', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'streamvault-recorder-'));
+    const master = path.join(dir, 'aborted.ts');
+    const part = path.join(dir, 'aborted.ts.part');
+    const derivativePart = path.join(dir, 'aborted.mp4.part');
+    const derivative = path.join(dir, 'aborted.mp4');
+    fs.writeFileSync(master, 'master');
+    const controller = new AbortController();
+    controller.abort();
+    const run = vi.fn(async () => ({
+      code: null, stdout: '', stderr: '', signal: 'SIGTERM' as NodeJS.Signals, aborted: true,
+    }));
+
+    await expect(finalizeRecordingMedia(
+      { part, master, derivativePart, derivative },
+      { run, signal: controller.signal },
+    )).rejects.toThrow(/aborted/i);
+
+    expect(fs.existsSync(derivative)).toBe(false);
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -184,6 +233,7 @@ describe('recording limits and retry accounting', () => {
 
   it('uses a valid configured concurrency directly and safely falls back for invalid values', () => {
     expect(parseConfiguredConcurrency('7', 3)).toBe(7);
+    expect(parseConfiguredConcurrency('9', 3)).toBe(8);
     expect(parseConfiguredConcurrency('0', 3)).toBe(3);
     expect(parseConfiguredConcurrency('oops', 3)).toBe(3);
   });

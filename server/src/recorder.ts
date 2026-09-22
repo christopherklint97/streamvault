@@ -4,8 +4,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  deleteRecording,
   getConfig,
   getRecording,
+  getRecordingRule,
+  getRecordingRules,
+  getRecordingsByRuleId,
   getRecordingsByStatus,
   updateRecording,
   updateRecordingIfStatus,
@@ -54,6 +58,8 @@ interface StartingRecording {
 interface FinalizingRecording {
   controller: AbortController;
   promise: Promise<void>;
+  started: boolean;
+  cancelQueued: () => void;
 }
 
 const activeRecordings = new Map<string, ActiveRecording>();
@@ -61,7 +67,33 @@ const startingRecordings = new Map<string, StartingRecording>();
 const finalizingRecordings = new Map<string, FinalizingRecording>();
 const retryCounts = new Map<string, number>();
 const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const retentionQueues = new Map<string, Promise<void>>();
 let stoppingAll = false;
+let finalizationQueue: Promise<void> = Promise.resolve();
+
+function enqueueFinalization(task: () => Promise<void>, signal: AbortSignal): { promise: Promise<void>; cancelQueued: () => void } {
+  const run = async () => {
+    if (signal.aborted) return;
+    await task();
+  };
+  const execution = finalizationQueue.then(run, run);
+  finalizationQueue = execution.catch(() => undefined);
+  let cancelQueued!: () => void;
+  const cancelled = new Promise<void>(resolve => { cancelQueued = resolve; });
+  return { promise: Promise.race([execution, cancelled]), cancelQueued };
+}
+
+function enqueueRuleTask<T>(ruleId: string, task: () => Promise<T> | T): Promise<T> {
+  const previous = retentionQueues.get(ruleId) ?? Promise.resolve();
+  const result = previous.catch(() => undefined).then(task);
+  const queue = result.then(() => undefined, () => undefined);
+  retentionQueues.set(ruleId, queue);
+  const clearQueue = () => {
+    if (retentionQueues.get(ruleId) === queue) retentionQueues.delete(ruleId);
+  };
+  void queue.then(clearQueue, clearQueue);
+  return result;
+}
 
 export function getActiveCount(): number {
   return activeRecordings.size + startingRecordings.size + finalizingRecordings.size;
@@ -149,7 +181,7 @@ function recoveryPaths(id: string): ReturnType<typeof recordingPaths> | null {
   return preferred ? recordingPaths(root, path.dirname(preferred), id) : null;
 }
 
-function removeRecordingArtifacts(id: string): number {
+function removeRecordingArtifacts(id: string, verifyRemoval = false): number {
   const root = getRecordingsDir();
   const recording = getRecording(id);
   const artifacts = new Set(discoverRecordingArtifacts(root, id));
@@ -157,14 +189,110 @@ function removeRecordingArtifacts(id: string): number {
     for (const artifact of buildRecordingArtifactPaths(root, recording)) artifacts.add(artifact);
   }
   let deletedBytes = 0;
+  const failures: string[] = [];
   for (const artifact of artifacts) {
     try {
       const stat = fs.statSync(artifact);
       if (stat.isFile()) deletedBytes += stat.size;
     } catch { /* file may already be gone */ }
-    try { fs.rmSync(artifact, { force: true }); } catch { /* best effort */ }
+    try {
+      fs.rmSync(artifact, { force: true });
+      if (verifyRemoval && fs.existsSync(artifact)) failures.push(`${artifact}: still exists after removal`);
+    } catch (error) {
+      if (verifyRemoval) failures.push(`${artifact}: ${error instanceof Error ? error.message : error}`);
+    }
   }
+  if (failures.length > 0) throw new Error(`Could not remove recording artifacts: ${failures.join('; ')}`);
   return deletedBytes;
+}
+
+function completedRecordingsNewestFirst(ruleId: string) {
+  return getRecordingsByRuleId(ruleId)
+    .filter(recording => recording.status === 'completed')
+    .sort((left, right) =>
+      right.start_time - left.start_time ||
+      right.created_at - left.created_at ||
+      right.id.localeCompare(left.id),
+    );
+}
+
+async function enforceRuleRetentionOnce(ruleId: string): Promise<void> {
+  while (true) {
+    const rule = getRecordingRule(ruleId);
+    const limit = rule?.retention_count ?? 0;
+    if (!Number.isInteger(limit) || limit <= 0) return;
+
+    const completed = completedRecordingsNewestFirst(ruleId);
+    if (completed.length <= limit) return;
+    const candidate = completed.at(-1)!;
+    if (isRecordingActive(candidate.id)) return;
+
+    // Commercial-analysis cancellation can await an external process. Re-read
+    // the policy and ordering afterward, immediately before synchronous removal.
+    await prepareRecordingDeletion(candidate.id);
+    const currentRule = getRecordingRule(ruleId);
+    const currentLimit = currentRule?.retention_count ?? 0;
+    if (!Number.isInteger(currentLimit) || currentLimit <= 0) return;
+    const currentCompleted = completedRecordingsNewestFirst(ruleId);
+    if (currentCompleted.length <= currentLimit) return;
+    const stillEligible = currentCompleted.slice(currentLimit).some(recording => recording.id === candidate.id);
+    const current = getRecording(candidate.id);
+    if (!stillEligible || !current || current.status !== 'completed' || current.rule_id !== ruleId || isRecordingActive(candidate.id)) {
+      continue;
+    }
+
+    try {
+      const deletedBytes = removeRecordingArtifacts(candidate.id, true);
+      deleteRecording(candidate.id);
+      logger.info(
+        `Recording rule ${ruleId}: removed oldest completed recording ${candidate.id} ` +
+        `(${deletedBytes} bytes) to keep the latest ${currentLimit}`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(`Recording rule ${ruleId}: retained metadata after media deletion failed for ${candidate.id}: ${message}`);
+      throw new Error(`Retention cleanup incomplete for ${candidate.id}: ${message}`, { cause: error });
+    }
+  }
+}
+
+/** Apply a rule's rolling completed-recording limit without touching in-flight work. */
+export function enforceRuleRetention(ruleId: string): Promise<void> {
+  return enqueueRuleTask(ruleId, () => enforceRuleRetentionOnce(ruleId));
+}
+
+/** Serialize rule mutations with destructive retention work for the same rule. */
+export function withRuleRetentionLock<T>(ruleId: string, task: () => Promise<T> | T): Promise<T> {
+  return enqueueRuleTask(ruleId, task);
+}
+
+/** Reconcile every persisted rolling rule after restarts or interrupted cleanup. */
+export async function enforceAllRuleRetentions(): Promise<void> {
+  for (const rule of getRecordingRules()) {
+    if (rule.retention_count <= 0) continue;
+    try {
+      await enforceRuleRetention(rule.id);
+    } catch (error) {
+      logger.error(`Recording rule ${rule.id}: retention backstop failed: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+}
+
+/** Cancel surplus future airings when a recurring rule becomes record-once. */
+export async function reconcileRecordOnceRule(ruleId: string): Promise<void> {
+  const rule = getRecordingRule(ruleId);
+  if (!rule || rule.airing_policy !== 'once') return;
+  const recordings = getRecordingsByRuleId(ruleId);
+  const hasAccepted = recordings.some(recording =>
+    ['recording', 'finalizing', 'completed'].includes(recording.status),
+  );
+  const scheduled = recordings
+    .filter(recording => recording.status === 'scheduled')
+    .sort((left, right) => left.start_time - right.start_time || left.created_at - right.created_at || left.id.localeCompare(right.id));
+  const keepId = hasAccepted ? null : scheduled[0]?.id ?? null;
+  for (const recording of scheduled) {
+    if (recording.id !== keepId) await cancelRecording(recording.id);
+  }
 }
 
 async function publishCompletedRecording(
@@ -182,7 +310,10 @@ async function publishCompletedRecording(
   }
 
   const controller = new AbortController();
-  const promise = (async () => {
+  const entry: FinalizingRecording = { controller, promise: Promise.resolve(), started: false, cancelQueued: () => {} };
+  let completedRuleId: string | null = null;
+  const queuedFinalization = enqueueFinalization(async () => {
+    entry.started = true;
     try {
       const segments = discoverRecordingArtifacts(getRecordingsDir(), id)
         .filter(file => isCaptureSegment(file, id));
@@ -209,6 +340,7 @@ async function publishCompletedRecording(
         removeRecordingArtifacts(id);
         return;
       }
+      completedRuleId = current.rule_id ?? null;
       notifyCommercialAnalysisQueued();
       logger.info(
         `Recording ${id}: completed (${(result.masterSize / 1e6).toFixed(1)}MB master, ${result.durationSeconds}s)` +
@@ -216,6 +348,10 @@ async function publishCompletedRecording(
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (controller.signal.aborted && stoppingAll) {
+        logger.info(`Recording ${id}: finalization deferred for restart`);
+        return;
+      }
       const failed = updateRecordingIfStatus(id, ['finalizing'], {
         status: 'failed',
         actual_end: Date.now(),
@@ -227,8 +363,19 @@ async function publishCompletedRecording(
       if (finalizingRecordings.get(id)?.controller === controller) finalizingRecordings.delete(id);
       retryCounts.delete(id);
     }
-  })();
-  finalizingRecordings.set(id, { controller, promise });
+  }, controller.signal);
+  entry.cancelQueued = queuedFinalization.cancelQueued;
+  const finalization = queuedFinalization.promise;
+  const promise = finalization.then(async () => {
+    if (!completedRuleId) return;
+    try {
+      await enforceRuleRetention(completedRuleId);
+    } catch (error) {
+      logger.warn(`Recording ${id}: rolling retention cleanup failed: ${error instanceof Error ? error.message : error}`);
+    }
+  });
+  entry.promise = promise;
+  finalizingRecordings.set(id, entry);
   return promise;
 }
 
@@ -326,7 +473,7 @@ export async function startRecording(id: string): Promise<void> {
   const retryCount = retryCounts.get(id) ?? 0;
   logger.info(`Recording ${id}: starting stream-copy attempt ${attemptIndex + 1} for "${rec.title}" → ${path.relative(recordingsDir, capturePart)}`);
   const ffmpeg = spawn('ffmpeg', buildMasterCaptureArgs(streamUrl, capturePart, VLC_HEADERS), {
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: ['ignore', 'ignore', 'pipe'],
   });
 
   const active = {} as ActiveRecording;
@@ -336,6 +483,12 @@ export async function startRecording(id: string): Promise<void> {
     if (!recording || recording.status === 'cancelled') return;
 
     if (active.stopping) {
+      if (stoppingAll) {
+        updateRecordingIfStatus(id, ['recording'], active.resumeAfterStop
+          ? { status: 'scheduled', actual_end: null, error: null }
+          : { status: 'finalizing', actual_end: Date.now(), error: null });
+        return;
+      }
       if (active.resumeAfterStop) {
         updateRecordingIfStatus(id, ['recording'], {
           status: 'scheduled', actual_end: null, error: null,
@@ -455,7 +608,12 @@ export async function cancelRecording(id: string, _deleteFile = false): Promise<
   const finalizing = finalizingRecordings.get(id);
   if (finalizing) {
     finalizing.controller.abort();
-    await finalizing.promise;
+    if (finalizing.started) await finalizing.promise;
+    else {
+      finalizing.cancelQueued();
+      await finalizing.promise;
+      if (finalizingRecordings.get(id) === finalizing) finalizingRecordings.delete(id);
+    }
   }
 
   // Capture/finalization artifacts are unpublished and unusable after cancellation;
@@ -465,11 +623,16 @@ export async function cancelRecording(id: string, _deleteFile = false): Promise<
   logger.info(`Recording ${id}: cancelled${_deleteFile ? ' (file deleted)' : ''}`);
 }
 
-/** Await any writer for this recording, then remove every exact-id artifact. */
-export async function deleteRecordingFile(id: string): Promise<number> {
+/** Stop active writers and analysis before removing a recording's artifacts. */
+async function prepareRecordingDeletion(id: string): Promise<void> {
   await cancelCommercialAnalysis(id);
   if (isRecordingActive(id)) await cancelRecording(id, false);
-  return removeRecordingArtifacts(id);
+}
+
+/** Await any writer for this recording, then remove every exact-id artifact. */
+export async function deleteRecordingFile(id: string): Promise<number> {
+  await prepareRecordingDeletion(id);
+  return removeRecordingArtifacts(id, true);
 }
 
 /** Stop captures gracefully and await capture finalization before database shutdown. */
@@ -479,7 +642,15 @@ export async function stopAllRecordings(): Promise<void> {
   retryTimers.clear();
   await Promise.all([...startingRecordings.values()].map(starting => starting.done));
   await Promise.all([...activeRecordings.keys()].map(id => stopRecording(id, true)));
-  await Promise.all([...finalizingRecordings.values()].map(finalizing => finalizing.promise));
+  const finalizers = [...finalizingRecordings.entries()];
+  for (const [, finalizing] of finalizers) {
+    finalizing.controller.abort();
+    if (!finalizing.started) finalizing.cancelQueued();
+  }
+  await Promise.all(finalizers.map(([, finalizing]) => finalizing.promise));
+  for (const [id, finalizing] of finalizers) {
+    if (finalizingRecordings.get(id) === finalizing) finalizingRecordings.delete(id);
+  }
 }
 
 /** Get full path for the preferred recording playback file. */

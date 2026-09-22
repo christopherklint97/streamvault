@@ -181,6 +181,9 @@ db.exec(`
     padding_before INTEGER NOT NULL DEFAULT 120000,
     padding_after INTEGER NOT NULL DEFAULT 300000,
     max_recordings INTEGER NOT NULL DEFAULT 0,
+    retention_count INTEGER NOT NULL DEFAULT 0,
+    airing_policy TEXT NOT NULL DEFAULT 'every',
+    repeat_policy TEXT NOT NULL DEFAULT 'include_unknown',
     created_at INTEGER NOT NULL
   );
 
@@ -817,7 +820,8 @@ export interface DBRecordingRule {
   padding_before: number;
   padding_after: number;
   max_recordings: number;
-  airing_policy: string;
+  retention_count: number;
+  airing_policy: 'every' | 'once';
   repeat_policy: 'all' | 'include_unknown' | 'new_only';
   created_at: number;
 }
@@ -826,11 +830,12 @@ export function insertRecordingRule(rule: DBRecordingRule): void {
   db.prepare(`
     INSERT INTO recording_rules (
       id, channel_id, channel_name, match_title, match_type, enabled,
-      padding_before, padding_after, max_recordings, airing_policy, repeat_policy, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      padding_before, padding_after, max_recordings, retention_count, airing_policy, repeat_policy, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     rule.id, rule.channel_id, rule.channel_name, rule.match_title, rule.match_type, rule.enabled,
-    rule.padding_before, rule.padding_after, rule.max_recordings, rule.airing_policy, rule.repeat_policy, rule.created_at,
+    rule.padding_before, rule.padding_after, rule.max_recordings, rule.retention_count,
+    rule.airing_policy, rule.repeat_policy, rule.created_at,
   );
 }
 

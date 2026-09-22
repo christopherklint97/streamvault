@@ -4,7 +4,10 @@ import {
   deleteRecording, getConfig, getRecordingsByRuleId, getRecordingByAiringKey,
   getRecordedContentKeysByRuleId, updateRecording, saveProgramsForChannels,
 } from './db.js';
-import { startRecording, stopRecording, getActiveCount, getRecordingsDiskUsage, deleteRecordingFile } from './recorder.js';
+import {
+  startRecording, stopRecording, getActiveCount, getRecordingsDiskUsage,
+  deleteRecordingFile, enforceAllRuleRetentions,
+} from './recorder.js';
 import { logger } from './logger.js';
 import { randomUUID } from 'node:crypto';
 import { buildAiringKey } from './epg-identity.js';
@@ -134,6 +137,8 @@ export function matchRules(): void {
     // horizons vary and must not be truncated to an arbitrary local window.
     const programs = getProgramsByChannel(rule.channel_id, now);
     const recordedContentKeys = getRecordedContentKeysByRuleId(rule.id);
+    let hasAcceptedOnceRecording = rule.airing_policy === 'once' && getRecordingsByRuleId(rule.id)
+      .some(recording => !['cancelled', 'failed'].includes(recording.status));
 
     for (const program of programs) {
       if (!matchProgramTitle(program.title, rule.match_title, rule.match_type)) continue;
@@ -165,6 +170,7 @@ export function matchRules(): void {
 
       if (!shouldIncludeRepeat(rule.repeat_policy, program.is_repeat, program.is_new)) continue;
       if (shouldSuppressContentDuplicate(rule.repeat_policy, program.content_key, recordedContentKeys)) continue;
+      if (hasAcceptedOnceRecording) continue;
 
       // Legacy/id-less guide entries still get a narrow time-based duplicate guard.
       const existing = getUpcomingRecordings(startTime - 60_000, endTime + 60_000);
@@ -204,6 +210,7 @@ export function matchRules(): void {
         created_at: Date.now(),
       });
       if (inserted.id !== id) continue;
+      if (rule.airing_policy === 'once') hasAcceptedOnceRecording = true;
       if (program.content_key) recordedContentKeys.add(program.content_key);
       logger.info(`Rule "${rule.match_title}": scheduled recording for "${program.title}" at ${new Date(startTime).toISOString()}`);
     }
@@ -212,6 +219,7 @@ export function matchRules(): void {
 
 /** Clean up old recordings based on retention settings */
 async function runCleanup(): Promise<void> {
+  await enforceAllRuleRetentions();
   const retentionDays = parseInt(getConfig('recording_retention_days', '30'), 10);
   const maxDiskGb = parseInt(getConfig('recording_max_disk_gb', '50'), 10);
 

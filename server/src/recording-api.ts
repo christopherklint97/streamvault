@@ -178,6 +178,7 @@ export function parseBooleanConfig(value: string, fallback: boolean): boolean {
 
 const MATCH_TYPES = new Set(['contains', 'exact', 'startsWith']);
 const REPEAT_POLICIES = new Set(['all', 'include_unknown', 'new_only']);
+const AIRING_POLICIES = new Set(['every', 'once']);
 const MAX_RULE_PADDING_MS = 24 * 60 * 60_000;
 
 function boundedInteger(value: unknown, name: string, minimum: number, maximum: number): number {
@@ -204,6 +205,8 @@ export interface ValidatedRecordingRulePayload {
   padding_before?: number;
   padding_after?: number;
   max_recordings?: number;
+  retention_count?: number;
+  airing_policy?: 'every' | 'once';
 }
 
 export function validateRecordingRulePayload(value: unknown, partial: boolean): ValidatedRecordingRulePayload {
@@ -237,6 +240,14 @@ export function validateRecordingRulePayload(value: unknown, partial: boolean): 
   }
   if (!partial || body.maxRecordings !== undefined) {
     output.max_recordings = boundedInteger(body.maxRecordings ?? 0, 'maxRecordings', 0, 10_000);
+  }
+  if (!partial || body.retentionLimit !== undefined) {
+    output.retention_count = boundedInteger(body.retentionLimit ?? 0, 'retentionLimit', 0, 10_000);
+  }
+  const airingPolicy = body.airingPolicy ?? (partial ? undefined : 'every');
+  if (airingPolicy !== undefined) {
+    if (typeof airingPolicy !== 'string' || !AIRING_POLICIES.has(airingPolicy)) throw new Error('airingPolicy is invalid');
+    output.airing_policy = airingPolicy as 'every' | 'once';
   }
   return output;
 }
