@@ -175,7 +175,8 @@ export default function Player() {
   const audioOnly = usePlayerStore((s) => s.audioOnly);
   const setAudioOnly = usePlayerStore((s) => s.setAudioOnly);
   const channelId = currentChannel?.id;
-  const programs = useChannelStore((s) => s.programs);
+  const programsByChannel = useChannelStore((s) => s.programsByChannel);
+  const fetchProgramsForChannel = useChannelStore((s) => s.fetchProgramsForChannel);
   const goBack = useAppStore((s) => s.goBack);
   const showToast = useAppStore((s) => s.showToastMessage);
   const createRecording = useRecordingStore((s) => s.createRecording);
@@ -205,8 +206,13 @@ export default function Player() {
   const canShowLiveChannelList = MOBILE && isLive && !isFullscreen && groupChannels.length > 0;
   const showLiveChannelList = canShowLiveChannelList && channelListVisible;
 
+  useEffect(() => {
+    if (!isLive || !channelId) return;
+    void fetchProgramsForChannel(channelId);
+  }, [channelId, fetchProgramsForChannel, isLive]);
+
   const currentProgram = currentChannel
-    ? getCurrentProgram(programs, currentChannel.id)
+    ? getCurrentProgram([], currentChannel.id, programsByChannel.get(currentChannel.id))
     : null;
 
   // Swipe gesture tracking for channel switching (live TV only)
