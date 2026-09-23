@@ -150,6 +150,7 @@ interface ChannelActions {
   fetchChannelsByIds: (ids: string[]) => Promise<Channel[]>;
   fetchMoreChannels: () => Promise<void>;
   fetchPrograms: (expectedBaseUrl?: string, expectedGeneration?: number) => Promise<void>;
+  fetchProgramsForChannel: (channelId: string) => Promise<Program[]>;
   fetchEpgForStream: (streamId: number) => Promise<Program[]>;
   searchChannels: (query: string, contentType?: string, group?: string) => Promise<Channel[]>;
   fetchSeriesInfo: (seriesId: number) => Promise<SeriesInfo | null>;
@@ -218,19 +219,14 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     const switchingOrigins = backendOrigin(active.apiBaseUrl) !== backendOrigin(url);
     try {
       const status = await probeBackend<BackendStatusPayload>(url);
-      const now = Date.now();
-      const to = now + 6 * 60 * 60 * 1000;
       const candidateToken = token?.trim();
       const tokenOverride = candidateToken || (switchingOrigins ? null : undefined);
-      const [config, programData] = await Promise.all([
-        apiFetch<Record<string, unknown>>(url, '/api/config', { cache: 'no-store' }, tokenOverride),
-        apiFetch<{ programs?: RawProgram[] }>(
-          url,
-          `/api/programs?from=${now - 2 * 60 * 60 * 1000}&to=${to}`,
-          { cache: 'no-store' },
-          tokenOverride,
-        ),
-      ]);
+      const config = await apiFetch<Record<string, unknown>>(
+        url,
+        '/api/config',
+        { cache: 'no-store' },
+        tokenOverride,
+      );
       if (attempt !== connectionAttempt) return false;
 
       const current = get();
@@ -244,8 +240,6 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
             xtreamCredentials: { serverUrl: '', username: '', password: '' },
           }
         : current;
-      const programs = parsePrograms(programData.programs);
-
       stopPolling();
       fetchAbortController?.abort();
       fetchAbortController = null;
@@ -261,8 +255,8 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
         error: null,
         _hydrated: true,
         channels: [],
-        programs,
-        programsByChannel: buildProgramIndex(programs),
+        programs: [],
+        programsByChannel: new Map(),
         categoriesByType: {},
         groups: ['All'],
         regions: ['All'],
@@ -433,6 +427,32 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
       programRefreshTimer = setTimeout(() => {
         void get().fetchPrograms().catch(() => undefined);
       }, PROGRAM_REFRESH_MS);
+    }
+  },
+
+  fetchProgramsForChannel: async (channelId: string) => {
+    const { apiBaseUrl, backendGeneration } = get();
+    if (!hasApi(apiBaseUrl)) return [];
+    try {
+      const now = Date.now();
+      const data = await apiFetch<{ programs?: RawProgram[] }>(
+        apiBaseUrl,
+        `/api/epg/channel/${encodeURIComponent(channelId)}?from=${now - 2 * 60 * 60 * 1000}&to=${now + 6 * 60 * 60 * 1000}`,
+      );
+      if (get().backendGeneration !== backendGeneration) return [];
+      const programs = parsePrograms(data.programs);
+      const nextIndex = new Map(get().programsByChannel);
+      nextIndex.set(channelId, programs);
+      const nextPrograms = [
+        ...get().programs.filter(program => program.channelId !== channelId),
+        ...programs,
+      ];
+      set({ programs: nextPrograms, programsByChannel: nextIndex });
+      return programs;
+    } catch (err) {
+      if (get().backendGeneration !== backendGeneration) return [];
+      toast(`Failed to fetch cached EPG: ${err}`);
+      return [];
     }
   },
 
@@ -665,10 +685,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
         stopPolling();
         // Sync finished — fetch fresh data
         if (status.phase === 'done') {
-          await Promise.all([
-            get().fetchChannels(undefined, generation),
-            get().fetchPrograms(apiBaseUrl, generation),
-          ]);
+          await get().fetchChannels(undefined, generation);
         }
       }
     } catch (err) {
@@ -699,11 +716,10 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
       const status = await probeBackend(apiBaseUrl);
       if (!isCurrentBackend()) return;
 
-      // Fetch config and programs (NOT all channels — ChannelList loads on demand)
-      await Promise.all([
-        get().fetchConfig(apiBaseUrl, backendGeneration),
-        get().fetchPrograms(apiBaseUrl, backendGeneration),
-      ]);
+      // Global EPG payloads grow with the provider catalog and can exceed
+      // mobile-browser fetch/parse limits. Views load EPG only for visible
+      // channels, so backend connectivity depends only on required config.
+      await get().fetchConfig(apiBaseUrl, backendGeneration);
       if (!isCurrentBackend()) return;
 
       if (status.isSyncing) {

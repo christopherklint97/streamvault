@@ -178,6 +178,52 @@ describe('commercial auto-skip config', () => {
     });
   });
 
+  it('connects without downloading the global EPG payload', async () => {
+    const requested: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      requested.push(new URL(url, 'http://candidate.test').pathname);
+      if (url.includes('/api/programs')) throw new TypeError('Load failed');
+      const body = url.includes('/api/config') ? {} : { isSyncing: false, contentTypeCounts: {} };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    await expect(useChannelStore.getState().connectBackend('http://candidate.test:3002'))
+      .resolves.toBe(true);
+
+    expect(requested).toEqual(['/api/status', '/api/config']);
+    expect(useChannelStore.getState()).toMatchObject({
+      backendConnection: 'connected', error: null, _hydrated: true,
+    });
+  });
+
+  it('hydrates without making backend connectivity depend on a global EPG payload', async () => {
+    const requested: string[] = [];
+    useChannelStore.setState({
+      apiBaseUrl: 'http://backend.test:3002', backendConnection: 'unknown', _hydrated: false,
+    });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      requested.push(new URL(url, 'http://backend.test').pathname);
+      if (url.includes('/api/programs')) throw new TypeError('Load failed');
+      const body = url.includes('/api/config') ? {} : { isSyncing: false, contentTypeCounts: {} };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    await useChannelStore.getState().hydrate();
+
+    expect(requested).toEqual(['/api/status', '/api/config']);
+    expect(useChannelStore.getState()).toMatchObject({
+      backendConnection: 'connected', error: null, _hydrated: true,
+    });
+  });
+
   it('uses only the candidate token while onboarding an auth-protected backend', async () => {
     localStorage.setItem('streamvault_auth_token', JSON.stringify('old-backend-token'));
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
@@ -205,7 +251,7 @@ describe('commercial auto-skip config', () => {
       'new-backend-token',
     )).resolves.toBe(true);
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(localStorage.getItem('streamvault_auth_token')).toBe(JSON.stringify('new-backend-token'));
     expect(useChannelStore.getState()).toMatchObject({
       apiBaseUrl: 'http://protected.test:3002',
@@ -357,6 +403,52 @@ describe('commercial auto-skip config', () => {
 
     await expect(useChannelStore.getState().fetchEpgForStream(1)).resolves.toEqual([]);
     expect(useChannelStore.getState().programsByChannel.size).toBe(0);
+  });
+
+  it('loads bounded cached EPG for numeric and manual channel IDs', async () => {
+    useChannelStore.setState({
+      apiBaseUrl: 'http://backend.test:3002', backendGeneration: 0,
+      programs: [], programsByChannel: new Map(), error: null,
+    });
+    const requested: string[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      requested.push(String(input));
+      return new Response(JSON.stringify({
+        programs: [{
+          channelId: 'manual/channel', title: 'Cached show', description: '',
+          start: '2026-01-01T00:00:00Z', stop: '2026-01-01T01:00:00Z', category: '',
+        }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+
+    const programs = await useChannelStore.getState().fetchProgramsForChannel('manual/channel');
+
+    expect(programs.map(program => program.title)).toEqual(['Cached show']);
+    const url = new URL(requested[0]);
+    expect(url.pathname).toBe('/api/epg/channel/manual%2Fchannel');
+    expect(Number(url.searchParams.get('from'))).toBeLessThan(Number(url.searchParams.get('to')));
+    expect(useChannelStore.getState().programsByChannel.get('manual/channel')?.[0].title).toBe('Cached show');
+    expect(useChannelStore.getState().programs[0].title).toBe('Cached show');
+  });
+
+  it('does not merge cached channel EPG after the backend generation changes', async () => {
+    useChannelStore.setState({
+      apiBaseUrl: 'http://backend-a.test:3002', backendGeneration: 0,
+      programs: [], programsByChannel: new Map(),
+    });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      useChannelStore.setState({ apiBaseUrl: 'http://backend-b.test:3002', backendGeneration: 1 });
+      return new Response(JSON.stringify({
+        programs: [{
+          channelId: 'live_1', title: 'Stale cached show', description: '',
+          start: '2026-01-01T00:00:00Z', stop: '2026-01-01T01:00:00Z', category: '',
+        }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+
+    await expect(useChannelStore.getState().fetchProgramsForChannel('live_1')).resolves.toEqual([]);
+    expect(useChannelStore.getState().programsByChannel.size).toBe(0);
+    expect(useChannelStore.getState().programs).toEqual([]);
   });
 
   it('ignores a stale config save after the backend changes', async () => {

@@ -20,7 +20,8 @@ import { KEY_CODES } from '../utils/keys';
 import HorizontalRow from '../components/HorizontalRow';
 
 export default function Home() {
-  const programs = useChannelStore((s) => s.programs);
+  const programsByChannel = useChannelStore((s) => s.programsByChannel);
+  const fetchProgramsForChannel = useChannelStore((s) => s.fetchProgramsForChannel);
   const contentTypeCounts = useChannelStore((s) => s.contentTypeCounts);
   const fetchChannelsByIds = useChannelStore((s) => s.fetchChannelsByIds);
   const favoriteIds = useFavoritesStore((s) => s.favoriteIds);
@@ -68,6 +69,10 @@ export default function Home() {
     return () => { cancelled = true; };
   }, [favoriteIds, recentIds, lastWatchedId, continueWatchingIds, listChannelIds, fetchChannelsByIds]);
 
+  useEffect(() => {
+    if (lastWatchedId) void fetchProgramsForChannel(lastWatchedId);
+  }, [fetchProgramsForChannel, lastWatchedId]);
+
   const favoriteChannels = useMemo(
     () => Array.from(favoriteIds).map(id => channelMap.get(id)).filter(Boolean) as Channel[],
     [channelMap, favoriteIds]
@@ -110,7 +115,7 @@ export default function Home() {
   );
 
   const lastWatchedProgram = lastWatchedChannel
-    ? getCurrentProgram(programs, lastWatchedChannel.id)
+    ? getCurrentProgram([], lastWatchedChannel.id, programsByChannel.get(lastWatchedChannel.id))
     : null;
 
   const typeCounts = useMemo(() => ({
