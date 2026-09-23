@@ -25,8 +25,10 @@ import {
   searchChannelsByName, getChannelCountByContentType,
   getChannelsByContentTypeCursor, getChannelsByGroupCursor,
   insertRecording, insertRecordingForAiring, updateRecording, deleteRecording, getRecording, getRecordings,
+  getRecordingsByRuleId,
   getCommercialSegments, queueCommercialAnalysis, replaceCommercialSegmentsIfIdle,
   insertRecordingRule, updateRecordingRule, deleteRecordingRule, getRecordingRules, getRecordingRule,
+  markRecordingRuleCadenceRetry,
   closeDatabase, backupDatabaseIfDue, getDatabaseHealth,
 } from './db.js';
 import type { DBRecording, DBRecordingRule } from './db.js';
@@ -49,7 +51,7 @@ import {
   reconcileRecordOnceRule,
   withRuleRetentionLock,
 } from './recorder.js';
-import { startScheduler, stopScheduler, getSchedulerStatus, matchRules } from './recording-scheduler.js';
+import { startScheduler, stopScheduler, getSchedulerStatus, reconcileRecordingRule } from './recording-scheduler.js';
 import {
   isCommercialAnalysisAvailable,
   notifyCommercialAnalysisQueued,
@@ -65,7 +67,9 @@ import {
   validateCommercialSkipOverride,
   validateFromProgramLookup,
   validateRecordingRulePayload,
+  versionRecordingRuleUpdates,
 } from './recording-api.js';
+import { matchProgramTitle } from './schedule-reconciliation.js';
 import { rewriteHlsManifest } from './hls.js';
 import { buildFragmentedMp4Args } from './vod-remux.js';
 import { buildBrowserCompatibleVideoArgs } from './browser-transcode.js';
@@ -1765,7 +1769,16 @@ app.delete('/api/recordings/:id', requireAuth, async (req, res) => {
     return;
   }
   await deleteRecordingFile(recordingId);
+  if (recording.status !== 'completed') {
+    markRecordingRuleCadenceRetry(
+      recording.rule_id,
+      recording.rule_revision ?? null,
+      recording.program_start_time ?? recording.start_time,
+      recording.airing_key ?? null,
+    );
+  }
   deleteRecording(recordingId);
+  if (recording.rule_id) reconcileRecordingRule(recording.rule_id);
   res.json({ ok: true });
 });
 
@@ -1893,10 +1906,22 @@ app.post('/api/recording-rules', requireAuth, (req, res) => {
     retention_count: payload.retention_count!,
     airing_policy: payload.airing_policy!,
     repeat_policy: payload.repeat_policy as DBRecordingRule['repeat_policy'],
+    cadence_mode: payload.cadence_mode!,
+    cadence_interval: payload.cadence_interval!,
+    daily_start_minutes: payload.daily_start_minutes!,
+    schedule_timezone: payload.schedule_timezone!,
+    rule_revision: 1,
+    cadence_last_success_start: null,
+    cadence_last_success_key: null,
+    cadence_occurrence_progress: 0,
+    cadence_cursor_start: null,
+    cadence_cursor_key: null,
+    cadence_retry_start: null,
+    cadence_retry_key: null,
     created_at: Date.now(),
   });
-  // Immediately check for matches
-  matchRules();
+  // Immediately check this rule for matches.
+  reconcileRecordingRule(id);
   res.json({ rule: getRecordingRule(id) });
 });
 
@@ -1914,18 +1939,73 @@ app.put('/api/recording-rules/:id', requireAuth, async (req, res) => {
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
     return;
   }
+  let missingDuringUpdate = false;
+  let updateError: string | null = null;
   await withRuleRetentionLock(ruleId, async () => {
-    updateRecordingRule(ruleId, updates as Partial<Omit<DBRecordingRule, 'id'>>);
-    if (updates.airing_policy === 'once') await reconcileRecordOnceRule(ruleId);
+    const current = getRecordingRule(ruleId);
+    if (!current) {
+      missingDuringUpdate = true;
+      return;
+    }
+    try {
+      let currentForVersion = current;
+      if (current.airing_policy === 'every' && updates.airing_policy === 'once' &&
+          current.cadence_last_success_start === null) {
+        const latestAccepted = getRecordingsByRuleId(ruleId)
+          .filter(recording => recording.status === 'completed' &&
+            recording.channel_id === current.channel_id &&
+            (recording.rule_revision ?? 1) === current.rule_revision &&
+            matchProgramTitle(
+              recording.program_title ?? recording.title,
+              current.match_title,
+              current.match_type,
+            ))
+          .sort((left, right) => {
+            const leftStart = left.program_start_time ?? left.start_time + current.padding_before;
+            const rightStart = right.program_start_time ?? right.start_time + current.padding_before;
+            return rightStart - leftStart || (right.airing_key ?? '').localeCompare(left.airing_key ?? '');
+          })[0];
+        if (latestAccepted) {
+          currentForVersion = {
+            ...current,
+            cadence_last_success_start: latestAccepted.program_start_time ??
+              latestAccepted.start_time + current.padding_before,
+            cadence_last_success_key: latestAccepted.airing_key ?? null,
+          };
+        }
+      }
+      const persistedUpdates = versionRecordingRuleUpdates(
+        currentForVersion,
+        updates as Partial<Omit<DBRecordingRule, 'id'>>,
+      );
+      updateRecordingRule(ruleId, persistedUpdates);
+      if (updates.airing_policy === 'once') await reconcileRecordOnceRule(ruleId);
+    } catch (error) {
+      updateError = error instanceof Error ? error.message : String(error);
+    }
   });
+  if (missingDuringUpdate) {
+    res.status(404).json({ error: 'Rule not found' });
+    return;
+  }
+  if (updateError) {
+    res.status(400).json({ error: updateError });
+    return;
+  }
   if (updates.retention_count !== undefined) await enforceRuleRetention(ruleId);
-  matchRules();
-  res.json({ rule: getRecordingRule(ruleId) });
+  reconcileRecordingRule(ruleId);
+  const updatedRule = getRecordingRule(ruleId);
+  if (!updatedRule) {
+    res.status(409).json({ error: 'Rule was deleted during update' });
+    return;
+  }
+  res.json({ rule: updatedRule });
 });
 
 app.delete('/api/recording-rules/:id', requireAuth, async (req, res) => {
   const ruleId = String(req.params.id);
   await withRuleRetentionLock(ruleId, () => { deleteRecordingRule(ruleId); });
+  reconcileRecordingRule(ruleId);
   res.json({ ok: true });
 });
 

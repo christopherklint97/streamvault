@@ -56,7 +56,7 @@ interface RecordingActions {
   stopRecording: (id: string) => Promise<void>;
   deleteRecording: (id: string) => Promise<void>;
   createRule: (input: CreateRecordingRuleInput) => Promise<RecordingRule | null>;
-  updateRule: (id: string, updates: Partial<UpdateRecordingRuleInput>) => Promise<void>;
+  updateRule: (id: string, updates: Partial<UpdateRecordingRuleInput>) => Promise<RecordingRule | null>;
   deleteRule: (id: string) => Promise<void>;
   fetchCommercialSegments: (id: string, options?: { force?: boolean; silent?: boolean }) => Promise<CommercialSegmentsResponse | null>;
   analyzeCommercials: (id: string) => Promise<boolean>;
@@ -217,13 +217,15 @@ export const useRecordingStore = create<RecordingState & RecordingActions>()((se
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),
       });
-      if (backendVersion !== recordingBackendVersion) return;
+      if (backendVersion !== recordingBackendVersion) return null;
       set((state) => ({
         rules: state.rules.map((rule) => rule.id === id ? data.rule : rule),
       }));
+      return data.rule;
     } catch (err) {
-      if (backendVersion !== recordingBackendVersion) return;
+      if (backendVersion !== recordingBackendVersion) return null;
       toast(`Failed to update rule: ${err}`);
+      return null;
     }
   },
 

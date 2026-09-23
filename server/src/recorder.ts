@@ -11,9 +11,12 @@ import {
   getRecordingRules,
   getRecordingsByRuleId,
   getRecordingsByStatus,
+  completeRecordingAndAdvanceCadence,
+  markRecordingRuleCadenceRetry,
   updateRecording,
   updateRecordingIfStatus,
 } from './db.js';
+import type { DBRecording } from './db.js';
 import { resolveStreamUrl, VLC_HEADERS } from './stream-utils.js';
 import { logger } from './logger.js';
 import { cancelCommercialAnalysis, notifyCommercialAnalysisQueued } from './commercial-analysis-worker.js';
@@ -70,6 +73,25 @@ const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const retentionQueues = new Map<string, Promise<void>>();
 let stoppingAll = false;
 let finalizationQueue: Promise<void> = Promise.resolve();
+
+function requestRuleReconciliation(ruleId: string | null): void {
+  if (!ruleId || stoppingAll) return;
+  queueMicrotask(() => {
+    void import('./recording-scheduler.js')
+      .then(module => module.reconcileRecordingRule(ruleId))
+      .catch(error => logger.warn(`Recording rule ${ruleId}: immediate reconciliation failed: ${error instanceof Error ? error.message : error}`));
+  });
+}
+
+function markCadenceRetry(recording: DBRecording | undefined): void {
+  if (!recording) return;
+  markRecordingRuleCadenceRetry(
+    recording.rule_id,
+    recording.rule_revision ?? null,
+    recording.program_start_time ?? recording.start_time,
+    recording.airing_key ?? null,
+  );
+}
 
 function enqueueFinalization(task: () => Promise<void>, signal: AbortSignal): { promise: Promise<void>; cancelQueued: () => void } {
   const run = async () => {
@@ -320,7 +342,7 @@ async function publishCompletedRecording(
       const result = await finalizeRecordingMedia({ ...paths, segments }, { signal: controller.signal });
       const hasDerivative = result.derivativeError === null;
       const now = Date.now();
-      const published = updateRecordingIfStatus(id, ['finalizing'], {
+      const published = completeRecordingAndAdvanceCadence(id, {
         status: 'completed',
         actual_end: now,
         master_file_path: paths.masterRelative,
@@ -335,7 +357,7 @@ async function publishCompletedRecording(
         analysis_requested_at: now,
         analysis_started_at: null,
         analysis_completed_at: null,
-      });
+      }, current.rule_id, current.rule_revision ?? null, current.program_start_time ?? null, current.airing_key ?? null);
       if (!published) {
         removeRecordingArtifacts(id);
         return;
@@ -357,8 +379,11 @@ async function publishCompletedRecording(
         actual_end: Date.now(),
         error: `Failed to finalize recording: ${message}`,
       });
-      if (failed) logger.error(`Recording ${id}: failed to finalize master: ${message}`);
-      else removeRecordingArtifacts(id);
+      if (failed) {
+        markCadenceRetry(current);
+        logger.error(`Recording ${id}: failed to finalize master: ${message}`);
+        requestRuleReconciliation(current.rule_id);
+      } else removeRecordingArtifacts(id);
     } finally {
       if (finalizingRecordings.get(id)?.controller === controller) finalizingRecordings.delete(id);
       retryCounts.delete(id);
@@ -373,6 +398,7 @@ async function publishCompletedRecording(
     } catch (error) {
       logger.warn(`Recording ${id}: rolling retention cleanup failed: ${error instanceof Error ? error.message : error}`);
     }
+    requestRuleReconciliation(completedRuleId);
   });
   entry.promise = promise;
   finalizingRecordings.set(id, entry);
@@ -418,9 +444,12 @@ export async function startRecording(id: string): Promise<void> {
   if (Date.now() >= rec.end_time) {
     const recovered = recoveryPaths(id);
     if (recovered) await publishCompletedRecording(id, recovered);
-    else updateRecordingIfStatus(id, ['scheduled', 'recording'], {
+    else if (updateRecordingIfStatus(id, ['scheduled', 'recording'], {
       status: 'failed', error: 'Recording window ended before capture started', actual_end: Date.now(),
-    });
+    })) {
+      markCadenceRetry(rec);
+      requestRuleReconciliation(rec.rule_id);
+    }
     return;
   }
 
@@ -436,6 +465,8 @@ export async function startRecording(id: string): Promise<void> {
   const freeSpace = getFreeDiskSpace(recordingsDir);
   if (freeSpace < 1_073_741_824) {
     updateRecording(id, { status: 'failed', error: 'Insufficient disk space (< 1GB free)' });
+    markCadenceRetry(rec);
+    requestRuleReconciliation(rec.rule_id);
     logger.error(`Recording ${id}: insufficient disk space (${(freeSpace / 1e9).toFixed(1)}GB free)`);
     return;
   }
@@ -458,7 +489,10 @@ export async function startRecording(id: string): Promise<void> {
     streamUrl = await resolveStreamUrl(rec.channel_id);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to resolve stream URL';
-    updateRecordingIfStatus(id, ['scheduled', 'recording'], { status: 'failed', error: message });
+    if (updateRecordingIfStatus(id, ['scheduled', 'recording'], { status: 'failed', error: message })) {
+      markCadenceRetry(rec);
+      requestRuleReconciliation(rec.rule_id);
+    }
     logger.error(`Recording ${id}: ${message}`);
     finishStartingRecording(id, starting);
     return;
@@ -590,7 +624,9 @@ export async function stopRecording(id: string, preserveIfFuture = false): Promi
 }
 
 export async function cancelRecording(id: string, _deleteFile = false): Promise<void> {
+  const recording = getRecording(id);
   updateRecording(id, { status: 'cancelled', actual_end: Date.now() });
+  markCadenceRetry(recording);
   retryCounts.delete(id);
   const retryTimer = retryTimers.get(id);
   if (retryTimer) clearTimeout(retryTimer);
@@ -621,6 +657,7 @@ export async function cancelRecording(id: string, _deleteFile = false): Promise<
   // is retained for API compatibility and logging only.
   removeRecordingArtifacts(id);
   logger.info(`Recording ${id}: cancelled${_deleteFile ? ' (file deleted)' : ''}`);
+  requestRuleReconciliation(recording?.rule_id ?? null);
 }
 
 /** Stop active writers and analysis before removing a recording's artifacts. */
@@ -703,9 +740,10 @@ export async function recoverRecordings(): Promise<void> {
       void publishCompletedRecording(rec.id, paths);
     } else {
       logger.warn(`Recording ${rec.id}: interrupted without recoverable media, marking failed`);
-      updateRecordingIfStatus(rec.id, ['recording', 'finalizing'], {
+      const failed = updateRecordingIfStatus(rec.id, ['recording', 'finalizing'], {
         status: 'failed', error: 'Server restarted without recoverable capture data', actual_end: now,
       });
+      if (failed) markCadenceRetry(rec);
     }
   }
 }

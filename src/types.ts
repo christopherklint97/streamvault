@@ -164,6 +164,7 @@ export interface CommercialSegmentsResponse {
 export type RecordingRuleMatchType = 'exact' | 'startsWith' | 'contains';
 export type RecordingRepeatPolicy = 'all' | 'include_unknown' | 'new_only';
 export type RecordingAiringPolicy = 'every' | 'once';
+export type RecordingCadenceMode = 'every' | 'occurrence' | 'hours' | 'daily';
 
 export interface RecordingRule {
   id: string;
@@ -178,6 +179,18 @@ export interface RecordingRule {
   max_recordings: number;
   retention_count: number;
   airing_policy: RecordingAiringPolicy;
+  cadence_mode: RecordingCadenceMode;
+  cadence_interval: number;
+  daily_start_minutes: number;
+  schedule_timezone: string;
+  rule_revision: number;
+  cadence_last_success_start: number | null;
+  cadence_last_success_key: string | null;
+  cadence_occurrence_progress: number;
+  cadence_cursor_start: number | null;
+  cadence_cursor_key: string | null;
+  cadence_retry_start: number | null;
+  cadence_retry_key: string | null;
   created_at: number;
 }
 
@@ -190,10 +203,17 @@ export interface CreateRecordingRuleInput {
   paddingAfter: number;
   repeatPolicy: RecordingRepeatPolicy;
   retentionLimit: number;
+  maxRecordings: number;
   airingPolicy: RecordingAiringPolicy;
+  cadenceMode: RecordingCadenceMode;
+  cadenceInterval: number;
+  dailyStartMinutes: number;
+  scheduleTimezone?: string;
 }
 
 export interface UpdateRecordingRuleInput {
+  channelId: string;
+  channelName: string;
   matchTitle: string;
   matchType: RecordingRuleMatchType;
   enabled: boolean;
@@ -203,6 +223,10 @@ export interface UpdateRecordingRuleInput {
   retentionLimit: number;
   airingPolicy: RecordingAiringPolicy;
   maxRecordings: number;
+  cadenceMode: RecordingCadenceMode;
+  cadenceInterval: number;
+  dailyStartMinutes: number;
+  scheduleTimezone?: string;
 }
 
 export interface RecordingStatusInfo {

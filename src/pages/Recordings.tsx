@@ -3,13 +3,19 @@ import { useRecordingStore } from '../stores/recordingStore';
 import { usePlayerStore } from '../stores/playerStore';
 import { useAppStore } from '../stores/appStore';
 import { useChannelStore, SAME_ORIGIN } from '../stores/channelStore';
-import type { Recording, RecordingRule, Channel, RecordingRepeatPolicy, RecordingRuleMatchType } from '../types';
+import type {
+  Channel, Recording, RecordingCadenceMode, RecordingRepeatPolicy, RecordingRule,
+  RecordingRuleMatchType, UpdateRecordingRuleInput,
+} from '../types';
 import { cn } from '../utils/cn';
 import FocusZone from '../components/FocusZone';
 import { getRecordingAnalysisStatus, getRecordingCommercialSeconds } from '../utils/recording-commercial';
 import { getRecordingPlaybackUrl } from '../services/recordingPlayback';
 import {
   createRecordingRuleDraft,
+  minutesToRuleTime,
+  recordingRuleDraftToInput,
+  recordingRuleToDraft,
   repeatPolicyDescription,
   repeatPolicyLabel,
 } from '../utils/recordingRules';
@@ -144,12 +150,188 @@ function RecordingCard({ rec, onPlay, onCancel, onStop, onDelete, onAnalyze, onR
   );
 }
 
-function RuleCard({ rule, onToggle, onDelete, onRetentionChange }: {
+function RuleEditForm({ rule, onCancel, onSave }: {
+  rule: RecordingRule;
+  onCancel: () => void;
+  onSave: (updates: UpdateRecordingRuleInput) => Promise<RecordingRule | null>;
+}) {
+  const apiBaseUrl = useChannelStore((state) => state.apiBaseUrl);
+  const showToast = useAppStore((state) => state.showToastMessage);
+  const [draft, setDraft] = useState(() => recordingRuleToDraft(rule));
+  const [channelQuery, setChannelQuery] = useState(rule.channel_name);
+  const [results, setResults] = useState<Channel[]>([]);
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [retentionTouched, setRetentionTouched] = useState(false);
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchGeneration = useRef(0);
+
+  useEffect(() => () => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchGeneration.current += 1;
+  }, []);
+
+  const searchChannels = useCallback((value: string) => {
+    setChannelQuery(value);
+    setDraft((current) => ({ ...current, channelId: '', channelName: '' }));
+    searchGeneration.current += 1;
+    const generation = searchGeneration.current;
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    if (value.trim().length < 2) {
+      setResults([]);
+      return;
+    }
+    searchTimer.current = setTimeout(async () => {
+      try {
+        const base = SAME_ORIGIN ? '' : apiBaseUrl;
+        const response = await fetch(`${base}/api/search?q=${encodeURIComponent(value.trim())}&type=livetv`);
+        if (!response.ok || generation !== searchGeneration.current) return;
+        const data = await response.json() as { channels?: Channel[] };
+        if (generation === searchGeneration.current) setResults((data.channels ?? []).slice(0, 20));
+      } catch (searchError) {
+        if (generation === searchGeneration.current) showToast(`Search failed: ${searchError}`);
+      }
+    }, 300);
+  }, [apiBaseUrl, showToast]);
+
+  const submit = useCallback(async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    let input;
+    try {
+      input = recordingRuleDraftToInput(draft);
+    } catch (validationError) {
+      setError(validationError instanceof Error ? validationError.message : String(validationError));
+      return;
+    }
+    setSubmitting(true);
+    setError('');
+    const saved = await onSave({
+      ...input,
+      enabled: rule.enabled === 1,
+      maxRecordings: rule.max_recordings > 0 && retentionTouched ? 0 : input.maxRecordings,
+    });
+    setSubmitting(false);
+    if (saved) onCancel();
+  }, [draft, onCancel, onSave, retentionTouched, rule.enabled, rule.max_recordings]);
+
+  const inputClass = 'w-full rounded border border-[#333] bg-[#1a1a2e] px-2 py-1.5 text-13 text-white outline-none focus:border-[#3b82f6]';
+  return (
+    <form className="mt-2 rounded border border-[#333] bg-[#151525] p-3" onSubmit={submit}>
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <div className="relative">
+          <label className="block text-12 text-[#9ca3af]" htmlFor={`edit-${rule.id}-channel`}>Channel</label>
+          <input id={`edit-${rule.id}-channel`} data-focusable autoComplete="off" value={channelQuery} onChange={(event) => searchChannels(event.target.value)} className={inputClass} />
+          {results.length > 0 && (
+            <div className="absolute left-0 right-0 z-10 mt-1 max-h-40 overflow-y-auto rounded border border-[#333] bg-[#1a1a2e] shadow-lg">
+              {results.map((channel) => (
+                <button key={channel.id} type="button" className="block w-full px-3 py-2 text-left text-13 hover:bg-[#2a2a3e]" onClick={() => {
+                  setDraft((current) => ({ ...current, channelId: channel.id, channelName: channel.name }));
+                  setChannelQuery(channel.name);
+                  setResults([]);
+                }}>{channel.name}</button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <label className="block text-12 text-[#9ca3af]" htmlFor={`edit-${rule.id}-title`}>
+          Program title
+          <input id={`edit-${rule.id}-title`} data-focusable value={draft.matchTitle} onChange={(event) => setDraft((current) => ({ ...current, matchTitle: event.target.value }))} className={inputClass} />
+        </label>
+
+        <label className="block text-12 text-[#9ca3af]" htmlFor={`edit-${rule.id}-match`}>
+          Title matching
+          <select id={`edit-${rule.id}-match`} data-focusable value={draft.matchType} onChange={(event) => setDraft((current) => ({ ...current, matchType: event.target.value as RecordingRuleMatchType }))} className={inputClass}>
+            <option value="exact">Exact title</option><option value="startsWith">Starts with</option><option value="contains">Contains</option>
+          </select>
+        </label>
+
+        <label className="block text-12 text-[#9ca3af]" htmlFor={`edit-${rule.id}-repeat`}>
+          Repeat policy
+          <select id={`edit-${rule.id}-repeat`} data-focusable value={draft.repeatPolicy} onChange={(event) => setDraft((current) => ({ ...current, repeatPolicy: event.target.value as RecordingRepeatPolicy }))} className={inputClass}>
+            <option value="all">All airings</option><option value="include_unknown">New and unknown</option><option value="new_only">New only</option>
+          </select>
+        </label>
+
+        <div className="grid grid-cols-2 gap-2">
+          <label className="block text-12 text-[#9ca3af]" htmlFor={`edit-${rule.id}-padding-before`}>Padding before (min)<input id={`edit-${rule.id}-padding-before`} data-focusable type="number" min={0} step={1} value={draft.paddingBeforeMinutes} onChange={(event) => setDraft((current) => ({ ...current, paddingBeforeMinutes: Number(event.target.value) }))} className={inputClass} /></label>
+          <label className="block text-12 text-[#9ca3af]" htmlFor={`edit-${rule.id}-padding-after`}>Padding after (min)<input id={`edit-${rule.id}-padding-after`} data-focusable type="number" min={0} step={1} value={draft.paddingAfterMinutes} onChange={(event) => setDraft((current) => ({ ...current, paddingAfterMinutes: Number(event.target.value) }))} className={inputClass} /></label>
+        </div>
+
+        <label className="block text-12 text-[#9ca3af]" htmlFor={`edit-${rule.id}-retention`}>
+          Keep latest completed recordings
+          <input id={`edit-${rule.id}-retention`} data-focusable type="number" min={0} step={1} disabled={draft.recordOnce} placeholder="Keep all" value={draft.retentionLimit} onChange={(event) => {
+            setRetentionTouched(true);
+            setDraft((current) => ({ ...current, retentionLimit: event.target.value }));
+          }} className={`${inputClass} disabled:opacity-40`} />
+        </label>
+        {rule.max_recordings > 0 && (
+          <label className="flex items-start gap-2 text-12 text-[#d1d5db]" htmlFor={`edit-${rule.id}-convert-legacy`}>
+            <input
+              id={`edit-${rule.id}-convert-legacy`}
+              data-focusable
+              type="checkbox"
+              checked={retentionTouched}
+              onChange={(event) => {
+                setRetentionTouched(event.target.checked);
+                if (!event.target.checked) {
+                  setDraft((current) => ({
+                    ...current,
+                    retentionLimit: rule.retention_count > 0 ? String(rule.retention_count) : '',
+                  }));
+                }
+              }}
+            />
+            Replace the legacy stop-after limit with rolling retention when saving
+          </label>
+        )}
+
+        <div>
+          <label className="block text-12 text-[#9ca3af]" htmlFor={`edit-${rule.id}-cadence`}>Recording frequency</label>
+          <select id={`edit-${rule.id}-cadence`} data-focusable disabled={draft.recordOnce} value={draft.cadenceMode} onChange={(event) => setDraft((current) => ({ ...current, cadenceMode: event.target.value as RecordingCadenceMode }))} className={`${inputClass} disabled:opacity-40`}>
+            <option value="every">Every eligible airing</option><option value="occurrence">Every Nth matching airing</option><option value="hours">Minimum hours apart</option><option value="daily">Once daily at or after a time</option>
+          </select>
+          {!draft.recordOnce && (draft.cadenceMode === 'occurrence' || draft.cadenceMode === 'hours') && (
+            <input id={`edit-${rule.id}-cadence-interval`} aria-label={draft.cadenceMode === 'occurrence' ? 'Record every Nth match' : 'Minimum hours'} data-focusable type="number" min={draft.cadenceMode === 'occurrence' ? 2 : 1} step={1} value={draft.cadenceInterval} onChange={(event) => setDraft((current) => ({ ...current, cadenceInterval: event.target.value }))} className={`mt-2 ${inputClass}`} />
+          )}
+          {!draft.recordOnce && draft.cadenceMode === 'daily' && (
+            <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <input id={`edit-${rule.id}-daily-time`} aria-label="Earliest daily start time" data-focusable type="time" value={draft.dailyStartTime} onChange={(event) => setDraft((current) => ({ ...current, dailyStartTime: event.target.value }))} className={`${inputClass} [color-scheme:dark]`} />
+              <input id={`edit-${rule.id}-timezone`} aria-label="Schedule timezone" readOnly value={draft.scheduleTimezone} className={`${inputClass} opacity-70`} />
+            </div>
+          )}
+        </div>
+      </div>
+
+      <label className="mt-3 flex items-center gap-2 text-13 text-[#d1d5db]">
+        <input data-focusable type="checkbox" checked={draft.recordOnce} onChange={(event) => setDraft((current) => ({ ...current, recordOnce: event.target.checked }))} />
+        Record once, then stop matching
+      </label>
+      <p className="mt-2 text-11 text-[#f59e0b]">
+        {rule.max_recordings > 0
+          ? retentionTouched
+            ? 'Saving converts this legacy stop-after rule to rolling retention; older recordings may be deleted immediately.'
+            : `Legacy stop-after ${rule.max_recordings} remains active until you explicitly replace it.`
+          : 'Lowering retention can immediately delete older completed recordings and cannot be undone.'}
+      </p>
+      <p className="mt-1 text-11 text-[#6b7280]">Failed or cancelled attempts do not consume occurrence/hour spacing. Daily scheduling uses {draft.scheduleTimezone}.</p>
+      {error && <p role="alert" className="mt-2 text-12 text-[#f59e0b]">{error}</p>}
+      <div className="mt-3 flex gap-2">
+        <button type="submit" data-focusable disabled={submitting} className="rounded bg-[#1d4ed8] px-3 py-1.5 text-12 font-semibold text-white disabled:opacity-40">{submitting ? 'Saving…' : 'Save changes'}</button>
+        <button type="button" data-focusable onClick={onCancel} className="rounded bg-[#2a2a3e] px-3 py-1.5 text-12 font-semibold text-[#d1d5db]">Cancel edit</button>
+      </div>
+    </form>
+  );
+}
+
+function RuleCard({ rule, onToggle, onDelete, onRetentionChange, onUpdate }: {
   rule: RecordingRule;
   onToggle: () => void;
   onDelete: () => void;
   onRetentionChange: (limit: number) => void;
+  onUpdate: (updates: UpdateRecordingRuleInput) => Promise<RecordingRule | null>;
 }) {
+  const [editing, setEditing] = useState(false);
   const initialRetention = rule.retention_count > 0
     ? rule.retention_count
     : rule.max_recordings > 0 ? rule.max_recordings : 0;
@@ -158,7 +340,7 @@ function RuleCard({ rule, onToggle, onDelete, onRetentionChange }: {
   const validRetention = Number.isInteger(parsedRetention) && parsedRetention >= 0;
   const retentionUnchanged = rule.max_recordings === 0 && parsedRetention === rule.retention_count;
   return (
-    <div className="bg-surface-border rounded-[10px] p-3.5 flex flex-col gap-1.5">
+    <div className={cn('bg-surface-border rounded-[10px] p-3.5 flex flex-col gap-1.5', editing && 'lg:col-span-full')}>
       <div className="flex items-center gap-2">
         <span
           className="py-0.5 px-2 rounded text-11 font-semibold text-white uppercase tracking-wider"
@@ -171,7 +353,7 @@ function RuleCard({ rule, onToggle, onDelete, onRetentionChange }: {
       <div className="text-base font-semibold overflow-hidden text-ellipsis whitespace-nowrap">
         {rule.match_type === 'exact' ? `"${rule.match_title}"` : `*${rule.match_title}*`}
       </div>
-      <div className="flex gap-3 text-12 text-[#6b7280]">
+      <div className="flex flex-wrap gap-x-3 gap-y-1 text-12 text-[#6b7280]">
         <span>Pad: -{rule.padding_before / 60000}m / +{rule.padding_after / 60000}m</span>
         <span>{repeatPolicyLabel(rule.repeat_policy)}</span>
         {rule.airing_policy === 'once' ? (
@@ -183,10 +365,13 @@ function RuleCard({ rule, onToggle, onDelete, onRetentionChange }: {
         ) : (
           <span>Keep all</span>
         )}
+        {rule.airing_policy === 'every' && rule.cadence_mode === 'occurrence' && <span>Every {rule.cadence_interval} matches</span>}
+        {rule.airing_policy === 'every' && rule.cadence_mode === 'hours' && <span>At least {rule.cadence_interval}h apart</span>}
+        {rule.airing_policy === 'every' && rule.cadence_mode === 'daily' && <span>Daily after {minutesToRuleTime(rule.daily_start_minutes)} {rule.schedule_timezone}</span>}
       </div>
-      {rule.airing_policy === 'every' && (
+      {!editing && rule.airing_policy === 'every' && (
         <div className="mt-1">
-          <div className="flex items-end gap-2">
+          <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-end">
           <label className="min-w-0 flex-1 text-12 text-[#9ca3af]">
             Keep latest
             <input
@@ -222,12 +407,16 @@ function RuleCard({ rule, onToggle, onDelete, onRetentionChange }: {
           )}
         </div>
       )}
-      <div className="flex gap-1.5 mt-1">
+      <div className="mt-1 flex flex-wrap gap-2">
+        <button className="py-1 px-3 rounded text-12 font-semibold bg-[#1d4ed8] text-white transition-colors duration-150 hover:bg-[#2563eb]" onClick={() => setEditing((value) => !value)}>
+          {editing ? 'Close editor' : 'Edit'}
+        </button>
         <button className="py-1 px-3 rounded text-12 font-semibold bg-[#2a2a3e] text-[#d1d5db] transition-colors duration-150 hover:bg-[#3a3a5e]" onClick={onToggle}>
           {rule.enabled ? 'Disable' : 'Enable'}
         </button>
         <button className="py-1 px-3 rounded text-12 font-semibold bg-[#2a2a3e] text-[#ef4444] transition-colors duration-150 hover:bg-[#7f1d1d] hover:text-[#fca5a5]" onClick={onDelete}>Delete</button>
       </div>
+      {editing && <RuleEditForm rule={rule} onCancel={() => setEditing(false)} onSave={onUpdate} />}
     </div>
   );
 }
@@ -454,38 +643,17 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
       searchInputRef.current?.focus({ preventScroll: true });
       return;
     }
-    const matchTitle = draft.matchTitle.trim();
-    if (!matchTitle) {
-      setError('Program title is required');
-      titleInputRef.current?.focus({ preventScroll: true });
-      return;
-    }
-    const paddingBeforeMinutes = Number(draft.paddingBeforeMinutes);
-    const paddingAfterMinutes = Number(draft.paddingAfterMinutes);
-    if (!Number.isFinite(paddingBeforeMinutes) || paddingBeforeMinutes < 0
-      || !Number.isFinite(paddingAfterMinutes) || paddingAfterMinutes < 0) {
-      setError('Padding must be zero or more minutes');
-      return;
-    }
-    const parsedMaximum = draft.retentionLimit.trim() === '' ? 0 : Number(draft.retentionLimit);
-    if (!draft.recordOnce && (!Number.isInteger(parsedMaximum) || parsedMaximum < 0)) {
-      setError('Keep latest must be a whole number or blank');
+    let input;
+    try {
+      input = recordingRuleDraftToInput(draft);
+    } catch (validationError) {
+      setError(validationError instanceof Error ? validationError.message : String(validationError));
       return;
     }
 
     setSubmitting(true);
     setError('');
-    const rule = await createRule({
-      channelId: selectedChannel.id,
-      channelName: selectedChannel.name,
-      matchTitle,
-      matchType: draft.matchType,
-      paddingBefore: Math.round(paddingBeforeMinutes * 60_000),
-      paddingAfter: Math.round(paddingAfterMinutes * 60_000),
-      repeatPolicy: draft.repeatPolicy,
-      retentionLimit: draft.recordOnce ? 0 : parsedMaximum,
-      airingPolicy: draft.recordOnce ? 'once' : 'every',
-    });
+    const rule = await createRule(input);
     setSubmitting(false);
     if (!rule) {
       setError('Failed to create recording rule');
@@ -583,6 +751,55 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
             <option value="new_only">New only</option>
           </select>
           <p className="mt-1 text-12 text-[#6b7280]">{repeatPolicyDescription(draft.repeatPolicy)}</p>
+        </div>
+
+        <div>
+          <label className="mb-1 block text-12 text-[#9ca3af]" htmlFor="rule-cadence-mode">Recording frequency</label>
+          <select
+            id="rule-cadence-mode"
+            data-focusable
+            disabled={draft.recordOnce}
+            className="w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-14 text-white outline-none disabled:opacity-40 focus:border-[#3b82f6]"
+            value={draft.cadenceMode}
+            onChange={(event) => setDraft((current) => ({ ...current, cadenceMode: event.target.value as RecordingCadenceMode }))}
+          >
+            <option value="every">Every eligible airing</option>
+            <option value="occurrence">Every Nth matching airing</option>
+            <option value="hours">Minimum hours apart</option>
+            <option value="daily">Once daily at or after a time</option>
+          </select>
+          {!draft.recordOnce && (draft.cadenceMode === 'occurrence' || draft.cadenceMode === 'hours') && (
+            <label className="mt-2 block text-12 text-[#9ca3af]" htmlFor="rule-cadence-interval">
+              {draft.cadenceMode === 'occurrence' ? 'Record every Nth match' : 'Minimum hours'}
+              <input
+                id="rule-cadence-interval"
+                data-focusable
+                type="number"
+                inputMode="numeric"
+                min={draft.cadenceMode === 'occurrence' ? 2 : 1}
+                step={1}
+                value={draft.cadenceInterval}
+                onChange={(event) => setDraft((current) => ({ ...current, cadenceInterval: event.target.value }))}
+                className="mt-1 w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-14 text-white outline-none focus:border-[#3b82f6]"
+              />
+            </label>
+          )}
+          {!draft.recordOnce && draft.cadenceMode === 'daily' && (
+            <label className="mt-2 block text-12 text-[#9ca3af]" htmlFor="rule-daily-time">
+              Earliest start time ({draft.scheduleTimezone})
+              <input
+                id="rule-daily-time"
+                data-focusable
+                type="time"
+                value={draft.dailyStartTime}
+                onChange={(event) => setDraft((current) => ({ ...current, dailyStartTime: event.target.value }))}
+                className="mt-1 w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-14 text-white outline-none [color-scheme:dark] focus:border-[#3b82f6]"
+              />
+            </label>
+          )}
+          <p className="mt-1 text-12 text-[#6b7280]">
+            Failed or cancelled recordings do not consume the wait; the next eligible airing is tried.
+          </p>
         </div>
 
         <div className="grid grid-cols-2 gap-3">
@@ -826,6 +1043,7 @@ export default function Recordings() {
                   onToggle={() => updateRule(r.id, { enabled: !r.enabled })}
                   onDelete={() => deleteRule(r.id)}
                   onRetentionChange={(limit) => { void updateRule(r.id, { retentionLimit: limit, maxRecordings: 0 }); }}
+                  onUpdate={(updates) => updateRule(r.id, updates)}
                 />
               ))}
             </div>

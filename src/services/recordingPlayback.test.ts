@@ -66,10 +66,10 @@ describe('authenticated recording playback tickets', () => {
     const request = {
       apiBaseUrl: '', recordingId: 'r1', directUrl: '/direct/raw', pageOrigin: 'https://app.example.test',
     };
-    await expect(getRecordingPlaybackUrl(request)).rejects.toThrow('500');
+    await expect(getRecordingPlaybackUrl(request)).rejects.toThrow('broken');
 
     localStorage.setItem('streamvault_auth_token', JSON.stringify('secret'));
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(json({ error: 'not found' }, 404, 'Not Found'));
-    await expect(getRecordingPlaybackUrl(request)).rejects.toThrow('404');
+    await expect(getRecordingPlaybackUrl(request)).rejects.toThrow('not found');
   });
 });

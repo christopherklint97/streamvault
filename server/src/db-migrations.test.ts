@@ -17,6 +17,7 @@ describe('additive recording schema migration', () => {
   it('upgrades an existing database transactionally without rebuilding tables', () => {
     const db = oldDatabase();
     db.prepare(`INSERT INTO programs (channel_id,title,start_time,stop_time) VALUES ('live_1','SportsCenter',1,2)`).run();
+    db.prepare(`INSERT INTO recording_rules (id,channel_id,channel_name,match_title,created_at) VALUES ('rule','live_1','ESPN','SportsCenter',1)`).run();
     ensureRecordingSchema(db);
     ensureRecordingSchema(db);
 
@@ -29,8 +30,27 @@ describe('additive recording schema migration', () => {
     expect(recordingColumns.has('master_file_path')).toBe(true);
     expect(recordingColumns.has('analysis_state')).toBe(true);
     expect(recordingColumns.has('commercial_skip_override')).toBe(true);
+    expect(recordingColumns.has('program_start_time')).toBe(true);
+    expect(recordingColumns.has('program_stop_time')).toBe(true);
+    expect(recordingColumns.has('rule_revision')).toBe(true);
+    expect(recordingColumns.has('cadence_slot')).toBe(true);
     const ruleColumns = new Set((db.pragma('table_info(recording_rules)') as Array<{ name: string }>).map(row => row.name));
     expect(ruleColumns.has('retention_count')).toBe(true);
+    expect(ruleColumns.has('cadence_mode')).toBe(true);
+    expect(ruleColumns.has('cadence_interval')).toBe(true);
+    expect(ruleColumns.has('daily_start_minutes')).toBe(true);
+    expect(ruleColumns.has('schedule_timezone')).toBe(true);
+    expect(ruleColumns.has('rule_revision')).toBe(true);
+    expect(ruleColumns.has('cadence_last_success_start')).toBe(true);
+    expect(ruleColumns.has('cadence_last_success_key')).toBe(true);
+    expect(ruleColumns.has('cadence_occurrence_progress')).toBe(true);
+    expect(ruleColumns.has('cadence_cursor_start')).toBe(true);
+    expect(ruleColumns.has('cadence_cursor_key')).toBe(true);
+    expect(ruleColumns.has('cadence_retry_start')).toBe(true);
+    expect(ruleColumns.has('cadence_retry_key')).toBe(true);
+    expect(db.prepare('SELECT schedule_timezone FROM recording_rules WHERE id=?').get('rule')).toEqual({
+      schedule_timezone: 'Europe/Stockholm',
+    });
     expect(db.prepare('SELECT title FROM programs').get()).toEqual({ title: 'SportsCenter' });
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='commercial_segments'").get()).toEqual({ name: 'commercial_segments' });
     db.close();
@@ -84,6 +104,23 @@ describe('additive recording schema migration', () => {
       INSERT INTO recordings (id,channel_id,channel_name,title,status,start_time,end_time,created_at,airing_key)
       VALUES ('third','c','C','T','scheduled',1,2,3,'same')
     `).run()).toThrow(/unique/i);
+    db.close();
+  });
+
+  it('resolves pre-release cadence-slot duplicates before creating the unique index', () => {
+    const db = oldDatabase();
+    db.exec(`
+      ALTER TABLE recordings ADD COLUMN cadence_slot INTEGER;
+      INSERT INTO recordings (id,channel_id,channel_name,title,status,start_time,end_time,created_at,rule_id,cadence_slot)
+      VALUES ('first','c','C','T','recording',1,2,1,'rule',1),
+             ('second','c','C','T','scheduled',3,4,2,'rule',1);
+    `);
+
+    ensureRecordingSchema(db);
+
+    expect(db.prepare("SELECT id,cadence_slot FROM recordings ORDER BY created_at").all()).toEqual([
+      { id: 'first', cadence_slot: 1 }, { id: 'second', cadence_slot: null },
+    ]);
     db.close();
   });
 });

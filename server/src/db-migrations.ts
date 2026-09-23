@@ -29,6 +29,10 @@ const PROGRAM_COLUMNS: ColumnSpec[] = [
 ];
 
 const RECORDING_COLUMNS: ColumnSpec[] = [
+  { name: 'program_start_time', definition: 'INTEGER' },
+  { name: 'program_stop_time', definition: 'INTEGER' },
+  { name: 'rule_revision', definition: 'INTEGER' },
+  { name: 'cadence_slot', definition: 'INTEGER' },
   { name: 'airing_key', definition: 'TEXT' },
   { name: 'content_key', definition: 'TEXT' },
   { name: 'master_file_path', definition: 'TEXT' },
@@ -47,6 +51,18 @@ const RULE_COLUMNS: ColumnSpec[] = [
   { name: 'airing_policy', definition: "TEXT NOT NULL DEFAULT 'every'" },
   { name: 'repeat_policy', definition: "TEXT NOT NULL DEFAULT 'include_unknown'" },
   { name: 'retention_count', definition: 'INTEGER NOT NULL DEFAULT 0' },
+  { name: 'cadence_mode', definition: "TEXT NOT NULL DEFAULT 'every'" },
+  { name: 'cadence_interval', definition: 'INTEGER NOT NULL DEFAULT 1' },
+  { name: 'daily_start_minutes', definition: 'INTEGER NOT NULL DEFAULT 0' },
+  { name: 'schedule_timezone', definition: "TEXT NOT NULL DEFAULT 'Europe/Stockholm'" },
+  { name: 'rule_revision', definition: 'INTEGER NOT NULL DEFAULT 1' },
+  { name: 'cadence_last_success_start', definition: 'INTEGER' },
+  { name: 'cadence_last_success_key', definition: 'TEXT' },
+  { name: 'cadence_occurrence_progress', definition: 'INTEGER NOT NULL DEFAULT 0' },
+  { name: 'cadence_cursor_start', definition: 'INTEGER' },
+  { name: 'cadence_cursor_key', definition: 'TEXT' },
+  { name: 'cadence_retry_start', definition: 'INTEGER' },
+  { name: 'cadence_retry_key', definition: 'TEXT' },
 ];
 
 const COMMERCIAL_COLUMNS = [
@@ -129,6 +145,23 @@ function resolveLegacyAiringDuplicates(db: SqliteDatabase): void {
   `);
 }
 
+function resolveLegacyCadenceSlotDuplicates(db: SqliteDatabase): void {
+  db.exec(`
+    UPDATE recordings
+    SET cadence_slot = NULL
+    WHERE rule_id IS NOT NULL
+      AND cadence_slot = 1
+      AND status IN ('scheduled', 'recording', 'finalizing')
+      AND rowid NOT IN (
+        SELECT MIN(rowid) FROM recordings
+        WHERE rule_id IS NOT NULL
+          AND cadence_slot = 1
+          AND status IN ('scheduled', 'recording', 'finalizing')
+        GROUP BY rule_id
+      )
+  `);
+}
+
 /** Additive, idempotent migration for pre-release and existing StreamVault DBs. */
 export function ensureRecordingSchema(db: SqliteDatabase): void {
   db.transaction(() => {
@@ -137,12 +170,16 @@ export function ensureRecordingSchema(db: SqliteDatabase): void {
     addMissingColumns(db, 'recording_rules', RULE_COLUMNS);
     ensureCommercialSegmentsTable(db);
     resolveLegacyAiringDuplicates(db);
+    resolveLegacyCadenceSlotDuplicates(db);
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_programs_airing_key ON programs(airing_key);
       CREATE INDEX IF NOT EXISTS idx_programs_source_event ON programs(source, source_channel_id, provider_event_id);
       CREATE INDEX IF NOT EXISTS idx_recordings_airing_key ON recordings(airing_key);
       CREATE UNIQUE INDEX IF NOT EXISTS uidx_recordings_active_airing_key
         ON recordings(airing_key) WHERE airing_key IS NOT NULL AND status <> 'cancelled';
+      CREATE UNIQUE INDEX IF NOT EXISTS uidx_recordings_rule_cadence_slot
+        ON recordings(rule_id, cadence_slot)
+        WHERE rule_id IS NOT NULL AND cadence_slot = 1 AND status IN ('scheduled', 'recording', 'finalizing');
       CREATE INDEX IF NOT EXISTS idx_recordings_analysis_state ON recordings(analysis_state);
       CREATE INDEX IF NOT EXISTS idx_commercial_segments_recording ON commercial_segments(recording_id, start_seconds);
     `);

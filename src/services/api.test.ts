@@ -56,6 +56,15 @@ describe('apiFetch', () => {
       );
   });
 
+  it('surfaces an actionable JSON validation error from the backend', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      error: 'cadenceInterval must be at least 2 for occurrence mode',
+    }), { status: 400, statusText: 'Bad Request' }));
+
+    await expect(apiFetch('', '/api/recording-rules/r1', { method: 'PUT' }))
+      .rejects.toThrow('cadenceInterval must be at least 2 for occurrence mode');
+  });
+
   it('probes an untrusted backend candidate without disclosing the stored API token', async () => {
     localStorage.setItem('streamvault_auth_token', JSON.stringify('old-backend-secret'));
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ ok: true }), {

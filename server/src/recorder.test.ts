@@ -44,6 +44,34 @@ vi.mock('./db.js', () => ({
     state.records.set(id, { ...current, ...updates });
     return true;
   },
+  completeRecordingAndAdvanceCadence: (
+    id: string, updates: Partial<DBRecording>, ruleId: string | null, revision: number | null,
+    programStart: number | null, airingKey: string | null,
+  ) => {
+    const current = state.records.get(id);
+    if (!current || current.status !== 'finalizing') return false;
+    state.records.set(id, { ...current, ...updates });
+    const rule = ruleId ? state.rules.get(ruleId) : undefined;
+    if (rule && revision === rule.rule_revision && programStart !== null) {
+      state.rules.set(rule.id, {
+        ...rule,
+        cadence_last_success_start: programStart,
+        cadence_last_success_key: airingKey,
+        cadence_occurrence_progress: 0,
+        cadence_cursor_start: programStart,
+        cadence_cursor_key: airingKey,
+        cadence_retry_start: null,
+        cadence_retry_key: null,
+      });
+    }
+    return true;
+  },
+  markRecordingRuleCadenceRetry: (id: string | null, revision: number | null, start: number | null, key: string | null) => {
+    const rule = id ? state.rules.get(id) : undefined;
+    if (!rule || rule.rule_revision !== revision || start === null) return false;
+    state.rules.set(rule.id, { ...rule, cadence_retry_start: start, cadence_retry_key: key });
+    return true;
+  },
 }));
 
 vi.mock('./stream-utils.js', () => ({
@@ -101,7 +129,11 @@ function rule(overrides: Partial<DBRecordingRule> = {}): DBRecordingRule {
   return {
     id: 'rule-1', channel_id: 'c1', channel_name: 'Channel', match_title: 'Show',
     match_type: 'exact', enabled: 1, padding_before: 0, padding_after: 0,
-    max_recordings: 0, retention_count: 1, airing_policy: 'every', repeat_policy: 'include_unknown', created_at: 1,
+    max_recordings: 0, retention_count: 1, airing_policy: 'every', repeat_policy: 'include_unknown',
+    cadence_mode: 'every', cadence_interval: 1, daily_start_minutes: 0, schedule_timezone: 'UTC',
+    rule_revision: 1, cadence_last_success_start: null, cadence_last_success_key: null, created_at: 1,
+    cadence_occurrence_progress: 0, cadence_cursor_start: null, cadence_cursor_key: null,
+    cadence_retry_start: null, cadence_retry_key: null,
     ...overrides,
   };
 }
@@ -157,12 +189,16 @@ describe('recorder lifecycle integration', () => {
     for (const name of ['r1.segment-000000.ts.part', 'r1.ts.part', 'r1.mp4.part', 'r1.edl']) {
       fs.writeFileSync(path.join(nested, name), name);
     }
-    state.records.set('r1', recording());
+    state.rules.set('rule-1', rule());
+    state.records.set('r1', recording({
+      rule_id: 'rule-1', rule_revision: 1, program_start_time: 2_000, airing_key: 'a1',
+    }));
     const recorder = await import('./recorder.js');
 
     await recorder.cancelRecording('r1');
 
     expect(state.records.get('r1')?.status).toBe('cancelled');
+    expect(state.rules.get('rule-1')).toMatchObject({ cadence_retry_start: 2_000, cadence_retry_key: 'a1' });
     const remainingFiles = fs.readdirSync(recordingsDir, { recursive: true })
       .map(entry => path.join(recordingsDir, String(entry)))
       .filter(entry => fs.statSync(entry).isFile());
@@ -205,7 +241,16 @@ describe('recorder lifecycle integration', () => {
   });
 
   it('retries a clean early EOF into a new segment and finalizes every attempt', async () => {
-    state.records.set('r1', recording());
+    state.rules.set('rule-1', rule({
+      cadence_occurrence_progress: 3,
+      cadence_cursor_start: 1_500,
+      cadence_cursor_key: 'older',
+      cadence_retry_start: 1_800,
+      cadence_retry_key: 'failed',
+    }));
+    state.records.set('r1', recording({
+      rule_id: 'rule-1', rule_revision: 1, program_start_time: 2_000,
+    }));
     const recorder = await import('./recorder.js');
 
     await recorder.startRecording('r1');
@@ -222,7 +267,29 @@ describe('recorder lifecycle integration', () => {
     await stopped;
 
     expect(state.records.get('r1')).toMatchObject({ status: 'completed', duration: 30 });
+    expect(state.rules.get('rule-1')).toMatchObject({
+      cadence_last_success_start: 2_000,
+      cadence_occurrence_progress: 0,
+      cadence_cursor_start: 2_000,
+      cadence_cursor_key: null,
+      cadence_retry_start: null,
+      cadence_retry_key: null,
+    });
     expect(state.analysisNotifications).toBe(1);
+  });
+
+  it('does not let an old rule revision advance the edited rule cadence', async () => {
+    state.rules.set('rule-1', rule({ rule_revision: 2, cadence_last_success_start: 500 }));
+    state.records.set('r1', recording({
+      rule_id: 'rule-1', rule_revision: 1, program_start_time: 2_000,
+    }));
+    const recorder = await import('./recorder.js');
+
+    await recorder.startRecording('r1');
+    await recorder.stopRecording('r1');
+
+    expect(state.records.get('r1')?.status).toBe('completed');
+    expect(state.rules.get('rule-1')?.cadence_last_success_start).toBe(500);
   });
 
   it('aborts finalization before deletion so cancelled work cannot republish or leave artifacts', async () => {
