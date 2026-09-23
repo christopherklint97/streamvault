@@ -168,6 +168,10 @@ db.exec(`
     error TEXT,
     rule_id TEXT,
     program_title TEXT,
+    program_start_time INTEGER,
+    program_stop_time INTEGER,
+    rule_revision INTEGER,
+    cadence_slot INTEGER,
     created_at INTEGER NOT NULL
   );
 
@@ -184,6 +188,18 @@ db.exec(`
     retention_count INTEGER NOT NULL DEFAULT 0,
     airing_policy TEXT NOT NULL DEFAULT 'every',
     repeat_policy TEXT NOT NULL DEFAULT 'include_unknown',
+    cadence_mode TEXT NOT NULL DEFAULT 'every',
+    cadence_interval INTEGER NOT NULL DEFAULT 1,
+    daily_start_minutes INTEGER NOT NULL DEFAULT 0,
+    schedule_timezone TEXT NOT NULL DEFAULT 'Europe/Stockholm',
+    rule_revision INTEGER NOT NULL DEFAULT 1,
+    cadence_last_success_start INTEGER,
+    cadence_last_success_key TEXT,
+    cadence_occurrence_progress INTEGER NOT NULL DEFAULT 0,
+    cadence_cursor_start INTEGER,
+    cadence_cursor_key TEXT,
+    cadence_retry_start INTEGER,
+    cadence_retry_key TEXT,
     created_at INTEGER NOT NULL
   );
 
@@ -624,6 +640,10 @@ export interface DBRecording {
   error: string | null;
   rule_id: string | null;
   program_title: string | null;
+  program_start_time?: number | null;
+  program_stop_time?: number | null;
+  rule_revision?: number | null;
+  cadence_slot?: number | null;
   created_at: number;
   airing_key?: string | null;
   content_key?: string | null;
@@ -645,14 +665,16 @@ export function insertRecording(rec: DBRecording): void {
   db.prepare(`
     INSERT INTO recordings (
       id, channel_id, channel_name, title, status, start_time, end_time, actual_start, actual_end,
-      file_path, file_size, duration, error, rule_id, program_title, created_at, airing_key, content_key,
+      file_path, file_size, duration, error, rule_id, program_title, program_start_time, program_stop_time,
+      rule_revision, cadence_slot, created_at, airing_key, content_key,
       master_file_path, derivative_file_path, derivative_error, analysis_state, analysis_error,
       analysis_requested_at, analysis_started_at, analysis_completed_at, analysis_profile, commercial_skip_override
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     rec.id, rec.channel_id, rec.channel_name, rec.title, rec.status, rec.start_time, rec.end_time,
     rec.actual_start, rec.actual_end, rec.file_path, rec.file_size, rec.duration, rec.error, rec.rule_id,
-    rec.program_title, rec.created_at, rec.airing_key ?? null, rec.content_key ?? null,
+    rec.program_title, rec.program_start_time ?? null, rec.program_stop_time ?? null, rec.rule_revision ?? null,
+    rec.cadence_slot ?? null, rec.created_at, rec.airing_key ?? null, rec.content_key ?? null,
     rec.master_file_path ?? null, rec.derivative_file_path ?? null, rec.derivative_error ?? null,
     rec.analysis_state ?? 'not_requested', rec.analysis_error ?? null, rec.analysis_requested_at ?? null,
     rec.analysis_started_at ?? null, rec.analysis_completed_at ?? null, rec.analysis_profile ?? null,
@@ -702,6 +724,32 @@ export function updateRecordingIfStatus(
   const placeholders = expectedStatuses.map(() => '?').join(',');
   return db.prepare(`UPDATE recordings SET ${fields.map(field => `${field}=?`).join(',')} WHERE id=? AND status IN (${placeholders})`)
     .run(...values, id, ...expectedStatuses).changes === 1;
+}
+
+const completeRecordingTransaction = db.transaction((
+  id: string,
+  updates: Partial<Omit<DBRecording, 'id'>>,
+  ruleId: string | null,
+  ruleRevision: number | null,
+  programStartTime: number | null,
+  airingKey: string | null,
+): boolean => {
+  const completed = updateRecordingIfStatus(id, ['finalizing'], updates);
+  if (completed && ruleId && ruleRevision !== null && programStartTime !== null) {
+    advanceRecordingRuleCadence(ruleId, ruleRevision, programStartTime, airingKey);
+  }
+  return completed;
+});
+
+export function completeRecordingAndAdvanceCadence(
+  id: string,
+  updates: Partial<Omit<DBRecording, 'id'>>,
+  ruleId: string | null,
+  ruleRevision: number | null,
+  programStartTime: number | null,
+  airingKey: string | null,
+): boolean {
+  return completeRecordingTransaction(id, updates, ruleId, ruleRevision, programStartTime, airingKey);
 }
 
 export function deleteRecording(id: string): void {
@@ -823,6 +871,18 @@ export interface DBRecordingRule {
   retention_count: number;
   airing_policy: 'every' | 'once';
   repeat_policy: 'all' | 'include_unknown' | 'new_only';
+  cadence_mode: 'every' | 'occurrence' | 'hours' | 'daily';
+  cadence_interval: number;
+  daily_start_minutes: number;
+  schedule_timezone: string;
+  rule_revision: number;
+  cadence_last_success_start: number | null;
+  cadence_last_success_key: string | null;
+  cadence_occurrence_progress: number;
+  cadence_cursor_start: number | null;
+  cadence_cursor_key: string | null;
+  cadence_retry_start: number | null;
+  cadence_retry_key: string | null;
   created_at: number;
 }
 
@@ -830,12 +890,18 @@ export function insertRecordingRule(rule: DBRecordingRule): void {
   db.prepare(`
     INSERT INTO recording_rules (
       id, channel_id, channel_name, match_title, match_type, enabled,
-      padding_before, padding_after, max_recordings, retention_count, airing_policy, repeat_policy, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      padding_before, padding_after, max_recordings, retention_count, airing_policy, repeat_policy,
+      cadence_mode, cadence_interval, daily_start_minutes, schedule_timezone, rule_revision,
+      cadence_last_success_start, cadence_last_success_key, cadence_occurrence_progress, cadence_cursor_start, cadence_cursor_key,
+      cadence_retry_start, cadence_retry_key, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     rule.id, rule.channel_id, rule.channel_name, rule.match_title, rule.match_type, rule.enabled,
     rule.padding_before, rule.padding_after, rule.max_recordings, rule.retention_count,
-    rule.airing_policy, rule.repeat_policy, rule.created_at,
+    rule.airing_policy, rule.repeat_policy, rule.cadence_mode, rule.cadence_interval,
+    rule.daily_start_minutes, rule.schedule_timezone, rule.rule_revision,
+    rule.cadence_last_success_start, rule.cadence_last_success_key, rule.cadence_occurrence_progress, rule.cadence_cursor_start,
+    rule.cadence_cursor_key, rule.cadence_retry_start, rule.cadence_retry_key, rule.created_at,
   );
 }
 
@@ -848,7 +914,83 @@ export function updateRecordingRule(id: string, updates: Partial<Omit<DBRecordin
   }
   if (fields.length === 0) return;
   values.push(id);
-  db.prepare(`UPDATE recording_rules SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  db.transaction(() => {
+    db.prepare(`UPDATE recording_rules SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    if (updates.padding_before !== undefined || updates.padding_after !== undefined) {
+      db.prepare(`
+        UPDATE recordings
+        SET start_time = program_start_time - (SELECT padding_before FROM recording_rules WHERE id = ?),
+            end_time = program_stop_time + (SELECT padding_after FROM recording_rules WHERE id = ?)
+        WHERE rule_id = ?
+          AND status = 'scheduled'
+          AND program_start_time IS NOT NULL
+          AND program_stop_time IS NOT NULL
+      `).run(id, id, id);
+    }
+  })();
+}
+
+export function updateRecordingRuleCadenceProjection(
+  ruleId: string,
+  revision: number,
+  updates: Pick<DBRecordingRule, 'cadence_occurrence_progress' | 'cadence_cursor_start' | 'cadence_cursor_key'>,
+): boolean {
+  return db.prepare(`
+    UPDATE recording_rules
+    SET cadence_occurrence_progress=?, cadence_cursor_start=?, cadence_cursor_key=?
+    WHERE id=? AND rule_revision=?
+  `).run(
+    updates.cadence_occurrence_progress,
+    updates.cadence_cursor_start,
+    updates.cadence_cursor_key,
+    ruleId,
+    revision,
+  ).changes === 1;
+}
+
+export function markRecordingRuleCadenceRetry(
+  ruleId: string | null,
+  revision: number | null,
+  programStartTime: number | null,
+  airingKey: string | null,
+): boolean {
+  if (!ruleId || revision === null || programStartTime === null) return false;
+  return db.prepare(`
+    UPDATE recording_rules
+    SET cadence_retry_start=?, cadence_retry_key=?
+    WHERE id=? AND rule_revision=?
+      AND (cadence_retry_start IS NULL OR cadence_retry_start < ?
+        OR (cadence_retry_start = ? AND COALESCE(cadence_retry_key, '') < COALESCE(?, '')))
+  `).run(programStartTime, airingKey, ruleId, revision, programStartTime, programStartTime, airingKey).changes === 1;
+}
+
+export function advanceRecordingRuleCadence(
+  ruleId: string,
+  revision: number,
+  programStartTime: number,
+  airingKey: string | null,
+): boolean {
+  const result = db.prepare(`
+    UPDATE recording_rules
+    SET cadence_last_success_start = @start,
+        cadence_last_success_key = @key,
+        cadence_occurrence_progress = 0,
+        cadence_cursor_start = @start,
+        cadence_cursor_key = @key,
+        cadence_retry_start = CASE
+          WHEN cadence_retry_start IS NULL OR cadence_retry_start < @start
+            OR (cadence_retry_start = @start AND COALESCE(cadence_retry_key, '') <= COALESCE(@key, ''))
+          THEN NULL ELSE cadence_retry_start END,
+        cadence_retry_key = CASE
+          WHEN cadence_retry_start IS NULL OR cadence_retry_start < @start
+            OR (cadence_retry_start = @start AND COALESCE(cadence_retry_key, '') <= COALESCE(@key, ''))
+          THEN NULL ELSE cadence_retry_key END
+    WHERE id = @ruleId AND rule_revision = @revision
+      AND (cadence_last_success_start IS NULL OR cadence_last_success_start < @start
+        OR (cadence_last_success_start = @start
+          AND COALESCE(cadence_last_success_key, '') < COALESCE(@key, '')))
+  `).run({ start: programStartTime, key: airingKey, ruleId, revision });
+  return result.changes === 1;
 }
 
 export function deleteRecordingRule(id: string): void {

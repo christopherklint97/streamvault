@@ -2,8 +2,10 @@ import {
   getRecordingsByStatus, getUpcomingRecordings, getEnabledRecordingRules,
   getProgramsByChannel, insertRecordingForAiring, getRecordings,
   deleteRecording, getConfig, getRecordingsByRuleId, getRecordingByAiringKey,
-  getRecordedContentKeysByRuleId, updateRecording, saveProgramsForChannels,
+  getRecordingRule, updateRecording, saveProgramsForChannels,
+  advanceRecordingRuleCadence, updateRecordingRuleCadenceProjection,
 } from './db.js';
+import type { DBProgram, DBRecordingRule } from './db.js';
 import {
   startRecording, stopRecording, getActiveCount, getRecordingsDiskUsage,
   deleteRecordingFile, enforceAllRuleRetentions,
@@ -11,7 +13,9 @@ import {
 import { logger } from './logger.js';
 import { randomUUID } from 'node:crypto';
 import { buildAiringKey } from './epg-identity.js';
-import { matchProgramTitle, shouldIncludeRepeat, shouldSuppressContentDuplicate } from './schedule-reconciliation.js';
+import {
+  isAfterCadenceCursor, matchProgramTitle, projectNextCadenceAiring, shouldIncludeRepeat, shouldSuppressContentDuplicate,
+} from './schedule-reconciliation.js';
 import { fetchXtreamShortEpg, type XtreamConfig } from './xtream.js';
 import { refreshRuleChannelPrograms } from './rule-epg-refresh.js';
 
@@ -68,10 +72,18 @@ async function tick(): Promise<void> {
     }
   }));
 
-  // 2. Start due jobs only after expired captures have released their slots.
+  // 2. Reconcile due rule-owned rows before any obsolete job can start.
+  reconcileDueRuleSchedules(now);
+
+  // 3. Start due jobs only after expired captures have released their slots.
   const scheduled = getRecordingsByStatus('scheduled');
   for (const rec of scheduled) {
     if (rec.start_time <= now) {
+      if (rec.rule_id) {
+        const currentRule = getRecordingRule(rec.rule_id);
+        if (!currentRule || currentRule.enabled !== 1 ||
+            (rec.rule_revision ?? 1) !== currentRule.rule_revision) continue;
+      }
       logger.info(`Scheduler: starting recording ${rec.id} "${rec.title}"`);
       startRecording(rec.id).catch(err => {
         logger.error(`Scheduler: failed to start recording ${rec.id}: ${err}`);
@@ -79,13 +91,13 @@ async function tick(): Promise<void> {
     }
   }
 
-  // 3. Periodic rule matching (every hour)
+  // 4. Periodic rule matching (every hour)
   if (now - lastRuleCheck >= RULE_CHECK_INTERVAL) {
     lastRuleCheck = now;
     refreshRuleChannelsAndMatch();
   }
 
-  // 4. Periodic cleanup (every hour)
+  // 5. Periodic cleanup (every hour)
   if (now - lastCleanup >= CLEANUP_INTERVAL && !cleanupInFlight) {
     lastCleanup = now;
     cleanupInFlight = runCleanup().catch(error => {
@@ -128,93 +140,343 @@ function refreshRuleChannelsAndMatch(): void {
 /** Match recording rules against EPG data and create scheduled recordings */
 export function matchRules(): void {
   const rules = getEnabledRecordingRules();
-  if (rules.length === 0) return;
+  for (const rule of rules) reconcileRule(rule, false);
+}
 
-  const now = Date.now();
+interface RuleCandidate {
+  program: DBProgram;
+  airingKey: string;
+  startTime: number;
+  recordingStart: number;
+  recordingEnd: number;
+}
 
-  for (const rule of rules) {
-    // Reconcile every future airing currently cached for the channel; provider
-    // horizons vary and must not be truncated to an arbitrary local window.
-    const programs = getProgramsByChannel(rule.channel_id, now);
-    const recordedContentKeys = getRecordedContentKeysByRuleId(rule.id);
-    let hasAcceptedOnceRecording = rule.airing_policy === 'once' && getRecordingsByRuleId(rule.id)
-      .some(recording => !['cancelled', 'failed'].includes(recording.status));
+function historyMatchesRule(recording: ReturnType<typeof getRecordingsByRuleId>[number], rule: DBRecordingRule): boolean {
+  return recording.channel_id === rule.channel_id &&
+    matchProgramTitle(recording.program_title ?? recording.title, rule.match_title, rule.match_type);
+}
 
-    for (const program of programs) {
-      if (!matchProgramTitle(program.title, rule.match_title, rule.match_type)) continue;
-
-      const startTime = program.start_time - rule.padding_before;
-      const endTime = program.stop_time + rule.padding_after;
-      const airingKey = program.airing_key ?? buildAiringKey(
-        program.source ?? 'legacy',
-        program.channel_id,
-        program.provider_event_id,
-        program.start_time,
-        program.stop_time,
-      );
-      const existingAiring = getRecordingByAiringKey(airingKey);
-      if (existingAiring) {
-        if (existingAiring.status === 'scheduled' &&
-            (existingAiring.start_time !== startTime || existingAiring.end_time !== endTime)) {
-          updateRecording(existingAiring.id, {
-            start_time: startTime,
-            end_time: endTime,
-            title: program.title,
-            program_title: program.title,
-            content_key: program.content_key ?? null,
-          });
-          logger.info(`Rule "${rule.match_title}": moved pending recording ${existingAiring.id} to ${new Date(startTime).toISOString()}`);
-        }
-        continue;
-      }
-
-      if (!shouldIncludeRepeat(rule.repeat_policy, program.is_repeat, program.is_new)) continue;
-      if (shouldSuppressContentDuplicate(rule.repeat_policy, program.content_key, recordedContentKeys)) continue;
-      if (hasAcceptedOnceRecording) continue;
-
-      // Legacy/id-less guide entries still get a narrow time-based duplicate guard.
-      const existing = getUpcomingRecordings(startTime - 60_000, endTime + 60_000);
-      const isDuplicate = existing.some(r =>
-        r.channel_id === rule.channel_id &&
-        Math.abs(r.start_time - startTime) < 120_000
-      );
-      if (isDuplicate) continue;
-
-      // Check max_recordings limit
-      if (rule.max_recordings > 0) {
-        const ruleRecordings = getRecordingsByRuleId(rule.id);
-        const nonCancelled = ruleRecordings.filter(r => r.status !== 'cancelled');
-        if (nonCancelled.length >= rule.max_recordings) continue;
-      }
-
-      // Create scheduled recording
-      const id = randomUUID();
-      const inserted = insertRecordingForAiring({
-        id,
-        channel_id: rule.channel_id,
-        channel_name: rule.channel_name,
-        title: program.title,
-        status: 'scheduled',
-        start_time: startTime,
-        end_time: endTime,
-        actual_start: null,
-        actual_end: null,
-        file_path: null,
-        file_size: 0,
-        duration: 0,
-        error: null,
-        rule_id: rule.id,
-        program_title: program.title,
-        airing_key: airingKey,
-        content_key: program.content_key ?? null,
-        created_at: Date.now(),
-      });
-      if (inserted.id !== id) continue;
-      if (rule.airing_policy === 'once') hasAcceptedOnceRecording = true;
-      if (program.content_key) recordedContentKeys.add(program.content_key);
-      logger.info(`Rule "${rule.match_title}": scheduled recording for "${program.title}" at ${new Date(startTime).toISOString()}`);
+function reconcileEveryEligibleRule(
+  rule: DBRecordingRule,
+  candidates: RuleCandidate[],
+  recordings: ReturnType<typeof getRecordingsByRuleId>,
+  scheduled: ReturnType<typeof getRecordingsByRuleId>,
+  knownProgramKeys: ReadonlySet<string>,
+  cancelOrphans: boolean,
+  now: number,
+  retryStart: number | null,
+  retryKey: string | null,
+): void {
+  const candidateKeys = new Set(candidates.map(candidate => candidate.airingKey));
+  const retainedScheduled = scheduled.filter(recording =>
+    Boolean(recording.airing_key && candidateKeys.has(recording.airing_key)));
+  let used = recordings.filter(recording =>
+    recording.status !== 'cancelled' && recording.status !== 'scheduled').length + retainedScheduled.length;
+  const desired: RuleCandidate[] = [];
+  for (const candidate of candidates) {
+    const owned = recordings.some(recording =>
+      recording.airing_key === candidate.airingKey && recording.status !== 'cancelled',
+    );
+    if (!owned && retryStart !== null && !isAfterCadenceCursor(candidate, retryStart, retryKey)) continue;
+    if (!owned && rule.max_recordings > 0 && used >= rule.max_recordings) continue;
+    desired.push(candidate);
+    if (!owned) used += 1;
+  }
+  const desiredKeys = new Set(desired.map(candidate => candidate.airingKey));
+  if (retryStart !== null) {
+    for (const pending of scheduled) {
+      if (!pending.airing_key) continue;
+      const pendingAiring = {
+        airingKey: pending.airing_key,
+        startTime: pending.program_start_time ?? pending.start_time + rule.padding_before,
+      };
+      if (!isAfterCadenceCursor(pendingAiring, retryStart, retryKey)) desiredKeys.add(pending.airing_key);
     }
   }
+  for (const pending of scheduled) {
+    const knownObsolete = pending.channel_id !== rule.channel_id ||
+      Boolean(pending.airing_key && knownProgramKeys.has(pending.airing_key));
+    if (!desiredKeys.has(pending.airing_key ?? '') && (cancelOrphans || knownObsolete)) {
+      updateRecording(pending.id, { status: 'cancelled', actual_end: now });
+    }
+  }
+  for (const candidate of desired) {
+    const existingAiring = getRecordingByAiringKey(candidate.airingKey);
+    if (existingAiring) {
+      if (existingAiring.rule_id === rule.id && existingAiring.status === 'scheduled') {
+        updateRecording(existingAiring.id, {
+          start_time: candidate.recordingStart,
+          end_time: candidate.recordingEnd,
+          title: candidate.program.title,
+          program_title: candidate.program.title,
+          program_start_time: candidate.program.start_time,
+          program_stop_time: candidate.program.stop_time,
+          rule_revision: rule.rule_revision,
+          cadence_slot: null,
+          content_key: candidate.program.content_key ?? null,
+        });
+      }
+      continue;
+    }
+    const existing = getUpcomingRecordings(candidate.recordingStart - 60_000, candidate.recordingEnd + 60_000);
+    if (existing.some(recording =>
+      recording.channel_id === rule.channel_id && Math.abs(recording.start_time - candidate.recordingStart) < 120_000
+    )) continue;
+    const id = randomUUID();
+    const inserted = insertRecordingForAiring({
+      id, channel_id: rule.channel_id, channel_name: rule.channel_name,
+      title: candidate.program.title, status: 'scheduled',
+      start_time: candidate.recordingStart, end_time: candidate.recordingEnd,
+      actual_start: null, actual_end: null, file_path: null, file_size: 0, duration: 0, error: null,
+      rule_id: rule.id, rule_revision: rule.rule_revision, cadence_slot: null,
+      program_title: candidate.program.title, program_start_time: candidate.program.start_time,
+      program_stop_time: candidate.program.stop_time, airing_key: candidate.airingKey,
+      content_key: candidate.program.content_key ?? null, created_at: now,
+    });
+    if (inserted.id === id) {
+      logger.info(`Rule "${rule.match_title}": scheduled recording for "${candidate.program.title}" at ${new Date(candidate.recordingStart).toISOString()}`);
+    }
+  }
+}
+
+function cancelPendingRecording(recording: ReturnType<typeof getRecordingsByRuleId>[number], now: number): void {
+  if (recording.status !== 'scheduled') return;
+  updateRecording(recording.id, { status: 'cancelled', actual_end: now });
+}
+
+function persistOccurrenceProjection(
+  rule: DBRecordingRule,
+  projection: ReturnType<typeof projectNextCadenceAiring<RuleCandidate>>,
+): void {
+  if (rule.cadence_mode !== 'occurrence') return;
+  updateRecordingRuleCadenceProjection(rule.id, rule.rule_revision, {
+    cadence_occurrence_progress: projection.occurrenceProgress,
+    cadence_cursor_start: projection.cursorStart,
+    cadence_cursor_key: projection.cursorKey,
+  });
+}
+
+function reconcileRule(rule: DBRecordingRule, cancelOrphans: boolean): void {
+  const now = Date.now();
+  const programs = getProgramsByChannel(rule.channel_id, now);
+  const knownProgramKeys = new Set<string>();
+  const recordings = getRecordingsByRuleId(rule.id);
+  const scheduled = recordings.filter(recording => recording.status === 'scheduled');
+  const history = recordings.filter(recording =>
+    recording.status !== 'scheduled' && historyMatchesRule(recording, rule) &&
+    (recording.rule_revision ?? 1) === rule.rule_revision,
+  );
+  const active = recordings.filter(recording => ['recording', 'finalizing'].includes(recording.status));
+  const acceptedContentKeys = new Set(recordings
+    .filter(recording => recording.status === 'completed' && historyMatchesRule(recording, rule) && recording.content_key)
+    .map(recording => recording.content_key!));
+  const candidateContentKeys = new Set<string>();
+  const candidates: RuleCandidate[] = [];
+
+  for (const program of programs) {
+    const airingKey = program.airing_key ?? buildAiringKey(
+      program.source ?? 'legacy', program.channel_id, program.provider_event_id, program.start_time, program.stop_time,
+    );
+    knownProgramKeys.add(airingKey);
+    if (!matchProgramTitle(program.title, rule.match_title, rule.match_type)) continue;
+    if (!shouldIncludeRepeat(rule.repeat_policy, program.is_repeat, program.is_new)) continue;
+    if (shouldSuppressContentDuplicate(rule.repeat_policy, program.content_key, acceptedContentKeys)) continue;
+    if (shouldSuppressContentDuplicate(rule.repeat_policy, program.content_key, candidateContentKeys)) continue;
+    if (program.content_key && rule.repeat_policy !== 'all') candidateContentKeys.add(program.content_key);
+    candidates.push({
+      program,
+      airingKey,
+      startTime: program.start_time,
+      recordingStart: program.start_time - rule.padding_before,
+      recordingEnd: program.stop_time + rule.padding_after,
+    });
+  }
+
+  if (rule.airing_policy === 'every' && rule.cadence_mode === 'every') {
+    reconcileEveryEligibleRule(
+      rule, candidates, recordings, scheduled, knownProgramKeys, cancelOrphans, now,
+      rule.cadence_retry_start, rule.cadence_retry_key,
+    );
+    return;
+  }
+
+  // An active writer/finalizer is the rule's sole outstanding attempt.
+  if (active.length > 0) {
+    for (const pending of scheduled) cancelPendingRecording(pending, now);
+    return;
+  }
+
+  let lastSuccessStart = rule.cadence_last_success_start;
+  if (lastSuccessStart === null) {
+    const latestCompleted = history
+      .filter(recording => recording.status === 'completed')
+      .sort((left, right) => {
+        const leftStart = left.program_start_time ?? left.start_time + rule.padding_before;
+        const rightStart = right.program_start_time ?? right.start_time + rule.padding_before;
+        return rightStart - leftStart || (right.airing_key ?? '').localeCompare(left.airing_key ?? '');
+      })[0];
+    if (latestCompleted) {
+      lastSuccessStart = latestCompleted.program_start_time ?? latestCompleted.start_time + rule.padding_before;
+      advanceRecordingRuleCadence(rule.id, rule.rule_revision, lastSuccessStart, latestCompleted.airing_key ?? null);
+    }
+  }
+
+  const currentScheduled = scheduled.filter(recording => (recording.rule_revision ?? 1) === rule.rule_revision);
+  const hasRejectedSinceSuccess = history.some(recording =>
+    ['failed', 'cancelled'].includes(recording.status) &&
+    (lastSuccessStart === null ||
+      (recording.program_start_time ?? recording.start_time + rule.padding_before) > lastSuccessStart));
+
+  // Preserve a valid current-revision reservation instead of re-projecting after
+  // already-counted guide rows have fallen out of the cache.
+  if (currentScheduled.length === 1 && (rule.airing_policy !== 'once' || lastSuccessStart === null) &&
+      rule.cadence_retry_start === null && !hasRejectedSinceSuccess) {
+    const pending = currentScheduled[0];
+    const candidate = candidates.find(item => item.airingKey === pending.airing_key);
+    if (candidate) {
+      if (pending.start_time !== candidate.recordingStart || pending.end_time !== candidate.recordingEnd ||
+          pending.title !== candidate.program.title || pending.cadence_slot !== 1) {
+        updateRecording(pending.id, {
+          start_time: candidate.recordingStart,
+          end_time: candidate.recordingEnd,
+          title: candidate.program.title,
+          program_title: candidate.program.title,
+          program_start_time: candidate.program.start_time,
+          program_stop_time: candidate.program.stop_time,
+          rule_revision: rule.rule_revision,
+          cadence_slot: 1,
+          content_key: candidate.program.content_key ?? null,
+        });
+      }
+      for (const obsolete of scheduled.filter(item => item.id !== pending.id)) cancelPendingRecording(obsolete, now);
+      return;
+    }
+    if (!cancelOrphans && (!pending.airing_key || !knownProgramKeys.has(pending.airing_key))) return;
+  }
+
+  const cadenceHistory = history
+    .filter(recording => recording.airing_key)
+    .map(recording => ({
+      airingKey: recording.airing_key!,
+      startTime: recording.program_start_time ?? recording.start_time + rule.padding_before,
+      status: recording.status,
+    }));
+  const projection = projectNextCadenceAiring(candidates, cadenceHistory, {
+    mode: rule.cadence_mode,
+    interval: rule.cadence_interval,
+    dailyStartMinutes: rule.daily_start_minutes,
+    lastSuccessStart,
+    timeZone: rule.schedule_timezone,
+    occurrenceProgress: rule.cadence_occurrence_progress,
+    cursorStart: rule.cadence_cursor_start,
+    cursorKey: rule.cadence_cursor_key,
+    retryAfterStart: rule.cadence_retry_start,
+    retryAfterKey: rule.cadence_retry_key,
+  });
+  let desired = rule.airing_policy === 'once'
+    ? (lastSuccessStart !== null ? undefined : projection.airing)
+    : projection.airing;
+
+  if (desired && rule.max_recordings > 0) {
+    const used = recordings.filter(recording => recording.status !== 'cancelled' && recording.status !== 'scheduled').length;
+    if (used >= rule.max_recordings) desired = undefined;
+  }
+  const desiredKey = desired?.airingKey ?? null;
+  for (const pending of scheduled) {
+    if (pending.airing_key !== desiredKey) {
+      cancelPendingRecording(pending, now);
+      logger.info(`Rule "${rule.match_title}": cancelled obsolete pending recording ${pending.id}`);
+    }
+  }
+  if (!desired) {
+    persistOccurrenceProjection(rule, projection);
+    return;
+  }
+
+  const existingAiring = getRecordingByAiringKey(desired.airingKey);
+  if (existingAiring) {
+    if (existingAiring.status === 'scheduled' && existingAiring.rule_id === rule.id) {
+      updateRecording(existingAiring.id, {
+        start_time: desired.recordingStart,
+        end_time: desired.recordingEnd,
+        title: desired.program.title,
+        program_title: desired.program.title,
+        program_start_time: desired.program.start_time,
+        program_stop_time: desired.program.stop_time,
+        rule_revision: rule.rule_revision,
+        cadence_slot: 1,
+        content_key: desired.program.content_key ?? null,
+      });
+      persistOccurrenceProjection(rule, projection);
+    }
+    return;
+  }
+
+  const existing = getUpcomingRecordings(desired.recordingStart - 60_000, desired.recordingEnd + 60_000);
+  const isDuplicate = existing.some(recording =>
+    recording.channel_id === rule.channel_id && Math.abs(recording.start_time - desired.recordingStart) < 120_000
+  );
+  if (isDuplicate) return;
+
+  const id = randomUUID();
+  const inserted = insertRecordingForAiring({
+    id,
+    channel_id: rule.channel_id,
+    channel_name: rule.channel_name,
+    title: desired.program.title,
+    status: 'scheduled',
+    start_time: desired.recordingStart,
+    end_time: desired.recordingEnd,
+    actual_start: null,
+    actual_end: null,
+    file_path: null,
+    file_size: 0,
+    duration: 0,
+    error: null,
+    rule_id: rule.id,
+    rule_revision: rule.rule_revision,
+    cadence_slot: 1,
+    program_title: desired.program.title,
+    program_start_time: desired.program.start_time,
+    program_stop_time: desired.program.stop_time,
+    airing_key: desired.airingKey,
+    content_key: desired.program.content_key ?? null,
+    created_at: now,
+  });
+  if (inserted.id === id) {
+    persistOccurrenceProjection(rule, projection);
+    logger.info(`Rule "${rule.match_title}": scheduled recording for "${desired.program.title}" at ${new Date(desired.recordingStart).toISOString()}`);
+  }
+}
+
+/** Cancel or adopt stale rule-owned rows before capture startup, including after a crash. */
+export function reconcileDueRuleSchedules(now = Date.now()): void {
+  const reconciledRules = new Set<string>();
+  for (const recording of getRecordingsByStatus('scheduled')) {
+    if (!recording.rule_id) continue;
+    const rule = getRecordingRule(recording.rule_id);
+    if (!rule || rule.enabled !== 1) {
+      updateRecording(recording.id, { status: 'cancelled', actual_end: now });
+      continue;
+    }
+    if ((recording.rule_revision ?? 1) !== rule.rule_revision && !reconciledRules.has(rule.id)) {
+      reconciledRules.add(rule.id);
+      reconcileRule(rule, false);
+    }
+  }
+}
+
+/** Reconcile one edited rule, including cancelling schedules no longer selected. */
+export function reconcileRecordingRule(ruleId: string): void {
+  const rule = getRecordingRule(ruleId);
+  if (!rule || rule.enabled !== 1) {
+    const now = Date.now();
+    for (const recording of getRecordingsByRuleId(ruleId).filter(item => item.status === 'scheduled')) {
+      cancelPendingRecording(recording, now);
+    }
+    return;
+  }
+  reconcileRule(rule, true);
 }
 
 /** Clean up old recordings based on retention settings */

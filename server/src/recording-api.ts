@@ -1,4 +1,4 @@
-import type { DBRecording } from './db.js';
+import type { DBRecording, DBRecordingRule } from './db.js';
 import type { CommercialSegmentWrite, DBCommercialSegment } from './commercial-store.js';
 import { buildAiringKey } from './epg-identity.js';
 import { validateCommercialIntervals } from './commercial-intervals.js';
@@ -179,7 +179,109 @@ export function parseBooleanConfig(value: string, fallback: boolean): boolean {
 const MATCH_TYPES = new Set(['contains', 'exact', 'startsWith']);
 const REPEAT_POLICIES = new Set(['all', 'include_unknown', 'new_only']);
 const AIRING_POLICIES = new Set(['every', 'once']);
+const CADENCE_MODES = new Set(['every', 'occurrence', 'hours', 'daily']);
 const MAX_RULE_PADDING_MS = 24 * 60 * 60_000;
+type EffectiveCadence = Pick<DBRecordingRule,
+  'airing_policy' | 'cadence_mode' | 'cadence_interval' | 'daily_start_minutes' | 'schedule_timezone'>;
+
+function canonicalizeEffectiveCadence(rule: EffectiveCadence): EffectiveCadence {
+  const scheduleTimezone = validatedTimeZone(rule.schedule_timezone);
+  if (rule.airing_policy === 'once') {
+    return {
+      ...rule,
+      cadence_mode: 'every',
+      cadence_interval: 1,
+      daily_start_minutes: 0,
+      schedule_timezone: scheduleTimezone,
+    };
+  }
+  if (rule.cadence_mode === 'occurrence') {
+    if (rule.cadence_interval < 2) throw new Error('cadenceInterval must be at least 2 for occurrence mode');
+    return { ...rule, daily_start_minutes: 0, schedule_timezone: scheduleTimezone };
+  }
+  if (rule.cadence_mode === 'hours') {
+    if (rule.cadence_interval < 1) throw new Error('cadenceInterval must be at least 1 for hours mode');
+    return { ...rule, daily_start_minutes: 0, schedule_timezone: scheduleTimezone };
+  }
+  if (rule.cadence_mode === 'daily') {
+    if (rule.daily_start_minutes < 0 || rule.daily_start_minutes > 1439) {
+      throw new Error('dailyStartMinutes must be between 0 and 1439 for daily mode');
+    }
+    return { ...rule, cadence_interval: 1, schedule_timezone: scheduleTimezone };
+  }
+  return {
+    ...rule,
+    cadence_mode: 'every',
+    cadence_interval: 1,
+    daily_start_minutes: 0,
+    schedule_timezone: scheduleTimezone,
+  };
+}
+
+function normalizedMatchTitle(value: string): string {
+  return value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+}
+
+function schedulingSemantics(rule: DBRecordingRule): Record<string, unknown> {
+  const cadence = canonicalizeEffectiveCadence(rule);
+  return {
+    channel_id: rule.channel_id,
+    match_title: normalizedMatchTitle(rule.match_title),
+    match_type: rule.match_type,
+
+    airing_policy: cadence.airing_policy,
+    repeat_policy: rule.repeat_policy,
+    cadence_mode: cadence.cadence_mode,
+    cadence_interval: cadence.cadence_interval,
+    daily_start_minutes: cadence.daily_start_minutes,
+    schedule_timezone: cadence.cadence_mode === 'daily' ? cadence.schedule_timezone : '',
+  };
+}
+
+export function versionRecordingRuleUpdates<T extends Record<string, unknown>>(
+  current: DBRecordingRule,
+  updates: T,
+): T & Partial<Pick<DBRecordingRule,
+  'rule_revision' | 'cadence_last_success_start' | 'cadence_last_success_key' |
+  'cadence_occurrence_progress' | 'cadence_cursor_start' | 'cadence_cursor_key' |
+  'cadence_retry_start' | 'cadence_retry_key'>> {
+  const cadenceTouched = ['airing_policy', 'cadence_mode', 'cadence_interval', 'daily_start_minutes', 'schedule_timezone']
+    .some(field => Object.prototype.hasOwnProperty.call(updates, field));
+  const effective = { ...current, ...updates } as DBRecordingRule;
+  const canonicalCadence = canonicalizeEffectiveCadence(effective);
+  const canonicalUpdates = { ...updates } as T & Partial<DBRecordingRule>;
+  if (cadenceTouched) Object.assign(canonicalUpdates, {
+    cadence_mode: canonicalCadence.cadence_mode,
+    cadence_interval: canonicalCadence.cadence_interval,
+    daily_start_minutes: canonicalCadence.daily_start_minutes,
+  });
+
+  const before = schedulingSemantics(current);
+  const after = schedulingSemantics({ ...current, ...canonicalUpdates } as DBRecordingRule);
+  const changed = Object.keys(before).filter(field => before[field] !== after[field]);
+  if (changed.length === 0) return canonicalUpdates;
+
+  const versioned = {
+    ...canonicalUpdates,
+    rule_revision: current.rule_revision + 1,
+  } as T & Partial<DBRecordingRule>;
+  const preservesAcceptedSuccess = current.airing_policy === 'every' &&
+    after.airing_policy === 'once' &&
+    current.cadence_last_success_start !== null &&
+    changed.every(field => [
+      'airing_policy', 'cadence_mode', 'cadence_interval', 'daily_start_minutes', 'schedule_timezone',
+    ].includes(field));
+  Object.assign(versioned, {
+    cadence_last_success_start: preservesAcceptedSuccess ? current.cadence_last_success_start : null,
+    cadence_last_success_key: preservesAcceptedSuccess ? current.cadence_last_success_key : null,
+    cadence_occurrence_progress: 0,
+    cadence_cursor_start: preservesAcceptedSuccess ? current.cadence_last_success_start : null,
+    cadence_cursor_key: preservesAcceptedSuccess ? current.cadence_last_success_key : null,
+    cadence_retry_start: null,
+    cadence_retry_key: null,
+  });
+  return versioned;
+}
 
 function boundedInteger(value: unknown, name: string, minimum: number, maximum: number): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum || value > maximum) {
@@ -207,6 +309,22 @@ export interface ValidatedRecordingRulePayload {
   max_recordings?: number;
   retention_count?: number;
   airing_policy?: 'every' | 'once';
+  cadence_mode?: 'every' | 'occurrence' | 'hours' | 'daily';
+  cadence_interval?: number;
+  daily_start_minutes?: number;
+  schedule_timezone?: string;
+}
+
+function validatedTimeZone(value: unknown): string {
+  const timeZone = boundedText(value, 'scheduleTimezone', 100);
+  if (timeZone !== 'UTC' && !/^[A-Za-z_]+(?:\/[A-Za-z0-9_+.-]+)+$/.test(timeZone)) {
+    throw new Error('scheduleTimezone must be an IANA timezone');
+  }
+  try {
+    return new Intl.DateTimeFormat('en', { timeZone }).resolvedOptions().timeZone;
+  } catch {
+    throw new Error('scheduleTimezone is invalid');
+  }
 }
 
 export function validateRecordingRulePayload(value: unknown, partial: boolean): ValidatedRecordingRulePayload {
@@ -248,6 +366,29 @@ export function validateRecordingRulePayload(value: unknown, partial: boolean): 
   if (airingPolicy !== undefined) {
     if (typeof airingPolicy !== 'string' || !AIRING_POLICIES.has(airingPolicy)) throw new Error('airingPolicy is invalid');
     output.airing_policy = airingPolicy as 'every' | 'once';
+  }
+  const cadenceMode = body.cadenceMode ?? (partial ? undefined : 'every');
+  if (cadenceMode !== undefined) {
+    if (typeof cadenceMode !== 'string' || !CADENCE_MODES.has(cadenceMode)) throw new Error('cadenceMode is invalid');
+    output.cadence_mode = cadenceMode as 'every' | 'occurrence' | 'hours' | 'daily';
+  }
+  if (!partial || body.cadenceInterval !== undefined) {
+    output.cadence_interval = boundedInteger(body.cadenceInterval ?? 1, 'cadenceInterval', 1, 10_000);
+  }
+  if (!partial || body.dailyStartMinutes !== undefined) {
+    output.daily_start_minutes = boundedInteger(body.dailyStartMinutes ?? 0, 'dailyStartMinutes', 0, 1439);
+  }
+  if (!partial || body.scheduleTimezone !== undefined) {
+    output.schedule_timezone = validatedTimeZone(body.scheduleTimezone ?? 'Europe/Stockholm');
+  }
+  if (!partial) {
+    Object.assign(output, canonicalizeEffectiveCadence({
+      airing_policy: output.airing_policy!,
+      cadence_mode: output.cadence_mode!,
+      cadence_interval: output.cadence_interval!,
+      daily_start_minutes: output.daily_start_minutes!,
+      schedule_timezone: output.schedule_timezone!,
+    }));
   }
   return output;
 }

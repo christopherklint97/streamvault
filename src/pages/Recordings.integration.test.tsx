@@ -144,11 +144,15 @@ describe('Recordings integration', () => {
       id: 'rule-1', channel_id: 'espn', channel_name: 'ESPN', match_title: 'SportsCenter',
       match_type: 'startsWith' as const, repeat_policy: 'new_only' as const, enabled: 1,
       padding_before: 180_000, padding_after: 420_000, max_recordings: 0,
-      retention_count: 4, airing_policy: 'every' as const, created_at: 1,
+      retention_count: 4, airing_policy: 'every' as const, cadence_mode: 'every' as const,
+      cadence_interval: 1, daily_start_minutes: 0, schedule_timezone: 'Europe/Stockholm',
+      rule_revision: 1, cadence_last_success_start: null, cadence_last_success_key: null,
+      cadence_occurrence_progress: 0, cadence_cursor_start: null, cadence_cursor_key: null,
+      cadence_retry_start: null, cadence_retry_key: null, created_at: 1,
     };
     const legacyRule = { ...createdRule, id: 'existing', max_recordings: 1, retention_count: 0 };
     const createRule = vi.fn(async () => createdRule);
-    const updateRule = vi.fn(async () => {});
+    const updateRule = vi.fn(async () => legacyRule);
     await act(async () => {
       useRecordingStore.setState({
         recordings: [],
@@ -225,6 +229,12 @@ describe('Recordings integration', () => {
       setInput(container.querySelector('#rule-padding-before') as HTMLInputElement, '3');
       setInput(container.querySelector('#rule-padding-after') as HTMLInputElement, '7');
       setInput(container.querySelector('#rule-retention-limit') as HTMLInputElement, '4');
+      const cadence = container.querySelector('#rule-cadence-mode') as HTMLSelectElement;
+      cadence.value = 'hours';
+      cadence.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await act(async () => {
+      setInput(container.querySelector('#rule-cadence-interval') as HTMLInputElement, '12');
     });
 
     await act(async () => {
@@ -241,7 +251,81 @@ describe('Recordings integration', () => {
       paddingAfter: 420_000,
       repeatPolicy: 'new_only',
       retentionLimit: 4,
+      maxRecordings: 0,
       airingPolicy: 'every',
+      cadenceMode: 'hours',
+      cadenceInterval: 12,
+      dailyStartMinutes: 0,
+      scheduleTimezone: 'Europe/Stockholm',
+    });
+  });
+
+  it('edits all rule settings and saves a daily local-time schedule', async () => {
+    const rule = {
+      id: 'rule-edit', channel_id: 'espn', channel_name: 'ESPN', match_title: 'SportsCenter',
+      match_type: 'exact' as const, repeat_policy: 'include_unknown' as const, enabled: 1,
+      padding_before: 120_000, padding_after: 300_000, max_recordings: 3, retention_count: 0,
+      airing_policy: 'every' as const, cadence_mode: 'hours' as const, cadence_interval: 12,
+      daily_start_minutes: 0, schedule_timezone: 'Europe/Stockholm',
+      rule_revision: 1, cadence_last_success_start: null, cadence_last_success_key: null,
+      cadence_occurrence_progress: 0, cadence_cursor_start: null, cadence_cursor_key: null,
+      cadence_retry_start: null, cadence_retry_key: null, created_at: 1,
+    };
+    const updateRule = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValue(rule);
+    await act(async () => {
+      useRecordingStore.setState({ recordings: [], rules: [rule], updateRule });
+      findButton(container, 'Rules (0)').click();
+    });
+
+    await act(async () => {
+      findButton(container, 'Edit').click();
+    });
+    await act(async () => {
+      findButton(container, 'Save changes').click();
+      await Promise.resolve();
+    });
+    expect(updateRule).toHaveBeenLastCalledWith('rule-edit', expect.objectContaining({
+      retentionLimit: 0, maxRecordings: 3,
+    }));
+    expect(findButton(container, 'Save changes')).toBeTruthy();
+    await act(async () => {
+      const convert = container.querySelector('#edit-rule-edit-convert-legacy') as HTMLInputElement;
+      convert.click();
+      findButton(container, 'Save changes').click();
+      await Promise.resolve();
+    });
+    expect(updateRule).toHaveBeenLastCalledWith('rule-edit', expect.objectContaining({
+      retentionLimit: 0, maxRecordings: 0,
+    }));
+    expect(findButton(container, 'Save changes')).toBeTruthy();
+
+    const setInput = (selector: string, value: string) => {
+      const element = container.querySelector(selector) as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      setter?.call(element, value);
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    await act(async () => {
+      setInput('#edit-rule-edit-title', 'SportsCenter Late');
+      setInput('#edit-rule-edit-padding-before', '3');
+      setInput('#edit-rule-edit-padding-after', '8');
+      setInput('#edit-rule-edit-retention', '5');
+      const cadence = container.querySelector('#edit-rule-edit-cadence') as HTMLSelectElement;
+      cadence.value = 'daily';
+      cadence.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await act(async () => {
+      setInput('#edit-rule-edit-daily-time', '21:00');
+      findButton(container, 'Save changes').click();
+      await Promise.resolve();
+    });
+
+    expect(updateRule).toHaveBeenCalledWith('rule-edit', {
+      channelId: 'espn', channelName: 'ESPN', matchTitle: 'SportsCenter Late', matchType: 'exact',
+      enabled: true, paddingBefore: 180_000, paddingAfter: 480_000,
+      repeatPolicy: 'include_unknown', retentionLimit: 5, airingPolicy: 'every', maxRecordings: 0,
+      cadenceMode: 'daily', cadenceInterval: 1, dailyStartMinutes: 21 * 60,
+      scheduleTimezone: 'Europe/Stockholm',
     });
   });
 });

@@ -13,8 +13,8 @@ export class BackendUnavailableError extends Error {
 export class ApiError extends Error {
   readonly status: number;
 
-  constructor(status: number, statusText: string) {
-    super(`API error: ${status} ${statusText}`);
+  constructor(status: number, statusText: string, detail?: string) {
+    super(detail || `API error: ${status} ${statusText}`);
     this.name = 'ApiError';
     this.status = status;
   }
@@ -88,8 +88,20 @@ async function fetchBackend(url: string, options?: RequestInit): Promise<Respons
 }
 
 async function parseJsonResponse<T>(response: Response): Promise<T> {
-  if (!response.ok) throw new ApiError(response.status, response.statusText);
   const text = await response.text();
+  if (!response.ok) {
+    let detail: string | undefined;
+    if (text) {
+      try {
+        const parsed = JSON.parse(text) as { error?: unknown; message?: unknown };
+        if (typeof parsed.error === 'string') detail = parsed.error;
+        else if (typeof parsed.message === 'string') detail = parsed.message;
+      } catch {
+        // Keep the stable status fallback for non-JSON error pages.
+      }
+    }
+    throw new ApiError(response.status, response.statusText, detail);
+  }
   return (text ? JSON.parse(text) : undefined) as T;
 }
 

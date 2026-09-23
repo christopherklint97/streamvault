@@ -119,7 +119,11 @@ describe('recording rule mutations', () => {
       id: 'rule-1', channel_id: 'espn', channel_name: 'ESPN', match_title: 'SportsCenter',
       match_type: 'exact' as const, repeat_policy: 'new_only' as const, enabled: 1,
       padding_before: 60_000, padding_after: 180_000, max_recordings: 0,
-      retention_count: 1, airing_policy: 'every' as const, created_at: 1,
+      retention_count: 1, airing_policy: 'every' as const, cadence_mode: 'hours' as const,
+      cadence_interval: 12, daily_start_minutes: 0, schedule_timezone: 'Europe/Stockholm',
+      rule_revision: 1, cadence_last_success_start: null, cadence_last_success_key: null,
+      cadence_occurrence_progress: 0, cadence_cursor_start: null, cadence_cursor_key: null,
+      cadence_retry_start: null, cadence_retry_key: null, created_at: 1,
     };
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ rule }));
 
@@ -132,7 +136,11 @@ describe('recording rule mutations', () => {
       paddingAfter: 180_000,
       repeatPolicy: 'new_only',
       retentionLimit: 1,
+      maxRecordings: 0,
       airingPolicy: 'every',
+      cadenceMode: 'hours',
+      cadenceInterval: 12,
+      dailyStartMinutes: 0,
     })).resolves.toEqual(rule);
 
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
@@ -144,7 +152,11 @@ describe('recording rule mutations', () => {
       paddingAfter: 180_000,
       repeatPolicy: 'new_only',
       retentionLimit: 1,
+      maxRecordings: 0,
       airingPolicy: 'every',
+      cadenceMode: 'hours',
+      cadenceInterval: 12,
+      dailyStartMinutes: 0,
     });
     expect(useRecordingStore.getState().rules).toEqual([rule]);
   });
@@ -154,7 +166,11 @@ describe('recording rule mutations', () => {
       id: 'rule-1', channel_id: 'espn', channel_name: 'ESPN', match_title: 'SportsCenter',
       match_type: 'exact' as const, repeat_policy: 'include_unknown' as const, enabled: 1,
       padding_before: 0, padding_after: 0, max_recordings: 0,
-      retention_count: 0, airing_policy: 'every' as const, created_at: 1,
+      retention_count: 0, airing_policy: 'every' as const, cadence_mode: 'every' as const,
+      cadence_interval: 1, daily_start_minutes: 0, schedule_timezone: 'Europe/Stockholm',
+      rule_revision: 1, cadence_last_success_start: null, cadence_last_success_key: null,
+      cadence_occurrence_progress: 0, cadence_cursor_start: null, cadence_cursor_key: null,
+      cadence_retry_start: null, cadence_retry_key: null, created_at: 1,
     };
     const updated = { ...initial, repeat_policy: 'all' as const };
     useRecordingStore.setState({ rules: [initial] });
