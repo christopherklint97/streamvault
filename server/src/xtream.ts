@@ -151,6 +151,8 @@ export interface XtreamEpgEntry {
   description: string;
   start: string;
   end: string;
+  start_timestamp?: number | string;
+  stop_timestamp?: number | string;
   channel_id: string;
   subtitle?: string;
   sub_title?: string;
@@ -606,6 +608,19 @@ function parseEpgTimestamp(str: string): number | null {
   return isNaN(d.getTime()) ? null : d.getTime();
 }
 
+function parseProviderTimestamp(value: number | string | undefined, fallback: string): number | null {
+  // Xtream's Unix seconds specify an absolute instant; the accompanying
+  // timezone-less wall-clock string must not be interpreted in the server TZ.
+  if (value !== undefined && value !== null && value !== '') {
+    const seconds = Number(value);
+    if (Number.isSafeInteger(seconds) && seconds > 0) {
+      const milliseconds = seconds * 1000;
+      if (Number.isFinite(new Date(milliseconds).getTime())) return milliseconds;
+    }
+  }
+  return parseEpgTimestamp(fallback);
+}
+
 function triState(value: unknown): number | null {
   if (value === true || value === 1 || value === '1' || value === 'true') return 1;
   if (value === false || value === 0 || value === '0' || value === 'false') return 0;
@@ -613,8 +628,8 @@ function triState(value: unknown): number | null {
 }
 
 export function mapXtreamEpgEntry(e: XtreamEpgEntry, channelId: string, now = Date.now()): DBProgram | null {
-  const start = parseEpgTimestamp(e.start);
-  const stop = parseEpgTimestamp(e.end);
+  const start = parseProviderTimestamp(e.start_timestamp, e.start);
+  const stop = parseProviderTimestamp(e.stop_timestamp, e.end);
   if (start === null || stop === null || stop <= start) return null;
   const eventId = e.id ? String(e.id) : null;
   const explicitContentId = e.content_id || e.episode_id;

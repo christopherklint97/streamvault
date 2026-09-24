@@ -27,6 +27,17 @@ describe('EPG enrichment', () => {
     expect(program!.airing_key).toBe(buildAiringKey('xtream', 'live_71936', 'event-42', program!.start_time, program!.stop_time));
   });
 
+  it('uses provider Unix timestamps instead of timezone-less Xtream wall-clock strings', () => {
+    const raw = {
+      id: '354746', epg_id: '46', title: 'SportsCenter', description: '', channel_id: 'espn.us',
+      start: '2026-09-24 21:00:00', end: '2026-09-24 21:30:00',
+      start_timestamp: 1790283600, stop_timestamp: 1790285400,
+    };
+    const program = mapXtreamEpgEntry(raw, 'live_71936');
+    expect(program?.start_time).toBe(Date.parse('2026-09-24T21:00:00Z'));
+    expect(program?.stop_time).toBe(Date.parse('2026-09-24T21:30:00Z'));
+  });
+
   it('extracts XMLTV subtitle, episode numbers, tri-state flags, original air date, and raw metadata', () => {
     const xml = `<tv><programme channel="espn" start="20260920230000 +0000" stop="20260921000000 +0000">
       <title>SportsCenter</title><sub-title>Late Edition</sub-title><desc>Highlights</desc>
