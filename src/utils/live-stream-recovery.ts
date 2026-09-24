@@ -4,6 +4,7 @@ type TimerHandle = ReturnType<typeof setTimeout>;
 
 type LiveStreamRecoveryOptions = {
   stallTimeoutMs?: number;
+  startupTimeoutMs?: number;
   retryDelaysMs?: number[];
   now?: () => number;
   setTimer?: (callback: () => void, delayMs: number) => TimerHandle;
@@ -11,6 +12,7 @@ type LiveStreamRecoveryOptions = {
 };
 
 const DEFAULT_STALL_TIMEOUT_MS = 12_000;
+const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
 const DEFAULT_RETRY_DELAYS_MS = [250, 1_000, 3_000, 5_000, 10_000, 20_000, 30_000];
 
 /**
@@ -23,6 +25,7 @@ const DEFAULT_RETRY_DELAYS_MS = [250, 1_000, 3_000, 5_000, 10_000, 20_000, 30_00
  */
 export class LiveStreamRecovery {
   private readonly stallTimeoutMs: number;
+  private readonly startupTimeoutMs: number;
   private readonly retryDelaysMs: number[];
   private readonly now: () => number;
   private readonly setTimer: (callback: () => void, delayMs: number) => TimerHandle;
@@ -31,6 +34,7 @@ export class LiveStreamRecovery {
   private paused = false;
   private streamKey = '';
   private lastProgressAt = 0;
+  private hasProgress = false;
   private retryCount = 0;
   private watchdogTimer: TimerHandle | null = null;
   private retryTimer: TimerHandle | null = null;
@@ -43,6 +47,7 @@ export class LiveStreamRecovery {
   ) {
     this.onRecover = onRecover;
     this.stallTimeoutMs = options.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
+    this.startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
     this.retryDelaysMs = options.retryDelaysMs?.length
       ? options.retryDelaysMs
       : DEFAULT_RETRY_DELAYS_MS;
@@ -58,8 +63,9 @@ export class LiveStreamRecovery {
     this.streamKey = streamKey;
     if (isNewStream) this.retryCount = 0;
     this.clearRetryTimer();
+    this.hasProgress = false;
     this.lastProgressAt = this.now();
-    this.armWatchdog(this.stallTimeoutMs);
+    this.armWatchdog(this.startupTimeoutMs);
   }
 
   progress(): void {
@@ -71,6 +77,7 @@ export class LiveStreamRecovery {
       return;
     }
     if (this.retryReason === 'stalled') this.clearRetryTimer();
+    this.hasProgress = true;
     this.lastProgressAt = this.now();
     this.retryCount = 0;
     this.armWatchdog(this.stallTimeoutMs);
@@ -78,7 +85,8 @@ export class LiveStreamRecovery {
 
   stalled(): void {
     if (!this.active || this.paused || this.retryTimer) return;
-    const remaining = Math.max(0, this.stallTimeoutMs - (this.now() - this.lastProgressAt));
+    const timeout = this.hasProgress ? this.stallTimeoutMs : this.startupTimeoutMs;
+    const remaining = Math.max(0, timeout - (this.now() - this.lastProgressAt));
     this.armWatchdog(remaining);
   }
 
@@ -98,7 +106,7 @@ export class LiveStreamRecovery {
     if (!this.active) return;
     this.paused = false;
     this.lastProgressAt = this.now();
-    this.armWatchdog(this.stallTimeoutMs);
+    this.armWatchdog(this.hasProgress ? this.stallTimeoutMs : this.startupTimeoutMs);
   }
 
   stop(): void {
@@ -106,6 +114,7 @@ export class LiveStreamRecovery {
     this.paused = false;
     this.streamKey = '';
     this.retryCount = 0;
+    this.hasProgress = false;
     this.clearWatchdog();
     this.clearRetryTimer();
   }
@@ -117,10 +126,11 @@ export class LiveStreamRecovery {
       this.watchdogTimer = null;
       if (!this.active) return;
       const elapsed = this.now() - this.lastProgressAt;
-      if (elapsed >= this.stallTimeoutMs) {
+      const timeout = this.hasProgress ? this.stallTimeoutMs : this.startupTimeoutMs;
+      if (elapsed >= timeout) {
         this.scheduleRecovery('stalled');
       } else {
-        this.armWatchdog(this.stallTimeoutMs - elapsed);
+        this.armWatchdog(timeout - elapsed);
       }
     }, delayMs);
   }

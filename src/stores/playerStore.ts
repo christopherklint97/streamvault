@@ -23,6 +23,8 @@ interface PlayerStoreActions {
   setAudioOnly: (audioOnly: boolean) => void;
 }
 
+let groupFetchGeneration = 0;
+
 export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((set, get) => ({
   status: 'idle',
   currentChannel: null,
@@ -65,17 +67,27 @@ export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((s
   },
 
   fetchGroupChannels: async (group: string) => {
+    const fetchGeneration = ++groupFetchGeneration;
     const { apiBaseUrl: base, backendGeneration } = useChannelStore.getState();
+    const isCurrent = () => groupFetchGeneration === fetchGeneration &&
+      useChannelStore.getState().backendGeneration === backendGeneration;
     set({ groupChannelsLoading: true });
     try {
-      const res = await fetch(`${base}/api/channels?group=${encodeURIComponent(group)}`);
-      if (!res.ok) throw new Error('Failed to fetch group channels');
-      const data = await res.json();
-      if (useChannelStore.getState().backendGeneration !== backendGeneration) return;
-      const channels: Channel[] = data.channels || [];
-      set({ groupChannels: channels, groupChannelsLoading: false });
+      const channels: Channel[] = [];
+      let after: string | null = null;
+      do {
+        const params = new URLSearchParams({ type: 'livetv', group, limit: '200' });
+        if (after) params.set('after', after);
+        const res = await fetch(`${base}/api/browse?${params}`);
+        if (!res.ok) throw new Error('Failed to fetch group channels');
+        const data = await res.json() as { channels?: Channel[]; nextCursor?: string | null };
+        if (!isCurrent()) return;
+        channels.push(...(data.channels || []));
+        after = data.nextCursor || null;
+        set({ groupChannels: [...channels], groupChannelsLoading: Boolean(after) });
+      } while (after);
     } catch {
-      if (useChannelStore.getState().backendGeneration !== backendGeneration) return;
+      if (!isCurrent()) return;
       set({ groupChannelsLoading: false });
     }
   },
@@ -116,6 +128,7 @@ export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((s
 }));
 
 export function resetPlayerBackendState(): void {
+  groupFetchGeneration++;
   usePlayerStore.setState({
     status: 'idle',
     currentChannel: null,
