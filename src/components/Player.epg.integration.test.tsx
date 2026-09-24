@@ -76,6 +76,35 @@ describe('player channel-list EPG', () => {
     },
   );
 
+  it('retries selected-channel EPG while the player stays open after a cache correction', async () => {
+    vi.useFakeTimers();
+    const now = Date.now();
+    let channelCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/api/epg/batch')) return new Response(JSON.stringify({ programs: {} }), { status: 200 });
+      if (url.includes('/api/epg/channel/')) {
+        channelCalls++;
+        const programs = channelCalls === 1 ? [] : [{
+          channelId: channel.id, title: 'SportsCenter', description: '', category: 'Sports',
+          start: new Date(now - 60_000).toISOString(), stop: new Date(now + 60_000).toISOString(),
+        }];
+        return new Response(JSON.stringify({ programs }), { status: 200 });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+    useChannelStore.setState({ programs: [], programsByChannel: new Map() });
+    usePlayerStore.setState({ currentChannel: channel, groupChannels: [channel], channelListVisible: true });
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => { root.render(<Player />); });
+    expect(channelCalls).toBe(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(channelCalls).toBeGreaterThan(1);
+    expect(useChannelStore.getState().programsByChannel.get(channel.id)?.[0]?.title).toBe('SportsCenter');
+  });
+
   it('fills every ESPN row after an initially empty batch while the player stays open', async () => {
     vi.useFakeTimers();
     const now = Date.now();

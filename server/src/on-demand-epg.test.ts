@@ -65,6 +65,21 @@ describe('on-demand EPG', () => {
     expect(fetch.mock.calls[1][1][0]).toBe(100);
   });
 
+  it('refreshes a recently cached airing when its provider timestamp reveals the timezone error', async () => {
+    const stale = {
+      ...current(),
+      raw_metadata: JSON.stringify({ start_timestamp: Math.floor(Date.now() / 1000) + 7200 }),
+    };
+    const corrected = { ...stale, start_time: stale.start_time + 7200_000 };
+    const fetch = vi.fn(async () => [corrected]);
+    const save = vi.fn();
+    const epg = createOnDemandEpg({ read: () => [stale], fetch, save, getConfig: () => config, warn: vi.fn() });
+    const now = Date.now();
+    expect(epg.get(['live_1'], now - 1000, now + 3600_000)).toEqual([]);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith(config, [1], 'live_', 30));
+    await vi.waitFor(() => expect(save).toHaveBeenCalledWith([corrected]));
+  });
+
   it('does not fetch fresh or past cached guide and ignores non-live channel IDs', async () => {
     const fetch = vi.fn(async () => [] as DBProgram[]);
     const airing = current();

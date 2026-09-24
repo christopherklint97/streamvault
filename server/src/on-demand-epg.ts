@@ -14,6 +14,18 @@ type Dependencies = {
   warn: (message: string) => void;
 };
 
+function hasMismatchedProviderTimestamp(program: DBProgram): boolean {
+  if (!program.raw_metadata) return false;
+  try {
+    const { start_timestamp: raw } = JSON.parse(program.raw_metadata) as { start_timestamp?: unknown };
+    const seconds = typeof raw === 'number' || typeof raw === 'string' ? Number(raw) : NaN;
+    return Number.isSafeInteger(seconds) && seconds > 0 &&
+      Math.abs(program.start_time - seconds * 1000) > 1000;
+  } catch {
+    return false;
+  }
+}
+
 /** Serve the cached guide immediately; refresh only missing live channels in the background. */
 export function createOnDemandEpg({ read, fetch, save, getConfig, warn }: Dependencies) {
   const attempts = new Map<number, number>();
@@ -61,7 +73,7 @@ export function createOnDemandEpg({ read, fetch, save, getConfig, warn }: Depend
       const neededAt = Math.max(from, now);
       const current = new Set(programs
         .filter(program => program.start_time <= neededAt && program.stop_time > neededAt &&
-          (program.last_seen ?? 0) >= now - CACHE_TTL_MS)
+          (program.last_seen ?? 0) >= now - CACHE_TTL_MS && !hasMismatchedProviderTimestamp(program))
         .map(program => program.channel_id));
       for (const channelId of new Set(channelIds)) {
         const match = /^live_(\d+)$/.exec(channelId);
@@ -79,7 +91,7 @@ export function createOnDemandEpg({ read, fetch, save, getConfig, warn }: Depend
         attempts.set(id, now);
       }
       if (pending.size > 0) schedule();
-      return programs;
+      return programs.filter(program => !hasMismatchedProviderTimestamp(program));
     },
   };
 }

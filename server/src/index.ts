@@ -574,9 +574,9 @@ app.get('/api/epg/channel/:channelId', (req, res) => {
     res.status(400).json({ error: 'Invalid time range' });
     return;
   }
-  const now = Date.now();
-  onDemandEpg.get([channelId], from ?? now - 2 * 60 * 60 * 1000, to ?? now + 6 * 60 * 60 * 1000);
-  const dbPrograms = getProgramsByChannel(channelId, from, to);
+  const dbPrograms = from !== undefined && to !== undefined
+    ? onDemandEpg.get([channelId], from, to)
+    : getProgramsByChannel(channelId, from, to);
   const programs = dbPrograms.map(p => ({
     channelId: p.channel_id,
     title: p.title,

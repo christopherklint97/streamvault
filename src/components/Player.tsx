@@ -233,6 +233,27 @@ export default function Player() {
     ? getCurrentProgram([], currentChannel.id, programsByChannel.get(currentChannel.id))
     : null;
 
+  const hasCurrentProgram = Boolean(currentProgram);
+
+  // A cache-correction response may be empty while the server refreshes it in
+  // the background. Retry the selected channel without delaying playback.
+  useEffect(() => {
+    if (!isLive || !channelId || hasCurrentProgram) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let attempts = 0;
+    const retry = async () => {
+      await fetchProgramsForChannel(channelId);
+      if (cancelled) return;
+      const programs = useChannelStore.getState().programsByChannel.get(channelId);
+      if (getCurrentProgram([], channelId, programs)) return;
+      attempts++;
+      timer = setTimeout(retry, attempts < 3 ? 15_000 : 5 * 60_000);
+    };
+    timer = setTimeout(retry, 15_000);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [channelId, isLive, hasCurrentProgram, fetchProgramsForChannel]);
+
   // Swipe gesture tracking for channel switching (live TV only)
   const touchRef = useRef<{ startX: number; startY: number; startTime: number } | null>(null);
   const [swipeIndicator, setSwipeIndicator] = useState<'left' | 'right' | null>(null);

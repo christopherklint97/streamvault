@@ -8,7 +8,7 @@ import { isMobile } from '../utils/platform';
 import { cn } from '../utils/cn';
 import { KEY_CODES } from '../utils/keys';
 import FocusZone from './FocusZone';
-import { fetchBatchEpg } from '../utils/epg-batch';
+import { fetchBatchEpg, getCurrentEpg } from '../utils/epg-batch';
 
 interface EpgProgram {
   channelId: string;
@@ -316,19 +316,37 @@ export default function EpgGuide() {
     return () => observer.disconnect();
   }, [nextCursor, loadNextPage]);
 
-  // Fetch EPG when channels or time window changes
+  // Fetch the visible window; retry missing airings after the server's
+  // asynchronous refresh without delaying guide navigation.
   useEffect(() => {
     if (channels.length === 0) return;
     let cancelled = false;
-    fetchBatchEpg(channels.map(ch => ch.id), windowStart, windowEnd).then(results => {
-      if (cancelled) return;
-      const map: EpgByChannel = {};
-      for (const channel of channels) {
-        map[channel.id] = (results[channel.id] ?? []).map(program => ({ ...program, channelId: channel.id }));
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const fetchWindow = async (ids: string[], attempt: number) => {
+      try {
+        const results = await fetchBatchEpg(ids, windowStart, windowEnd);
+        if (cancelled) return;
+        const map: EpgByChannel = {};
+        for (const id of ids) {
+          map[id] = (results[id] ?? []).map(program => ({ ...program, channelId: id }));
+        }
+        setEpgData(prev => attempt === 1 ? map : { ...prev, ...map });
+        const now = Date.now();
+        const includesNow = windowStart <= now && windowEnd > now;
+        const unresolved = ids.filter(id => includesNow
+          ? !getCurrentEpg(results[id]).current
+          : (results[id] ?? []).length === 0);
+        if (unresolved.length > 0) {
+          retryTimer = setTimeout(() => { void fetchWindow(unresolved, attempt + 1); },
+            attempt < 3 ? 15_000 : 5 * 60_000);
+        }
+      } catch {
+        if (!cancelled) retryTimer = setTimeout(() => { void fetchWindow(ids, attempt + 1); },
+          attempt < 3 ? 15_000 : 5 * 60_000);
       }
-      setEpgData(map);
-    });
-    return () => { cancelled = true; };
+    };
+    void fetchWindow(channels.map(ch => ch.id), 1);
+    return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer); };
   }, [channels, windowStart, windowEnd, epgRefreshTick]);
 
   const handleTimeShift = useCallback((delta: number) => {

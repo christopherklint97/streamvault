@@ -451,17 +451,32 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     return () => { cancelled = true; };
   }, [debouncedQuery, contentType, selectedGroup, searchChannelsFn]);
 
-  // Fetch EPG for live TV channels — only for IDs we haven't fetched yet
+  // Fetch EPG for live TV channels; retry rows missing a current airing while
+  // the server fills its bounded background refresh queue.
   useEffect(() => {
     if (contentType !== 'livetv' || channels.length === 0) return;
     let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     const missing = channels.map(ch => ch.id).filter(id => !fetchedEpgIdsRef.current.has(id));
     if (missing.length === 0) return;
     missing.forEach(id => fetchedEpgIdsRef.current.add(id));
-    fetchBatchEpg(missing).then(data => {
-      if (!cancelled) setEpgMap(prev => ({ ...prev, ...data }));
-    });
-    return () => { cancelled = true; };
+    const refresh = async (ids: string[], attempt: number) => {
+      try {
+        const data = await fetchBatchEpg(ids);
+        if (cancelled) return;
+        setEpgMap(prev => ({ ...prev, ...data }));
+        const unresolved = ids.filter(id => !getCurrentEpg(data[id]).current);
+        if (unresolved.length > 0) {
+          retryTimer = setTimeout(() => { void refresh(unresolved, attempt + 1); },
+            attempt < 3 ? 15_000 : 5 * 60_000);
+        }
+      } catch {
+        if (!cancelled) retryTimer = setTimeout(() => { void refresh(ids, attempt + 1); },
+          attempt < 3 ? 15_000 : 5 * 60_000);
+      }
+    };
+    void refresh(missing, 1);
+    return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer); };
   }, [contentType, channels, epgRefreshTick]);
 
   const totalRows = Math.ceil(channels.length / COLUMN_COUNT);
