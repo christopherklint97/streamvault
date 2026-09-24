@@ -3,7 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { logger } from './logger.js';
-import { ensureBrowseIndexes } from './db-indexes.js';
+import { ensureBrowseIndexes, ensureChannelSearchIndex } from './db-indexes.js';
 import { createCategorySnapshotWriter } from './channel-snapshot.js';
 import { ensureRecordingSchema } from './db-migrations.js';
 import { createCommercialStore, type CommercialSegmentWrite, type DBCommercialSegment } from './commercial-store.js';
@@ -14,7 +14,6 @@ import {
   checkDatabaseReadable,
   isDatabaseBackupDue,
   restoreLatestValidBackup,
-  validateOpenDatabase,
 } from './db-lifecycle.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -47,7 +46,9 @@ const existingDatabase = fs.existsSync(DB_PATH) && fs.statSync(DB_PATH).size > 0
 let db = openDatabase();
 
 if (existingDatabase) {
-  const validation = validateOpenDatabase(db);
+  // A full quick_check scans the entire guide database and held startup for
+  // minutes on the Pi's USB HDD. Backup snapshots still receive full checks.
+  const validation = checkDatabaseReadable(db);
   if (!validation.ok) {
     try { db.close(); } catch { /* ignore close errors while recovering */ }
     quarantineDatabaseFiles(validation.error || 'Database validation failed');
@@ -56,7 +57,7 @@ if (existingDatabase) {
     else logger.error('No valid backup found; creating a fresh database');
     db = openDatabase();
   } else {
-    logger.info('Database integrity check passed');
+    logger.info('Database readability check passed');
   }
 }
 
@@ -148,6 +149,7 @@ try {
 
 db.exec("CREATE INDEX IF NOT EXISTS idx_channels_epg_available ON channels(id) WHERE content_type = 'livetv' AND epg_channel_id <> ''");
 ensureBrowseIndexes(db);
+ensureChannelSearchIndex(db);
 
 // ---------- Recording tables ----------
 
@@ -467,16 +469,19 @@ export function searchChannelsByName(query: string, contentType?: string, group?
   if (words.length === 0) return [];
 
   // All words must appear in the name (AND logic)
-  let sql = 'SELECT * FROM channels WHERE ';
+  const indexedWord = words.filter(word => word.length >= 3).sort((a, b) => b.length - a.length)[0];
+  let sql = indexedWord
+    ? 'SELECT channels.* FROM channels JOIN channels_fts ON channels_fts.rowid = channels.rowid WHERE channels_fts.name LIKE ?'
+    : 'SELECT channels.* FROM channels WHERE 1 = 1';
   const params: (string | number)[] = [];
-  const likeClauses: string[] = [];
+  if (indexedWord) params.push(`%${indexedWord}%`);
   for (const word of words) {
-    likeClauses.push('name LIKE ? COLLATE NOCASE');
+    if (word === indexedWord) continue;
+    sql += ' AND channels.name LIKE ? COLLATE NOCASE';
     params.push(`%${word}%`);
   }
-  sql += likeClauses.join(' AND ');
-  if (contentType) { sql += ' AND content_type = ?'; params.push(contentType); }
-  if (group) { sql += ' AND grp = ?'; params.push(group); }
+  if (contentType) { sql += ' AND channels.content_type = ?'; params.push(contentType); }
+  if (group) { sql += ' AND channels.grp = ?'; params.push(group); }
   sql += ' LIMIT 200';
 
   const results = db.prepare(sql).all(...params) as DBChannel[];

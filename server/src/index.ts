@@ -34,6 +34,7 @@ import {
 import type { DBRecording, DBRecordingRule } from './db.js';
 import { getStatus, sync, cancelSync, startupSync, startCrawl, cancelCrawl } from './sync.js';
 import { fetchXtreamStreamsByCategory, fetchXtreamShortEpg, fetchAllCategoryStreams, fetchXtreamSeriesInfo, fetchXtreamVodInfo } from './xtream.js';
+import { createOnDemandEpg } from './on-demand-epg.js';
 import type { XtreamConfig } from './xtream.js';
 import { logger } from './logger.js';
 import { requestStream, pickHeader, VLC_HEADERS } from './stream-utils.js';
@@ -212,6 +213,35 @@ function getXtreamConfig(): XtreamConfig | null {
   return { server, username, password };
 }
 
+const categoryRefreshes = new Map<string, Promise<void>>();
+const CATEGORY_REFRESH_MS = 24 * 60 * 60 * 1000;
+
+async function refreshCategoryForBrowse(group: string | undefined, inputMode: string): Promise<void> {
+  if (!group || group === 'All' || inputMode !== 'xtream') return;
+  const category = getCategoryByName(group);
+  if (!category || (category.fetched_at && Date.now() - category.fetched_at < CATEGORY_REFRESH_MS)) return;
+
+  let refresh = categoryRefreshes.get(category.id);
+  if (!refresh) {
+    const config = getXtreamConfig();
+    if (!config) return;
+    logger.info(`Refreshing category "${group}" (${category.id})`);
+    refresh = fetchXtreamStreamsByCategory(config, category.id, category.name)
+      .then(channels => {
+        saveChannelsForCategory(category.id, channels);
+        markCategoryFetched(category.id, channels.length);
+        logger.info(`Category "${group}" refreshed: ${channels.length} streams`);
+      })
+      .catch(error => {
+        logger.error(`Category "${group}" refresh failed: ${error instanceof Error ? error.message : error}`);
+      })
+      .finally(() => { categoryRefreshes.delete(category.id); });
+    categoryRefreshes.set(category.id, refresh);
+  }
+  // First visit needs data before responding; later visits can use cached data.
+  if (!category.fetched_at) await refresh;
+}
+
 // ---------- Categories ----------
 
 app.get('/api/categories', (req, res) => {
@@ -233,24 +263,7 @@ app.get('/api/channels', async (req, res) => {
   }
   const inputMode = getConfig('input_mode', 'manual');
 
-  // If a specific group hasn't been crawled yet, trigger a background fetch (never block)
-  if (group && group !== 'All' && inputMode === 'xtream') {
-    const category = getCategoryByName(group);
-    if (category && !category.fetched_at) {
-      const config = getXtreamConfig();
-      if (config) {
-        logger.info(`Background fetch for uncrawled category "${group}" (${category.id})`);
-        fetchXtreamStreamsByCategory(config, category.id, category.name).then(channels => {
-          saveChannelsForCategory(category.id, channels);
-          markCategoryFetched(category.id, channels.length);
-          logger.info(`Background fetch done for "${group}": ${channels.length} streams`);
-        }).catch(err => {
-          const msg = err instanceof Error ? err.message : 'Unknown error';
-          logger.error(`Background fetch failed for "${group}": ${msg}`);
-        });
-      }
-    }
-  }
+  await refreshCategoryForBrowse(group, inputMode);
 
   // Return channels from DB (with optional pagination)
   let dbChannels;
@@ -350,23 +363,7 @@ app.get('/api/browse', async (req, res) => {
   let total: number;
 
   if (group && group !== 'All') {
-    // Fetch by group — trigger background fetch if needed
-    if (inputMode === 'xtream') {
-      const category = getCategoryByName(group);
-      if (category && !category.fetched_at) {
-        const config = getXtreamConfig();
-        if (config) {
-          logger.info(`Background fetch for uncrawled category "${group}" (${category.id})`);
-          fetchXtreamStreamsByCategory(config, category.id, category.name).then(channels => {
-            saveChannelsForCategory(category.id, channels);
-            markCategoryFetched(category.id, channels.length);
-          }).catch(err => {
-            const msg = err instanceof Error ? err.message : 'Unknown error';
-            logger.error(`Background fetch failed for "${group}": ${msg}`);
-          });
-        }
-      }
-    }
+    await refreshCategoryForBrowse(group, inputMode);
     dbChannels = getChannelsByGroupCursor(group, limit, after, contentType);
     total = getChannelCountByGroup(group);
   } else if (contentType) {
@@ -528,6 +525,14 @@ app.get('/api/programs', (req, res) => {
 
 // ---------- Batch EPG (for channel list view) ----------
 
+const onDemandEpg = createOnDemandEpg({
+  read: getProgramsByChannelIds,
+  fetch: fetchXtreamShortEpg,
+  save: saveProgramsForChannels,
+  getConfig: getXtreamConfig,
+  warn: message => logger.warn(message),
+});
+
 app.get('/api/epg/batch', (req, res) => {
   const idsParam = req.query.ids as string | undefined;
   if (!idsParam) {
@@ -536,15 +541,20 @@ app.get('/api/epg/batch', (req, res) => {
   }
   const channelIds = idsParam.split(',').slice(0, 100); // cap at 100
   const now = Date.now();
-  const from = now - 2 * 60 * 60 * 1000; // 2h ago
-  const to = now + 6 * 60 * 60 * 1000;   // 6h ahead
-  const dbPrograms = getProgramsByChannelIds(channelIds, from, to);
+  const from = req.query.from === undefined ? now - 2 * 60 * 60 * 1000 : Number(req.query.from);
+  const to = req.query.to === undefined ? now + 6 * 60 * 60 * 1000 : Number(req.query.to);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from || to - from > 24 * 60 * 60 * 1000) {
+    res.status(400).json({ error: 'Invalid time range' });
+    return;
+  }
+  const dbPrograms = onDemandEpg.get(channelIds, from, to);
 
   // Group by channel ID
-  const grouped: Record<string, Array<{ title: string; description: string; start: string; stop: string }>> = {};
+  const grouped: Record<string, Array<{ channelId: string; title: string; description: string; start: string; stop: string }>> = {};
   for (const p of dbPrograms) {
     if (!grouped[p.channel_id]) grouped[p.channel_id] = [];
     grouped[p.channel_id].push({
+      channelId: p.channel_id,
       title: p.title,
       description: p.description,
       start: new Date(p.start_time).toISOString(),
@@ -564,6 +574,8 @@ app.get('/api/epg/channel/:channelId', (req, res) => {
     res.status(400).json({ error: 'Invalid time range' });
     return;
   }
+  const now = Date.now();
+  onDemandEpg.get([channelId], from ?? now - 2 * 60 * 60 * 1000, to ?? now + 6 * 60 * 60 * 1000);
   const dbPrograms = getProgramsByChannel(channelId, from, to);
   const programs = dbPrograms.map(p => ({
     channelId: p.channel_id,
@@ -2133,7 +2145,20 @@ app.get('/{*path}', (req, res) => {
 // ---------- Start ----------
 
 const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const STARTUP_BACKUP_DELAY_MS = 10 * 60 * 1000;
+let backupTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleNextBackup(): void {
+  const now = new Date();
+  const next = new Date(now);
+  next.setHours(2, 0, 0, 0);
+  if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1);
+  backupTimer = setTimeout(() => {
+    scheduleNextBackup();
+    void backupDatabaseIfDue(BACKUP_INTERVAL_MS);
+  }, next.getTime() - now.getTime());
+  backupTimer.unref();
+  logger.info(`Next database backup scheduled for ${next.toLocaleString()}`);
+}
 
 const httpServer = app.listen(PORT, '0.0.0.0', () => {
   logger.info(`StreamVault server listening on http://0.0.0.0:${PORT}`);
@@ -2149,16 +2174,8 @@ const httpServer = app.listen(PORT, '0.0.0.0', () => {
     logger.error(`Failed to recover recordings: ${err}`);
     startScheduler();
   });
-  // A restart must not immediately rewrite the entire database. After startup
-  // settles, back up only if no recent validated snapshot exists.
-  const startupBackupTimer = setTimeout(() => {
-    void backupDatabaseIfDue(BACKUP_INTERVAL_MS);
-  }, STARTUP_BACKUP_DELAY_MS);
-  startupBackupTimer.unref();
+  scheduleNextBackup();
 });
-
-const backupTimer = setInterval(() => { void backupDatabaseIfDue(BACKUP_INTERVAL_MS); }, BACKUP_INTERVAL_MS);
-if (typeof backupTimer.unref === 'function') backupTimer.unref();
 
 // ---------- Graceful shutdown ----------
 
@@ -2167,7 +2184,7 @@ function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
   logger.info(`Received ${signal}, shutting down gracefully...`);
-  clearInterval(backupTimer);
+  if (backupTimer) clearTimeout(backupTimer);
   const schedulerShutdown = stopScheduler().catch(error => {
     logger.warn(`Scheduler shutdown failed: ${error instanceof Error ? error.message : error}`);
   });

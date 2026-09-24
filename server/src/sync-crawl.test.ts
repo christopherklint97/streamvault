@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   setConfig: vi.fn(),
   matchRules: vi.fn(),
+  fetchAllCategoryStreams: vi.fn(async () => 1),
   fetchEpgForStreams: vi.fn(),
 }));
 
@@ -39,7 +40,7 @@ vi.mock('./xtream.js', () => ({
   fetchXtreamCategories: vi.fn(async () => [{
     id: 'live_1', name: 'Live', content_type: 'livetv', stream_count: 1, fetched_at: 0,
   }]),
-  fetchAllCategoryStreams: vi.fn(async () => 1),
+  fetchAllCategoryStreams: mocks.fetchAllCategoryStreams,
   fetchEpgForStreams: mocks.fetchEpgForStreams,
 }));
 
@@ -48,17 +49,26 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe('full crawl cancellation', () => {
-  it('does not publish completion after an EPG crawl is cancelled', async () => {
+describe('catalog crawl', () => {
+  it('indexes all categories without scanning every channel for EPG', async () => {
+    const { startCrawl } = await import('./sync.js');
+    await startCrawl();
+
+    expect(mocks.fetchAllCategoryStreams).toHaveBeenCalledOnce();
+    expect(mocks.fetchEpgForStreams).not.toHaveBeenCalled();
+    expect(mocks.setConfig).toHaveBeenCalledWith('last_crawl_time', expect.any(String));
+  });
+
+  it('does not publish completion after a catalog crawl is cancelled', async () => {
     vi.useFakeTimers();
-    mocks.fetchEpgForStreams.mockImplementation(async (_config, _ids, _onBatch, signal: AbortSignal) => {
+    mocks.fetchAllCategoryStreams.mockImplementation(async (_config, _cats, _onBatch, _concurrency, signal: AbortSignal) => {
       await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
       return 0;
     });
     const { cancelCrawl, getStatus, startCrawl } = await import('./sync.js');
 
     const crawl = startCrawl();
-    await vi.waitFor(() => expect(mocks.fetchEpgForStreams).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(mocks.fetchAllCategoryStreams).toHaveBeenCalledOnce());
     cancelCrawl();
     expect(getStatus()).toMatchObject({
       isCrawling: true,

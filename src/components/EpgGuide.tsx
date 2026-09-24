@@ -8,6 +8,7 @@ import { isMobile } from '../utils/platform';
 import { cn } from '../utils/cn';
 import { KEY_CODES } from '../utils/keys';
 import FocusZone from './FocusZone';
+import { fetchBatchEpg } from '../utils/epg-batch';
 
 interface EpgProgram {
   channelId: string;
@@ -30,14 +31,6 @@ const PAGE_SIZE = 30;
 
 function getApiBase(): string {
   return SAME_ORIGIN ? '' : useChannelStore.getState().apiBaseUrl;
-}
-
-async function fetchChannelEpg(channelId: string, from: number, to: number): Promise<EpgProgram[]> {
-  const base = getApiBase();
-  const resp = await fetch(`${base}/api/epg/channel/${encodeURIComponent(channelId)}?from=${from}&to=${to}`);
-  if (!resp.ok) return [];
-  const data = await resp.json();
-  return data.programs || [];
 }
 
 async function fetchBrowseChannels(group?: string, limit = PAGE_SIZE, afterCursor?: string): Promise<{ channels: Channel[]; total: number; nextCursor: string | null }> {
@@ -234,6 +227,7 @@ export default function EpgGuide() {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [epgData, setEpgData] = useState<EpgByChannel>({});
+  const [epgRefreshTick, setEpgRefreshTick] = useState(0);
   const [loading, setLoading] = useState(true);
   const [timeOffset, setTimeOffset] = useState(0);
   const [selectedProgram, setSelectedProgram] = useState<EpgProgram | null>(null);
@@ -247,6 +241,11 @@ export default function EpgGuide() {
   const gridRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const fetchIdRef = useRef(0);
+
+  useEffect(() => {
+    const timer = setInterval(() => setEpgRefreshTick(tick => tick + 1), 61 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   // The base time: current hour rounded down
   const baseTime = useMemo(() => {
@@ -321,22 +320,16 @@ export default function EpgGuide() {
   useEffect(() => {
     if (channels.length === 0) return;
     let cancelled = false;
-    const promises = channels.map(ch =>
-      fetchChannelEpg(ch.id, windowStart, windowEnd).then(programs => ({
-        channelId: ch.id,
-        programs,
-      }))
-    );
-    Promise.all(promises).then(results => {
+    fetchBatchEpg(channels.map(ch => ch.id), windowStart, windowEnd).then(results => {
       if (cancelled) return;
       const map: EpgByChannel = {};
-      for (const r of results) {
-        map[r.channelId] = r.programs;
+      for (const channel of channels) {
+        map[channel.id] = (results[channel.id] ?? []).map(program => ({ ...program, channelId: channel.id }));
       }
       setEpgData(map);
     });
     return () => { cancelled = true; };
-  }, [channels, windowStart, windowEnd]);
+  }, [channels, windowStart, windowEnd, epgRefreshTick]);
 
   const handleTimeShift = useCallback((delta: number) => {
     setTimeOffset(prev => prev + delta);

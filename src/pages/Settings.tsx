@@ -414,7 +414,7 @@ function SettingsContent() {
               </div>
             )}
             <p className="text-13 text-[#555] my-2 lg:mb-3 leading-snug">
-              Full crawl downloads all streams for instant search. Runs automatically at 3 AM daily.
+              The daily 4 AM catalog crawl keeps live TV, movie, and series search complete. Guide data refreshes when viewed.
             </p>
             {isCrawling ? (
               <button className="py-2.5 px-5 lg:py-3 lg:px-7 bg-[#ff4757] text-white border-2 border-[#ff4757] rounded-lg text-sm lg:text-17 font-semibold self-start transition-all duration-150 tap-none focus:border-white focus:text-white focus:scale-[1.02] disabled:opacity-40" data-focusable tabIndex={0} onClick={cancelCrawl}>

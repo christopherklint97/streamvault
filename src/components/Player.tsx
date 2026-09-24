@@ -110,6 +110,7 @@ function LiveChannelList({ channels, currentId, onSelect }: {
 }) {
   const listRef = useRef<HTMLDivElement>(null);
   const [epgMap, setEpgMap] = useState<EpgMap>({});
+  const cachedPrograms = useChannelStore((s) => s.programsByChannel);
 
   // Scroll current channel into view on mount
   useEffect(() => {
@@ -117,15 +118,29 @@ function LiveChannelList({ channels, currentId, onSelect }: {
     el?.scrollIntoView({ block: 'center', behavior: 'instant' });
   }, [currentId]);
 
-  // Fetch EPG for all channels in the list
+  // Retry briefly when the guide is still being populated, then refresh at
+  // programme boundaries without requiring the user to close the player.
   useEffect(() => {
     if (channels.length === 0) return;
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let quickRetries = 0;
     const ids = channels.map(ch => ch.id);
-    fetchBatchEpg(ids).then(data => {
-      if (!cancelled) setEpgMap(data);
-    });
-    return () => { cancelled = true; };
+    const refresh = async () => {
+      let missing = true;
+      try {
+        const data = await fetchBatchEpg(ids);
+        if (cancelled) return;
+        setEpgMap(data);
+        missing = ids.some(id => !getCurrentEpg(data[id]).current);
+      } catch {
+        if (cancelled) return;
+      }
+      const delay = missing && quickRetries < 3 ? 15_000 * 2 ** quickRetries++ : 5 * 60_000;
+      timer = setTimeout(() => { void refresh(); }, delay);
+    };
+    void refresh();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [channels]);
 
   return (
@@ -139,7 +154,10 @@ function LiveChannelList({ channels, currentId, onSelect }: {
           key={ch.id}
           channel={ch}
           active={ch.id === currentId}
-          programs={epgMap[ch.id]}
+          programs={getCurrentEpg(epgMap[ch.id]).current ? epgMap[ch.id] : cachedPrograms.get(ch.id)?.map(program => ({
+            title: program.title, description: program.description,
+            start: program.start.toISOString(), stop: program.stop.toISOString(),
+          })) ?? epgMap[ch.id]}
           onSelect={onSelect}
         />
       ))}

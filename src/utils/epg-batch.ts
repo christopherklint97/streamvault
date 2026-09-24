@@ -15,7 +15,7 @@ function getApiBase(): string {
   return SAME_ORIGIN ? '' : useChannelStore.getState().apiBaseUrl;
 }
 
-export async function fetchBatchEpg(channelIds: string[]): Promise<EpgMap> {
+export async function fetchBatchEpg(channelIds: string[], from?: number, to?: number): Promise<EpgMap> {
   if (channelIds.length === 0) return {};
   const base = getApiBase();
   const chunks: string[][] = [];
@@ -24,7 +24,10 @@ export async function fetchBatchEpg(channelIds: string[]): Promise<EpgMap> {
   }
   const results = await Promise.all(
     chunks.map(async (chunk) => {
-      const resp = await fetch(`${base}/api/epg/batch?ids=${chunk.join(',')}`);
+      const params = new URLSearchParams({ ids: chunk.join(',') });
+      if (from !== undefined) params.set('from', String(from));
+      if (to !== undefined) params.set('to', String(to));
+      const resp = await fetch(`${base}/api/epg/batch?${params}`);
       if (!resp.ok) return {} as EpgMap;
       const data = await resp.json();
       return (data.programs || {}) as EpgMap;

@@ -317,6 +317,16 @@ export default function ChannelList({ contentType }: ChannelListProps) {
   // EPG data for live TV channels
   const [epgMap, setEpgMap] = useState<EpgMap>({});
   const fetchedEpgIdsRef = useRef<Set<string>>(new Set());
+  const [epgRefreshTick, setEpgRefreshTick] = useState(0);
+
+  useEffect(() => {
+    if (contentType !== 'livetv') return;
+    const timer = setInterval(() => {
+      fetchedEpgIdsRef.current.clear();
+      setEpgRefreshTick(tick => tick + 1);
+    }, 61 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, [contentType]);
 
   const categories = useChannelStore((s) => s.categoriesByType[contentType] ?? EMPTY_CATEGORIES);
   const fetchCategories = useChannelStore((s) => s.fetchCategories);
@@ -452,7 +462,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
       if (!cancelled) setEpgMap(prev => ({ ...prev, ...data }));
     });
     return () => { cancelled = true; };
-  }, [contentType, channels]);
+  }, [contentType, channels, epgRefreshTick]);
 
   const totalRows = Math.ceil(channels.length / COLUMN_COUNT);
 

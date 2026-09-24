@@ -3,14 +3,12 @@ import { parseM3U, parseEPG } from './parsers.js';
 import {
   saveChannels, savePrograms, saveCategories,
   getConfig, setConfig,
-  getChannelCount, getProgramCount, getCategoryCount,
+  getChannelCount, getCategoryCount,
   getCategories, getContentTypeCounts,
   saveChannelsForCategory, markCategoryFetched,
-  saveProgramsForChannels,
 } from './db.js';
-import db from './db.js';
 import { logger } from './logger.js';
-import { fetchXtreamCategories, fetchAllCategoryStreams, fetchEpgForStreams } from './xtream.js';
+import { fetchXtreamCategories, fetchAllCategoryStreams } from './xtream.js';
 import type { XtreamConfig } from './xtream.js';
 import { matchRules } from './recording-scheduler.js';
 import { nextScheduledCrawl, shouldCrawlAtStartup } from './crawl-schedule.js';
@@ -51,7 +49,6 @@ let scheduledCrawlTimer: ReturnType<typeof setTimeout> | null = null;
 export function getStatus(): SyncState & { crawlAvailable: boolean; contentTypeCounts: Record<string, number> } {
   if (!state.isSyncing) {
     state.channelCount = getChannelCount();
-    state.programCount = getProgramCount();
     state.categoryCount = getCategoryCount();
     state.lastSyncTime = parseInt(getConfig('last_sync_time', '0'), 10);
     state.lastCrawlTime = parseInt(getConfig('last_crawl_time', '0'), 10);
@@ -151,35 +148,6 @@ export async function startCrawl(): Promise<void> {
     );
 
     if (!signal.aborted) {
-      // Phase 2: Crawl EPG for live channels
-      state.crawlProgress = 'Crawling EPG data for live channels...';
-      logger.info('Starting EPG crawl for live channels...');
-      try {
-        const liveChannelRows = db.prepare(
-          "SELECT id FROM channels WHERE content_type = 'livetv' AND epg_channel_id <> ''"
-        ).all() as Array<{ id: string }>;
-        // Extract numeric stream IDs from channel IDs (format: live_12345)
-        const liveStreamIds = liveChannelRows
-          .map(r => parseInt(r.id.replace('live_', ''), 10))
-          .filter(id => !isNaN(id));
-        logger.info(`EPG crawl: ${liveStreamIds.length} live channels to fetch EPG for`);
-
-        if (liveStreamIds.length > 0) {
-          const epgTotal = await fetchEpgForStreams(
-            config,
-            liveStreamIds,
-            (programs) => { saveProgramsForChannels(programs); },
-            signal,
-          );
-          if (signal.aborted) return;
-          state.programCount = getProgramCount();
-          logger.info(`EPG crawl complete: ${epgTotal} programs fetched`);
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Unknown error';
-        logger.warn(`EPG crawl failed (non-fatal): ${msg}`);
-      }
-
       const now = Date.now();
       setConfig('last_crawl_time', String(now));
       state.lastCrawlTime = now;
@@ -218,26 +186,17 @@ export function cancelCrawl(): void {
   }
 }
 
-/** Schedule the expensive full catalog crawl once a day during the quietest hour. */
+/** Rebuild the searchable catalog overnight; EPG is fetched as needed. */
 function scheduleNextCrawl(): void {
   if (scheduledCrawlTimer) { clearTimeout(scheduledCrawlTimer); scheduledCrawlTimer = null; }
+  if (getConfig('input_mode', 'manual') !== 'xtream' || !getXtreamConfig()) return;
 
-  const inputMode = getConfig('input_mode', 'manual');
-  if (inputMode !== 'xtream') return;
-  if (!getXtreamConfig()) return;
-
-  const now = new Date();
-  const nextCrawl = nextScheduledCrawl(now);
-
-  const msUntil = nextCrawl.getTime() - now.getTime();
-  const hoursUntil = (msUntil / 3600000).toFixed(1);
-
+  const nextCrawl = nextScheduledCrawl(new Date());
   scheduledCrawlTimer = setTimeout(() => {
-    logger.info('Scheduled crawl triggered');
-    startCrawl();
-  }, msUntil);
-
-  logger.info(`Next crawl scheduled in ${hoursUntil}h (at ${nextCrawl.toLocaleTimeString()})`);
+    logger.info('Scheduled catalog crawl triggered');
+    void startCrawl();
+  }, nextCrawl.getTime() - Date.now());
+  logger.info(`Next catalog crawl scheduled for ${nextCrawl.toLocaleTimeString()}`);
 }
 
 // ---------- Manual M3U/EPG sync ----------
@@ -450,26 +409,15 @@ export function startupSync(): void {
       sync();
     } else {
       state.channelCount = getChannelCount();
-      state.programCount = getProgramCount();
       state.categoryCount = getCategoryCount();
       scheduleNext();
     }
   }
 
-  // If we have no cached streams but have categories, start a background crawl
-  const inputMode = getConfig('input_mode', 'manual');
-  if (inputMode === 'xtream') {
-    const channelCount = getChannelCount();
-    if (shouldCrawlAtStartup(channelCount)) {
-      // Populate a new installation, but never turn a service restart into a
-      // repeat of an interrupted full crawl. Cached data remains usable until
-      // the next quiet-hours run.
-      logger.info('Starting background stream crawl (catalog is empty)...');
-      setTimeout(() => startCrawl(), 5000); // Delay 5s to let startup finish
-    } else {
-      const lastCrawl = parseInt(getConfig('last_crawl_time', '0'), 10);
-      const age = lastCrawl > 0 ? `${((now - lastCrawl) / 3600000).toFixed(1)}h ago` : 'not recorded';
-      logger.info(`Streams cached (${channelCount}), last crawl ${age}; deferring refresh to quiet hours`);
+  if (getConfig('input_mode', 'manual') === 'xtream') {
+    if (shouldCrawlAtStartup(getChannelCount())) {
+      logger.info('Catalog empty; starting background crawl after startup');
+      setTimeout(() => { void startCrawl(); }, 5000);
     }
     scheduleNextCrawl();
   }
