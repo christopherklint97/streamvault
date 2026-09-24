@@ -72,10 +72,43 @@ describe('LiveStreamRecovery', () => {
     });
 
     recovery.begin('live_1015944');
+    recovery.progress(); // steady-state stall after the first decoded frame
     vi.advanceTimersByTime(10_249);
     expect(recover).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
 
+    expect(recover).toHaveBeenCalledWith('stalled', 1);
+  });
+
+  it('allows a slow first frame without restarting before the startup deadline', () => {
+    const recover = vi.fn();
+    const recovery = new LiveStreamRecovery(recover, {
+      stallTimeoutMs: 10_000,
+      startupTimeoutMs: 30_000,
+      retryDelaysMs: [250],
+    });
+
+    recovery.begin('live_1015944');
+    vi.advanceTimersByTime(25_000);
+    expect(recover).not.toHaveBeenCalled();
+    recovery.progress(); // first decoded frame
+    vi.advanceTimersByTime(10_249);
+    expect(recover).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(recover).toHaveBeenCalledWith('stalled', 1);
+  });
+
+  it('reconnects a dead startup after its longer initial deadline', () => {
+    const recover = vi.fn();
+    const recovery = new LiveStreamRecovery(recover, {
+      stallTimeoutMs: 10_000,
+      startupTimeoutMs: 30_000,
+      retryDelaysMs: [250],
+    });
+    recovery.begin('live_1015944');
+    vi.advanceTimersByTime(30_249);
+    expect(recover).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
     expect(recover).toHaveBeenCalledWith('stalled', 1);
   });
 
@@ -147,6 +180,7 @@ describe('LiveStreamRecovery', () => {
     });
 
     recovery.begin('live_1015944');
+    recovery.progress();
     recovery.suspend();
     vi.advanceTimersByTime(60_000);
     expect(recover).not.toHaveBeenCalled();
