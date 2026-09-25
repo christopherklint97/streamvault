@@ -72,7 +72,7 @@ import {
   versionRecordingRuleUpdates,
 } from './recording-api.js';
 import { matchProgramTitle } from './schedule-reconciliation.js';
-import { rewriteHlsManifest } from './hls.js';
+import { authorizeHlsProxyUrl, rewriteHlsManifest, signHlsProxyUrl } from './hls.js';
 import { buildFragmentedMp4Args } from './vod-remux.js';
 import { buildBrowserCompatibleVideoArgs } from './browser-transcode.js';
 import { buildIosHlsArgs, iosHlsContentType } from './ios-hls.js';
@@ -102,6 +102,8 @@ import {
   normalizeAllowedOrigins,
   requireAuth,
   validateExternalHttpUrl,
+  validateSourceHttpUrl,
+  validateXtreamServerUrl,
 } from './security.js';
 import { isDatabaseCorruptionError, stopDatabaseBackupWorker } from './db-lifecycle.js';
 import {
@@ -122,6 +124,8 @@ const IOS_HLS_TICKET_TTL_MS = 30_000;
 const MAX_IOS_HLS_SESSIONS = 2;
 const liveAudioTranscodes = new ConcurrentStreamLimiter(2);
 const iosHlsTicketSecret = randomBytes(32).toString('hex');
+const hlsProxyTicketSecret = randomBytes(32);
+const signedHlsProxyUrl = (url: string) => signHlsProxyUrl(url, hlsProxyTicketSecret);
 const iosHlsTicketNonces = new Map<string, number>();
 const iosHlsAuthorizationLimiter = createIosHlsAuthorizationLimiter();
 type IosHlsSession = {
@@ -212,6 +216,15 @@ function getXtreamConfig(): XtreamConfig | null {
   const password = getConfig('xtream_password');
   if (!server || !username || !password) return null;
   return { server, username, password };
+}
+
+function validateProxySourceUrl(rawUrl: string) {
+  const xtreamServer = getConfig('xtream_server');
+  return validateSourceHttpUrl(rawUrl, xtreamServer, allowedProxyHostsFromConfig(xtreamServer, process.env.STREAMVAULT_PROXY_ALLOWED_HOSTS));
+}
+
+function allowUpstreamRedirect(url: string): boolean {
+  return validateSourceHttpUrl(url, getConfig('xtream_server')).ok;
 }
 
 const categoryRefreshes = new Map<string, Promise<void>>();
@@ -757,7 +770,7 @@ function subtitleSource(channelId: string, rawUrl: unknown, iosFallback = false)
     };
   }
   if (!channelId.startsWith('episode_') || typeof rawUrl !== 'string') return null;
-  const validation = validateExternalHttpUrl(rawUrl, allowedProxyHostsFromConfig(getConfig('xtream_server'), process.env.STREAMVAULT_PROXY_ALLOWED_HOSTS));
+  const validation = validateProxySourceUrl(rawUrl);
   if (!validation.ok) return null;
   const sourcePath = `/api/stream/${encodeURIComponent(channelId)}?url=${encodeURIComponent(validation.url.toString())}&type=series`;
   return {
@@ -1056,7 +1069,7 @@ app.get('/api/transcode/:channelId', (req, res) => {
   if (channel?.url && channel.content_type !== 'livetv') {
     sourcePath = `/api/stream/${encodeURIComponent(channelId)}`;
   } else if (channelId.startsWith('episode_') && typeof req.query.url === 'string') {
-    const validation = validateExternalHttpUrl(req.query.url, allowedProxyHostsFromConfig(getConfig('xtream_server'), process.env.STREAMVAULT_PROXY_ALLOWED_HOSTS));
+    const validation = validateProxySourceUrl(req.query.url);
     if (!validation.ok) {
       res.status(400).json({ error: validation.error });
       return;
@@ -1118,7 +1131,7 @@ app.get('/api/ios-hls-authorize/:channelId/index.m3u8', (req, res) => {
     res.set('Retry-After', '60').status(429).json({ error: 'Too many iPhone HLS starts' });
     return;
   }
-  const validation = validateExternalHttpUrl(req.query.url, allowedProxyHostsFromConfig(getConfig('xtream_server'), process.env.STREAMVAULT_PROXY_ALLOWED_HOSTS));
+  const validation = validateProxySourceUrl(req.query.url);
   if (!validation.ok) {
     res.status(400).json({ error: validation.error });
     return;
@@ -1154,7 +1167,7 @@ app.get('/api/ios-hls/:channelId/index.m3u8', (req, res) => {
     res.status(404).json({ error: 'iPhone VOD source not found' });
     return;
   }
-  const requestValidation = validateExternalHttpUrl(req.query.url, allowedProxyHostsFromConfig(getConfig('xtream_server'), process.env.STREAMVAULT_PROXY_ALLOWED_HOSTS));
+  const requestValidation = validateProxySourceUrl(req.query.url);
   if (!requestValidation.ok) {
     res.status(400).json({ error: requestValidation.error });
     return;
@@ -1171,7 +1184,7 @@ app.get('/api/ios-hls/:channelId/index.m3u8', (req, res) => {
       if (fallback.id !== channelId) logger.info(`iOS HLS: iPhone fallback ${channelId} → ${fallback.id}`);
     }
   }
-  const sourceValidation = validateExternalHttpUrl(sourceUrlParam, allowedProxyHostsFromConfig(getConfig('xtream_server'), process.env.STREAMVAULT_PROXY_ALLOWED_HOSTS));
+  const sourceValidation = validateProxySourceUrl(sourceUrlParam);
   if (!sourceValidation.ok) {
     res.status(400).json({ error: sourceValidation.error });
     return;
@@ -1317,7 +1330,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
     streamUrl = channel.url;
     contentType = channel.content_type;
   } else if (req.query.url) {
-    const validation = validateExternalHttpUrl(req.query.url as string, allowedProxyHostsFromConfig(getConfig('xtream_server'), process.env.STREAMVAULT_PROXY_ALLOWED_HOSTS));
+    const validation = validateProxySourceUrl(req.query.url as string);
     if (!validation.ok) {
       res.status(400).json({ error: validation.error });
       return;
@@ -1331,7 +1344,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
     return;
   }
   const channelName = channel?.name || channelId;
-  logger.info(`Stream proxy: ${channelId} "${channelName}" type=${contentType} → ${streamUrl.substring(0, 80)}...`);
+  logger.info(`Stream proxy: ${channelId} "${channelName}" type=${contentType} → upstream`);
 
   const isLive = contentType === 'livetv';
 
@@ -1352,9 +1365,10 @@ app.get('/api/stream/:channelId', async (req, res) => {
       upstreamHeaders,
       10,
       isLive ? 30_000 : 30_000,
+      allowUpstreamRedirect,
     );
 
-    logger.info(`Stream proxy: final URL=${upstream.finalUrl.substring(0, 100)}...`);
+    logger.info('Stream proxy: upstream redirect resolved');
     const upstreamCT = pickHeader(upstream.headers, 'content-type');
     const upstreamCL = pickHeader(upstream.headers, 'content-length');
     logger.info(`Stream proxy: upstream responded ${upstream.statusCode}, content-type=${upstreamCT}, content-length=${upstreamCL}`);
@@ -1382,7 +1396,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
 
     // Reject HTML responses — upstream returned an error page instead of video
     if (upstreamCT && upstreamCT.includes('text/html')) {
-      logger.error(`Stream proxy: upstream returned text/html for ${channelId} — likely an error page (final URL: ${upstream.finalUrl.substring(0, 100)})`);
+      logger.error(`Stream proxy: upstream returned text/html for ${channelId} — likely an error page`);
       upstream.body.on('error', () => {});
       upstream.body.dump().catch(() => {});
       res.status(502).json({ error: 'Stream unavailable — provider returned an error page instead of video' });
@@ -1430,7 +1444,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
         res.status(502).json({ error: 'HLS playlist too large to proxy safely' });
         return;
       }
-      const rewritten = rewriteHlsManifest(body, upstream.finalUrl || streamUrl);
+      const rewritten = rewriteHlsManifest(body, upstream.finalUrl || streamUrl, signedHlsProxyUrl);
       res.send(rewritten);
     } else if (pipeline === 'ffmpeg-pipe' || pipeline === 'ffmpeg-url') {
       const releaseAudioSlot = audioOnly ? liveAudioTranscodes.acquire() : () => {};
@@ -1527,13 +1541,18 @@ app.get('/api/stream/:channelId', async (req, res) => {
 
 // Generic URL proxy for HLS segments and video chunks
 app.get('/api/proxy', async (req, res) => {
-  const url = req.query.url as string;
-  if (!url) {
+  const url = req.query.url;
+  if (typeof url !== 'string' || !url) {
     res.status(400).json({ error: 'url parameter required' });
     return;
   }
 
-  const validation = validateExternalHttpUrl(url, allowedProxyHostsFromConfig(getConfig('xtream_server'), process.env.STREAMVAULT_PROXY_ALLOWED_HOSTS));
+  const xtreamServer = getConfig('xtream_server');
+  const validation = authorizeHlsProxyUrl(
+    url, typeof req.query.ticket === 'string' ? req.query.ticket : undefined,
+    hlsProxyTicketSecret, xtreamServer,
+    allowedProxyHostsFromConfig(xtreamServer, process.env.STREAMVAULT_PROXY_ALLOWED_HOSTS),
+  );
   if (!validation.ok) {
     res.status(400).json({ error: validation.error });
     return;
@@ -1543,7 +1562,7 @@ app.get('/api/proxy', async (req, res) => {
     const upstreamHeaders: Record<string, string> = { 'User-Agent': 'StreamVault/1.0' };
     if (req.headers.range) upstreamHeaders['Range'] = req.headers.range;
 
-    const upstream = await requestStream(validation.url.toString(), upstreamHeaders, 10, 30_000);
+    const upstream = await requestStream(validation.url.toString(), upstreamHeaders, 10, 30_000, allowUpstreamRedirect);
 
     if (upstream.statusCode >= 400) {
       upstream.body.on('error', () => {});
@@ -1553,6 +1572,25 @@ app.get('/api/proxy', async (req, res) => {
     }
 
     const ct = pickHeader(upstream.headers, 'content-type');
+    const isHls = ct?.includes('mpegurl') || ct?.includes('m3u')
+      || new URL(upstream.finalUrl).pathname.endsWith('.m3u8');
+    if (isHls) {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      for await (const chunk of upstream.body) {
+        size += chunk.length;
+        if (size > 2_000_000) {
+          res.status(502).json({ error: 'HLS playlist too large to proxy safely' });
+          return;
+        }
+        chunks.push(chunk as Buffer);
+      }
+      res.status(upstream.statusCode).set('Access-Control-Allow-Origin', '*')
+        .type('application/vnd.apple.mpegurl').send(
+        rewriteHlsManifest(Buffer.concat(chunks).toString('utf8'), upstream.finalUrl, signedHlsProxyUrl),
+      );
+      return;
+    }
     if (ct) res.setHeader('Content-Type', ct);
     res.setHeader('Access-Control-Allow-Origin', '*');
     const cl = pickHeader(upstream.headers, 'content-length');
@@ -2056,7 +2094,7 @@ app.put('/api/config', requireAuth, (req, res) => {
   }
   for (const [name, value] of [['playlistUrl', playlistUrl], ['epgUrl', epgUrl], ['xtreamServer', xtreamServer]] as const) {
     if (value !== undefined && value !== '') {
-      const validation = validateExternalHttpUrl(value);
+      const validation = name === 'xtreamServer' ? validateXtreamServerUrl(value) : validateExternalHttpUrl(value);
       if (!validation.ok) {
         res.status(400).json({ error: `${name}: ${validation.error}` });
         return;

@@ -77,7 +77,8 @@ scripts/        # Tizen signing, packaging, and deployment
 ```bash
 npm install
 npm run dev       # Start frontend dev server
-npm run build     # TypeScript check + Vite build (PWA + Tizen 6.5+ widget)
+npm run build     # Web PWA (root-relative assets)
+npm run build:wgt # Tizen 6.5+ unsigned widget bundle (relative assets, no PWA)
 npm run build:tizen5  # Tizen 5.0/5.5 widget (Chromium 63) — legacy bundle, no PWA
 npm run lint      # ESLint
 npm run typecheck # TypeScript only
@@ -107,7 +108,7 @@ Set `STREAMVAULT_AUTH_TOKEN` to protect config, sync/crawl, recordings, and reco
 
 Tokens are backend-specific. StreamVault never sends the active backend's token while probing a different origin, and a successful switch replaces or clears the stored token.
 
-The stream proxy validates URLs and blocks localhost/private/link-local targets. `/api/proxy` is limited to the configured Xtream server host plus optional `STREAMVAULT_PROXY_ALLOWED_HOSTS` entries.
+The stream proxy validates client-supplied entry URLs against the configured Xtream server host and optional `STREAMVAULT_PROXY_ALLOWED_HOSTS` entries. Redirects may lead to public CDN origins, but private DNS/IP destinations are rejected; private LAN redirects are allowed only back to the same saved Xtream origin. HLS manifests give their rewritten CDN segment URLs expiring URL-bound tickets; an arbitrary public URL cannot be sent directly to `/api/proxy`.
 
 Useful server environment variables:
 
@@ -158,7 +159,21 @@ docker compose up -d --build
 
 `npm run sign:tizen5` does the same for the Tizen 5.0/5.5 widget, and `TIZEN_TARGET=5` switches `scripts/package-wgt.sh`, `scripts/deploy-tv.sh` and `scripts/sign-and-deploy.cjs` to that build. `public/config.xml` declares `required_version="6.5"` for the default widget; the tizen5 build lowers its own copy to `5.0` at build time, so each flavour installs only where it runs.
 
-The **Build Tizen WGT** workflow (Actions → Run workflow) builds either flavour on GitHub and uploads it as an **unsigned** `.wgt`, optionally as a release. A Samsung TV installs a widget only when it is signed with a Samsung distributor certificate for that TV, and updates it only under the same author certificate as before, so signing stays on your machine: `tizen package -t wgt -s <your profile> -- StreamVault-tizen5-unsigned.wgt`, or unzip it into `dist/` and run `node scripts/sign-wgt.cjs`.
+The **Build Tizen WGT** workflow builds both flavours as **unsigned** `.wgt` files. A Samsung TV installs a widget only when it is signed with a Samsung distributor certificate for that TV, and updates it only under the same author certificate as before. Apps2Samsung can handle signing during installation; for manual installation use your own Certificate Manager profile: `tizen package -t wgt -s <your profile> -- StreamVault-tizen5-unsigned.wgt`, or unzip it into `dist/` and run `node scripts/sign-wgt.cjs`. Reuse the same signing identity for updates.
+
+## Install on a Samsung TV with Apps2Samsung
+
+1. **Run the backend first** on a PC/NAS/Raspberry Pi on the TV's network using [Backend required](#backend-required). Confirm `http://<backend-ip>:3002/api/health` is reachable from another LAN device. The `.wgt` contains only the frontend; it does not contain the backend or an IPTV subscription.
+2. Download [Apps2Samsung](https://github.com/Apps2Samsung/Apps2Samsung/releases) on a computer or phone on the same network as the TV. Enable Developer Mode on the TV and configure it to allow that device's IP, following [Apps2Samsung's TV setup instructions](https://github.com/Apps2Samsung/Apps2Samsung/wiki/FAQ#-how-to-enable-developer-mode-on-your-tv). Restart the TV if prompted.
+3. Download **one** unsigned widget from the [StreamVault releases](https://github.com/christopherklint97/streamvault/releases): `StreamVault-tizen5-unsigned.wgt` for Tizen 5.0/5.5 (including older 2019 TVs such as QE49Q70RATXXC), or `StreamVault-default-unsigned.wgt` for Tizen 6.5+. Check the Tizen version in TV settings or Apps2Samsung if unsure. Do not install the default widget on Tizen 5.
+4. Open Apps2Samsung, discover/select the TV (or enter its IP), choose the **custom/local `.wgt`** installation option, and select the downloaded file. Follow its Samsung account/certificate prompts and install. Apps2Samsung signs the widget for that TV; uploading an unsigned `.wgt` to GitHub alone cannot install it. Keep the installer signing identity for future updates.
+5. Launch StreamVault on the TV. In **Settings**, enter `http://<backend-ip>:3002` as **StreamVault Server URL** and select **Connect**. Add your provider's Xtream URL and credentials only after the backend connects. A provider URL is not the StreamVault backend URL.
+
+The [Apps2Samsung community catalog entry](https://github.com/Apps2Samsung/tizen-community-packages/blob/main/packages/christopherklint97__streamvault.json) is currently disabled; use the custom/local `.wgt` path rather than expecting StreamVault in its catalog. Installation on a physical TV has not been verified by this repository's automated build.
+
+### Publishing the two widget assets
+
+From GitHub **Actions → Build Tizen WGT → Run workflow**, choose the branch to build and select **release** only when you intend to publish. The run always builds and validates both flavours, then uploads one Actions artifact (`StreamVault-unsigned-wgts`) with the two distinct files above. With **release** checked, it also creates **one GitHub Release** with both `.wgt` files attached. Without it, download the Actions artifact (no release is created). The release tag includes the widget version and run ID/attempt so reruns do not overwrite an earlier release. Both public builds leave `VITE_SERVER_URL` and `VITE_SERVER_IP` empty; configure the backend on each TV after installation. Review and test the assets before promoting a release or requesting a community catalog update; this workflow does not enable or modify the catalog.
 
 ## Deployment
 

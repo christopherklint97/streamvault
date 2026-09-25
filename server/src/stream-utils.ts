@@ -1,6 +1,7 @@
 import { Readable } from 'node:stream';
 import { request, type Dispatcher } from 'undici';
-import { getChannelById } from './db.js';
+import { getChannelById, getConfig } from './db.js';
+import { validateSourceHttpUrl } from './security.js';
 import { logger } from './logger.js';
 
 /** undici BodyReadable extends Readable with a dump() helper for safe discard. */
@@ -15,9 +16,10 @@ export const VLC_HEADERS: Record<string, string> = {
 };
 
 /** Manually follow redirects while preserving headers (Node fetch strips them across origins) */
-export async function fetchWithRedirects(url: string, headers: Record<string, string>, maxRedirects = 10, timeout?: number): Promise<Response> {
+export async function fetchWithRedirects(url: string, headers: Record<string, string>, maxRedirects = 10, timeout?: number, allowUrl?: (url: string) => boolean): Promise<Response> {
   let currentUrl = url;
   for (let i = 0; i < maxRedirects; i++) {
+    if (allowUrl && !allowUrl(currentUrl)) throw new Error('Redirect target is not allowed');
     const opts: RequestInit = {
       headers,
       redirect: 'manual',
@@ -28,7 +30,7 @@ export async function fetchWithRedirects(url: string, headers: Record<string, st
       const location = resp.headers.get('location');
       if (!location) throw new Error(`Redirect ${resp.status} with no Location header`);
       currentUrl = new URL(location, currentUrl).href;
-      logger.info(`Stream redirect ${resp.status} → ${currentUrl.substring(0, 100)}...`);
+      logger.info(`Stream redirect ${resp.status} → upstream`);
       if (currentUrl.includes('cloudflare-terms-of-service-abuse') || currentUrl.includes('cloudflare.com/abuse')) {
         throw new Error('Stream blocked by Cloudflare — provider CDN flagged for abuse');
       }
@@ -63,9 +65,11 @@ export async function requestStream(
   headers: Record<string, string>,
   maxRedirects = 10,
   timeoutMs = 30_000,
+  allowUrl?: (url: string) => boolean,
 ): Promise<StreamResponse> {
   let currentUrl = url;
   for (let i = 0; i < maxRedirects; i++) {
+    if (allowUrl && !allowUrl(currentUrl)) throw new Error('Redirect target is not allowed');
     const resp: Dispatcher.ResponseData = await request(currentUrl, {
       method: 'GET',
       headers,
@@ -80,7 +84,7 @@ export async function requestStream(
       }
       const locStr = Array.isArray(location) ? location[0] : location;
       currentUrl = new URL(locStr, currentUrl).href;
-      logger.info(`Stream redirect ${resp.statusCode} → ${currentUrl.substring(0, 100)}...`);
+      logger.info(`Stream redirect ${resp.statusCode} → upstream`);
       // dump() reads-and-discards safely; destroy() causes undici to emit an
       // unhandled error event that can crash the process.
       await resp.body.dump().catch(() => {});
@@ -119,7 +123,8 @@ export async function resolveStreamUrl(channelId: string): Promise<string> {
   }
 
   // Follow redirects to get the final URL
-  const resp = await fetchWithRedirects(channel.url, VLC_HEADERS, 10, 30_000);
+  const resp = await fetchWithRedirects(channel.url, VLC_HEADERS, 10, 30_000,
+    url => validateSourceHttpUrl(url, getConfig('xtream_server')).ok);
   // We got a final response — extract its URL
   const finalUrl = resp.url || channel.url;
   // Consume the body to free resources

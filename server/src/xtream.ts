@@ -1,5 +1,6 @@
 import type { DBCategory, DBChannel, DBProgram } from './db.js';
 import { logger } from './logger.js';
+import { validateExternalHttpUrl } from './security.js';
 import { buildAiringKey, buildContentKey } from './epg-identity.js';
 
 // ---------- Xtream JSON API types ----------
@@ -205,7 +206,21 @@ const VLC_HEADERS = {
 async function fetchJson<T>(url: string, signal: AbortSignal, label: string): Promise<T> {
   logger.debug(`Fetching ${label}`);
   const start = Date.now();
-  const response = await fetch(url, { signal, headers: VLC_HEADERS });
+  let currentUrl = url;
+  let response: Response | undefined;
+  const sourceOrigin = new URL(url).origin;
+  for (let redirects = 0; redirects < 6; redirects++) {
+    if (redirects > 0 && !validateExternalHttpUrl(currentUrl).ok && new URL(currentUrl).origin !== sourceOrigin) {
+      throw new Error('Redirect target is not allowed');
+    }
+    response = await fetch(currentUrl, { signal, headers: VLC_HEADERS, redirect: 'manual' });
+    if (response.status < 300 || response.status >= 400) break;
+    const location = response.headers.get('location');
+    await response.body?.cancel();
+    if (!location) throw new Error(`${label}: Redirect without Location`);
+    currentUrl = new URL(location, currentUrl).href;
+  }
+  if (!response || (response.status >= 300 && response.status < 400)) throw new Error(`${label}: Too many redirects`);
   if (!response.ok) {
     throw new Error(`${label}: HTTP ${response.status} ${response.statusText}`);
   }
