@@ -108,7 +108,7 @@ Set `STREAMVAULT_AUTH_TOKEN` to protect config, sync/crawl, recordings, and reco
 
 Tokens are backend-specific. StreamVault never sends the active backend's token while probing a different origin, and a successful switch replaces or clears the stored token.
 
-The stream proxy validates client-supplied entry URLs against the configured Xtream server host and optional `STREAMVAULT_PROXY_ALLOWED_HOSTS` entries. Redirects may lead to public CDN origins, but private DNS/IP destinations are rejected; private LAN redirects are allowed only back to the same saved Xtream origin.
+The stream proxy validates client-supplied entry URLs against the configured Xtream server host and optional `STREAMVAULT_PROXY_ALLOWED_HOSTS` entries. Redirects may lead to public CDN origins, but private DNS/IP destinations are rejected; private LAN redirects are allowed only back to the same saved Xtream origin. HLS manifests give their rewritten CDN segment URLs expiring URL-bound tickets; an arbitrary public URL cannot be sent directly to `/api/proxy`.
 
 Useful server environment variables:
 

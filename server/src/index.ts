@@ -72,7 +72,7 @@ import {
   versionRecordingRuleUpdates,
 } from './recording-api.js';
 import { matchProgramTitle } from './schedule-reconciliation.js';
-import { rewriteHlsManifest } from './hls.js';
+import { authorizeHlsProxyUrl, rewriteHlsManifest, signHlsProxyUrl } from './hls.js';
 import { buildFragmentedMp4Args } from './vod-remux.js';
 import { buildBrowserCompatibleVideoArgs } from './browser-transcode.js';
 import { buildIosHlsArgs, iosHlsContentType } from './ios-hls.js';
@@ -124,6 +124,8 @@ const IOS_HLS_TICKET_TTL_MS = 30_000;
 const MAX_IOS_HLS_SESSIONS = 2;
 const liveAudioTranscodes = new ConcurrentStreamLimiter(2);
 const iosHlsTicketSecret = randomBytes(32).toString('hex');
+const hlsProxyTicketSecret = randomBytes(32);
+const signedHlsProxyUrl = (url: string) => signHlsProxyUrl(url, hlsProxyTicketSecret);
 const iosHlsTicketNonces = new Map<string, number>();
 const iosHlsAuthorizationLimiter = createIosHlsAuthorizationLimiter();
 type IosHlsSession = {
@@ -1442,7 +1444,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
         res.status(502).json({ error: 'HLS playlist too large to proxy safely' });
         return;
       }
-      const rewritten = rewriteHlsManifest(body, upstream.finalUrl || streamUrl);
+      const rewritten = rewriteHlsManifest(body, upstream.finalUrl || streamUrl, signedHlsProxyUrl);
       res.send(rewritten);
     } else if (pipeline === 'ffmpeg-pipe' || pipeline === 'ffmpeg-url') {
       const releaseAudioSlot = audioOnly ? liveAudioTranscodes.acquire() : () => {};
@@ -1539,13 +1541,18 @@ app.get('/api/stream/:channelId', async (req, res) => {
 
 // Generic URL proxy for HLS segments and video chunks
 app.get('/api/proxy', async (req, res) => {
-  const url = req.query.url as string;
-  if (!url) {
+  const url = req.query.url;
+  if (typeof url !== 'string' || !url) {
     res.status(400).json({ error: 'url parameter required' });
     return;
   }
 
-  const validation = validateProxySourceUrl(url);
+  const xtreamServer = getConfig('xtream_server');
+  const validation = authorizeHlsProxyUrl(
+    url, typeof req.query.ticket === 'string' ? req.query.ticket : undefined,
+    hlsProxyTicketSecret, xtreamServer,
+    allowedProxyHostsFromConfig(xtreamServer, process.env.STREAMVAULT_PROXY_ALLOWED_HOSTS),
+  );
   if (!validation.ok) {
     res.status(400).json({ error: validation.error });
     return;
@@ -1565,6 +1572,25 @@ app.get('/api/proxy', async (req, res) => {
     }
 
     const ct = pickHeader(upstream.headers, 'content-type');
+    const isHls = ct?.includes('mpegurl') || ct?.includes('m3u')
+      || new URL(upstream.finalUrl).pathname.endsWith('.m3u8');
+    if (isHls) {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      for await (const chunk of upstream.body) {
+        size += chunk.length;
+        if (size > 2_000_000) {
+          res.status(502).json({ error: 'HLS playlist too large to proxy safely' });
+          return;
+        }
+        chunks.push(chunk as Buffer);
+      }
+      res.status(upstream.statusCode).set('Access-Control-Allow-Origin', '*')
+        .type('application/vnd.apple.mpegurl').send(
+        rewriteHlsManifest(Buffer.concat(chunks).toString('utf8'), upstream.finalUrl, signedHlsProxyUrl),
+      );
+      return;
+    }
     if (ct) res.setHeader('Content-Type', ct);
     res.setHeader('Access-Control-Allow-Origin', '*');
     const cl = pickHeader(upstream.headers, 'content-length');

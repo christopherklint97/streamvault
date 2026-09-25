@@ -114,7 +114,7 @@ function isPrivateIpv6(ip: string): boolean {
     || lower.startsWith('::ffff:')
     || lower.startsWith('fc')
     || lower.startsWith('fd')
-    || /^fe[89ab]/.test(lower)
+    || lower.startsWith('fe')
     || lower.startsWith('ff');
 }
 

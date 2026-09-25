@@ -81,6 +81,7 @@ describe('server security helpers', () => {
     expect(validateExternalHttpUrl('http://[::1]/video.ts').ok).toBe(false);
     expect(validateExternalHttpUrl('http://[::ffff:127.0.0.1]/video.ts').ok).toBe(false);
     expect(validateExternalHttpUrl('http://[fe90::1]/video.ts').ok).toBe(false);
+    expect(validateExternalHttpUrl('http://[fec0::1]/video.ts').ok).toBe(false);
     expect(validateExternalHttpUrl('http://[fc00::1]/video.ts').ok).toBe(false);
     expect(validateExternalHttpUrl('http://[ff02::1]/video.ts').ok).toBe(false);
   });
