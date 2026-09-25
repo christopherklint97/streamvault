@@ -68,11 +68,24 @@ jobs:
               npm run build:tizen5
               WANT=5.0
             else
-              npm run build
+              npm run build:wgt
               WANT=6.5
             fi
             test -f dist/config.xml && test -f dist/index.html || {
               echo "::error::$TARGET build lacks config.xml or index.html"; exit 1; }
+            # A WGT starts at a local index.html, never at the web server root.
+            grep -E 'src="\./assets/[^\"]+\.js"' dist/index.html >/dev/null || {
+              echo "::error::$TARGET lacks a relative asset script"; exit 1; }
+            grep -E 'href="\./assets/[^\"]+\.css"' dist/index.html >/dev/null || {
+              echo "::error::$TARGET lacks a relative asset stylesheet"; exit 1; }
+            if grep -E '(src|href)="/' dist/index.html >/dev/null; then
+              echo "::error::$TARGET has root-relative asset references"; exit 1
+            fi
+            if grep -E 'crossorigin' dist/index.html >/dev/null; then
+              echo "::error::$TARGET has crossorigin on local widget assets"; exit 1
+            fi
+            test ! -e dist/sw.js || {
+              echo "::error::$TARGET unexpectedly contains a web service worker"; exit 1; }
             # A 5.0 manifest with the modern bundle (or vice versa) cannot run.
             FLOOR="$(grep -o 'required_version="[^"]*"' dist/config.xml | sed -E 's/.*"([^"]*)"/\1/')"
             [ "$FLOOR" = "$WANT" ] || {
@@ -88,10 +101,11 @@ jobs:
             (cd dist && zip -q -r -X "../$WGT" .)
             unzip -tq "$WGT"
             ENTRIES="$(unzip -Z -1 "$WGT")"
-            printf '%s\n' "$ENTRIES" | grep -Fxq config.xml
-            printf '%s\n' "$ENTRIES" | grep -Fxq index.html
-            ! printf '%s\n' "$ENTRIES" | grep -Eq '(^|/)(author-signature\.xml|signature[0-9]*\.xml)$' || {
-              echo "::error::$TARGET archive contains signatures"; exit 1; }
+            printf '%s\n' "$ENTRIES" | grep -Fx config.xml >/dev/null
+            printf '%s\n' "$ENTRIES" | grep -Fx index.html >/dev/null
+            if printf '%s\n' "$ENTRIES" | grep -E '(^|/)(author-signature\.xml|signature[0-9]*\.xml)$' >/dev/null; then
+              echo "::error::$TARGET archive contains signatures"; exit 1
+            fi
             cmp dist/config.xml <(unzip -p "$WGT" config.xml)
             echo "$WGT: required_version=$FLOOR, unsigned, archive OK"
           done
@@ -151,7 +165,34 @@ jobs:
             printf 'A StreamVault backend on your LAN is required; set its URL in the TV app Settings after installing. No backend URL is embedded in these builds.\n\n'
             printf 'Use Apps2Samsung to install the appropriate `.wgt` (it signs for your TV), or sign with your own Samsung Certificate Manager profile before installing. Keep the same author certificate for updates. See README for steps.\n'
           } > notes.md
-          gh release create "$TAG" "${files[@]}" \
-            --repo "$REPO" \
+          # A failed upload or readback must not leave a partial public release.
+          # This tag is unique to the run attempt; never overwrite an older run.
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists"; exit 1
+          fi
+          release_started=0
+          cleanup_on_failure() {
+            status=$?
+            trap - EXIT
+            if [ "$status" -ne 0 ] && [ "$release_started" -eq 1 ]; then
+              gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag ||
+                echo "::error::Failed to clean up release $TAG; delete its draft and tag manually"
+            fi
+            exit "$status"
+          }
+          trap cleanup_on_failure EXIT
+          release_started=1
+          gh release create "$TAG" \
+            --repo "$REPO" --target "$SHA" --draft \
             --title "StreamVault widgets v$VERSION (run $RUN_ID)" \
             --notes-file notes.md
+          gh release upload "$TAG" "${files[@]}" --repo "$REPO"
+          # Read back the server's asset list, not just the upload exit code.
+          expected=$(printf '%s\n' StreamVault-default-unsigned.wgt StreamVault-tizen5-unsigned.wgt)
+          actual=$(gh release view "$TAG" --repo "$REPO" --json isDraft,assets \
+            --jq 'if .isDraft then (.assets | map(.name) | sort | join("\n")) else error("release is not a draft") end')
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::Release assets do not match the two built widgets"; exit 1
+          fi
+          gh release edit "$TAG" --repo "$REPO" --draft=false
+          release_started=0

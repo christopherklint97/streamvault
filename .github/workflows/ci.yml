@@ -50,6 +50,8 @@ jobs:
 
       - name: Test
         run: npm run test
+      - name: Apps2Samsung workflow contract checks (offline)
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/test_tizen_wgt_workflow.py
 
       - name: Test server
         run: cd server && npm run test

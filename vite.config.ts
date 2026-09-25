@@ -364,10 +364,23 @@ function tizenLegacyOnly(): Plugin {
   }
 }
 
-// Two build flavours from one config:
+// The local Tizen widget scheme has no CORS headers. Vite's crossorigin on
+// module scripts and stylesheets would make the WebView refuse local assets.
+function tizenLocalAssets(): Plugin {
+  return {
+    name: 'tizen-local-assets',
+    enforce: 'post',
+    transformIndexHtml(html: string) {
+      return html.replace(/ crossorigin(?:="[^"]*")?/g, '')
+    },
+  }
+}
+
+// Web and two widget build flavours from one config:
 //
-//   vite build                  default — PWA + Tizen 6.5+ widget (ES2017,
-//                               CSS lowered to Chrome 76). Unchanged.
+//   vite build                  web PWA (root-relative URLs, ES2017).
+//   vite build --mode tizen     Tizen 6.5+ widget (relative URLs, ES2017,
+//                               CSS lowered to Chrome 76). No service worker.
 //   vite build --mode tizen5    Tizen 5.0/5.5 widget (Chromium 63): a fully
 //                               transpiled SystemJS bundle with relative asset
 //                               paths and CSS lowered to Chrome 63. No PWA —
@@ -378,6 +391,7 @@ function tizenLegacyOnly(): Plugin {
 // `development` mode).
 export default defineConfig(({ mode }) => {
   const tizen5 = mode === 'tizen5';
+  const widget = tizen5 || mode === 'tizen';
 
   return {
     plugins: [
@@ -402,7 +416,7 @@ export default defineConfig(({ mode }) => {
             tizenFlexGapRuntime(),
             tizenWidgetVersionFloor('5.0'),
           ]
-        : [
+        : widget ? [tizenLocalAssets()] : [
             VitePWA({
               registerType: 'autoUpdate',
               manifest: {
@@ -460,9 +474,8 @@ export default defineConfig(({ mode }) => {
             }),
           ]),
     ],
-    // A Tizen 5 widget loads from a local scheme, so its assets must be
-    // referenced relatively (`./assets/...`), not from the site root.
-    base: tizen5 ? './' : '/',
+    // Both widgets load from a local scheme. Keep the web PWA's root base.
+    base: widget ? './' : '/',
     define: {
       __SERVER_URL__: JSON.stringify(serverUrl),
     },
