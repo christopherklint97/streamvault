@@ -1,8 +1,30 @@
 import { Agent, setGlobalDispatcher } from 'undici';
 import { lookup } from 'node:dns/promises';
-import net from 'node:net';
+import type { LookupAddress } from 'node:dns';
+import net, { type LookupFunction } from 'node:net';
 import tls from 'node:tls';
+import { isBlockedIpLiteral } from './security.js';
 import { logger } from './logger.js';
+
+/** Resolve every DNS answer before a socket is opened, and use that same answer for the connection. */
+export function createSafeLookup(
+  resolve: (hostname: string, options: { family?: number; hints?: number }) => Promise<LookupAddress[]> =
+    (hostname, options) => lookup(hostname, { ...options, all: true }),
+): LookupFunction {
+  return ((hostname: string, options: { family?: number; hints?: number; all?: boolean } | number,
+    callback: (...args: unknown[]) => void) => {
+    const opts = typeof options === 'number' ? { family: options } : options;
+    resolve(hostname, opts).then(addresses => {
+      if (!addresses.length || addresses.some(result => isBlockedIpLiteral(result.address))) {
+        callback(new Error('Unsafe DNS address for upstream host'));
+        return;
+      }
+      if (opts.all) callback(null, addresses);
+      else callback(null, addresses[0].address, addresses[0].family);
+    }).catch(error => callback(error));
+  }) as LookupFunction;
+}
+
 
 /**
  * Shared HTTP dispatcher for all upstream stream fetches.
@@ -27,6 +49,7 @@ export const streamAgent = new Agent({
   connect: {
     keepAlive: true,
     keepAliveInitialDelay: 1_000,
+    lookup: createSafeLookup(),
   },
 });
 
@@ -52,13 +75,17 @@ export async function prewarmUpstream(serverUrl: string): Promise<void> {
     const t0 = Date.now();
     // Resolve once so the OS cache has it for the next fetch.
     const { address } = await lookup(u.hostname);
+    if (net.isIP(u.hostname) === 0 && isBlockedIpLiteral(address)) {
+      logger.warn('Upstream prewarm skipped: hostname resolved to a private address');
+      return;
+    }
     const dnsMs = Date.now() - t0;
 
     const handshakeMs = await new Promise<number>((resolve) => {
       const t1 = Date.now();
       const sock: net.Socket = u.protocol === 'https:'
-        ? tls.connect({ host: u.hostname, port, servername: u.hostname })
-        : net.connect({ host: u.hostname, port });
+        ? tls.connect({ host: address, port, servername: u.hostname })
+        : net.connect({ host: address, port });
       const done = () => {
         try { sock.destroy(); } catch { /* ignore */ }
         resolve(Date.now() - t1);

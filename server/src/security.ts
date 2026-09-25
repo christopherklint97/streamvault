@@ -97,10 +97,12 @@ function isPrivateIpv4(ip: string): boolean {
   if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return true;
   const [a, b] = parts;
   return a === 10
+    || a === 100 && b >= 64 && b <= 127
     || a === 127
     || (a === 172 && b >= 16 && b <= 31)
-    || (a === 192 && b === 168)
-    || (a === 169 && b === 254)
+    || (a === 192 && (b === 168 || b === 0))
+    || (a === 198 && (b === 18 || b === 19))
+    || a === 169 && b === 254
     || a === 0
     || a >= 224;
 }
@@ -109,15 +111,18 @@ function isPrivateIpv6(ip: string): boolean {
   const lower = ip.toLowerCase();
   return lower === '::1'
     || lower === '::'
+    || lower.startsWith('::ffff:')
     || lower.startsWith('fc')
     || lower.startsWith('fd')
-    || lower.startsWith('fe80:');
+    || /^fe[89ab]/.test(lower)
+    || lower.startsWith('ff');
 }
 
-function isBlockedIpLiteral(hostname: string): boolean {
-  const version = net.isIP(hostname);
-  if (version === 4) return isPrivateIpv4(hostname);
-  if (version === 6) return isPrivateIpv6(hostname);
+export function isBlockedIpLiteral(hostname: string): boolean {
+  const host = hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname;
+  const version = net.isIP(host);
+  if (version === 4) return isPrivateIpv4(host);
+  if (version === 6) return isPrivateIpv6(host);
   return false;
 }
 
@@ -133,6 +138,9 @@ export function validateExternalHttpUrl(rawUrl: string, allowedHosts: string[] =
     return { ok: false, error: 'Only http and https URLs are allowed' };
   }
 
+  if (url.username || url.password) {
+    return { ok: false, error: 'URL credentials are not allowed' };
+  }
   if (isBlockedHostname(url.hostname) || isBlockedIpLiteral(url.hostname)) {
     return { ok: false, error: 'URL host is not allowed' };
   }
@@ -142,6 +150,33 @@ export function validateExternalHttpUrl(rawUrl: string, allowedHosts: string[] =
   }
 
   return { ok: true, url };
+}
+
+// LAN access is opt-in through the saved Xtream origin, not through arbitrary URLs.
+export function validateXtreamServerUrl(rawUrl: string): { ok: true; url: URL } | { ok: false; error: string } {
+  const external = validateExternalHttpUrl(rawUrl);
+  if (external.ok) return external;
+  let url: URL;
+  try { url = new URL(rawUrl); } catch { return external; }
+  const host = url.hostname;
+  if ((url.protocol !== 'http:' && url.protocol !== 'https:')
+    || url.username || url.password
+    || net.isIP(host) !== 4 || !isPrivateIpv4(host)
+    || !(/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host))) return external;
+  return { ok: true, url };
+}
+
+export function validateSourceHttpUrl(
+  rawUrl: string, xtreamServer: string, allowedHosts: string[] = [],
+): { ok: true; url: URL } | { ok: false; error: string } {
+  const external = validateExternalHttpUrl(rawUrl, allowedHosts);
+  if (external.ok) return external;
+  const source = validateXtreamServerUrl(xtreamServer);
+  if (!source.ok || net.isIP(source.url.hostname) !== 4 || !isPrivateIpv4(source.url.hostname)) return external;
+  let url: URL;
+  try { url = new URL(rawUrl); } catch { return external; }
+  if (url.origin === source.url.origin && !url.username && !url.password) return { ok: true, url };
+  return external;
 }
 
 export function allowedProxyHostsFromConfig(xtreamServer: string, extraHostsValue: string | undefined): string[] {

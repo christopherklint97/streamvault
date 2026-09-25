@@ -286,6 +286,8 @@ describe('recorder lifecycle integration', () => {
 
     await vi.advanceTimersByTimeAsync(10_000);
     expect(state.spawned).toHaveLength(2);
+    expect(state.spawned[0].args[state.spawned[0].args.indexOf('-i') + 1]).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/api\/stream\/.*[?]subs=1$/);
+    expect(state.spawned[0].args[state.spawned[0].args.indexOf('-i') + 1]).not.toContain('example.test');
     expect(state.spawned[0].args.at(-1)).toMatch(/r1\.segment-000000\.ts\.part$/);
     expect(state.spawned[1].args.at(-1)).toMatch(/r1\.segment-000001\.ts\.part$/);
 

@@ -500,7 +500,10 @@ export async function startRecording(id: string): Promise<void> {
   const starting = createStartingRecording(id);
   let streamUrl: string;
   try {
-    streamUrl = await resolveStreamUrl(rec.channel_id);
+    await resolveStreamUrl(rec.channel_id);
+    // ffmpeg must only contact our validated proxy; upstream redirects may change
+    // between the preflight and capture and must never bypass the URL/DNS guard.
+    streamUrl = `http://127.0.0.1:${process.env.PORT || '3001'}/api/stream/${encodeURIComponent(rec.channel_id)}?subs=1`;
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to resolve stream URL';
     if (updateRecordingIfStatus(id, ['scheduled', 'recording'], { status: 'failed', error: message })) {
