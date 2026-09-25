@@ -21,6 +21,13 @@ export interface RunProcessOptions {
   outputLimitBytes?: number;
   killGraceMs?: number;
   backgroundPriority?: boolean;
+  onStdout?: (chunk: string) => void;
+}
+
+export interface FinalizationProgress {
+  phase: 'queued' | 'master' | 'probing' | 'derivative' | 'publishing';
+  /** Percent of derivative media-time processed, never percent of the entire job. */
+  percent: number | null;
 }
 
 export interface RecordingMediaPaths {
@@ -84,6 +91,7 @@ export function buildMasterConcatArgs(segments: string[], outputPart: string): s
 
 export function buildDerivativeArgs(masterPath: string, derivativePartPath: string): string[] {
   return [
+    '-progress', 'pipe:1', '-nostats',
     '-fflags', '+genpts',
     '-i', masterPath,
     '-map', '0:v:0?',
@@ -240,7 +248,10 @@ export function runProcess(command: string, args: string[], options: RunProcessO
       resolve({ code, stdout, stderr, signal, timedOut, aborted });
     };
 
-    child.stdout?.on('data', chunk => { stdout = appendOutputTail(stdout, chunk, outputLimit); });
+    child.stdout?.on('data', (chunk: unknown) => {
+      stdout = appendOutputTail(stdout, chunk, outputLimit);
+      options.onStdout?.(String(chunk));
+    });
     child.stderr?.on('data', chunk => { stderr = appendOutputTail(stderr, chunk, outputLimit); });
     child.once('error', error => finish(null, null, error));
     child.once('close', (code, signal) => finish(code, signal));
@@ -259,10 +270,14 @@ export function runProcess(command: string, args: string[], options: RunProcessO
 
 export async function finalizeRecordingMedia(
   paths: RecordingMediaPaths,
-  dependencies: { run?: RunProcess; fs?: typeof fs; signal?: AbortSignal } = {},
+  dependencies: { run?: RunProcess; fs?: typeof fs; signal?: AbortSignal; onProgress?: (progress: FinalizationProgress) => void } = {},
 ): Promise<FinalizedRecordingMedia> {
   const fileSystem = dependencies.fs ?? fs;
   const run = dependencies.run ?? runProcess;
+  const report = (phase: FinalizationProgress['phase'], percent: number | null = null) => {
+    dependencies.onProgress?.({ phase, percent });
+  };
+  report('master');
   const segments = paths.segments?.filter(segment => {
     try { return fileSystem.statSync(segment).size > 0; } catch { return false; }
   }) ?? [];
@@ -301,6 +316,7 @@ export async function finalizeRecordingMedia(
   }
   const masterSize = fileSystem.statSync(paths.master).size;
 
+  report('probing');
   const probe = await run('ffprobe', buildProbeDurationArgs(paths.master), {
     signal: dependencies.signal,
     timeoutMs: PROBE_TIMEOUT_MS,
@@ -312,10 +328,35 @@ export async function finalizeRecordingMedia(
     ? Math.round(probedDuration)
     : 0;
 
+  report('derivative');
+  let progressBuffer = '';
+  let outputMicros: number | null = null;
+  let lastPercent = -1;
   const derivativeResult = await run('ffmpeg', buildDerivativeArgs(paths.master, paths.derivativePart), {
     signal: dependencies.signal,
     timeoutMs: REMUX_TIMEOUT_MS,
     backgroundPriority: true,
+    onStdout: chunk => {
+      progressBuffer += chunk;
+      let newline = progressBuffer.indexOf('\n');
+      while (newline !== -1) {
+        const line = progressBuffer.slice(0, newline).trim();
+        progressBuffer = progressBuffer.slice(newline + 1);
+        if (line.startsWith('out_time_us=') || line.startsWith('out_time_ms=')) {
+          const value = Number(line.slice(line.indexOf('=') + 1));
+          outputMicros = Number.isFinite(value) && value >= 0 ? value : null;
+        } else if (line.startsWith('progress=') && probedDuration > 0 && outputMicros !== null) {
+          const percent = Math.min(99, Math.floor(outputMicros / (probedDuration * 10_000)));
+          if (percent > lastPercent) {
+            lastPercent = percent;
+            report('derivative', percent);
+          }
+        }
+        newline = progressBuffer.indexOf('\n');
+      }
+      // FFmpeg progress lines are short; discard malformed/unbounded input.
+      if (progressBuffer.length > 1024) progressBuffer = '';
+    },
   });
   if (derivativeResult.aborted || dependencies.signal?.aborted) {
     try { fileSystem.rmSync(paths.derivativePart, { force: true }); } catch { /* best effort */ }
@@ -330,6 +371,7 @@ export async function finalizeRecordingMedia(
   }
 
   try {
+    report('publishing');
     fileSystem.renameSync(paths.derivativePart, paths.derivative);
     const derivativeSize = fileSystem.statSync(paths.derivative).size;
     return { durationSeconds, masterSize, derivativeSize, derivativeError: null };

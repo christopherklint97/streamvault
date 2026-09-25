@@ -37,6 +37,7 @@ describe('recording ffmpeg arguments', () => {
 
   it('creates a seekable MP4 derivative with copied streams and normalized timestamps', () => {
     expect(buildDerivativeArgs('/recordings/r1.ts', '/recordings/r1.mp4.part')).toEqual([
+      '-progress', 'pipe:1', '-nostats',
       '-fflags', '+genpts', '-i', '/recordings/r1.ts',
       '-map', '0:v:0?', '-map', '0:a?', '-c', 'copy',
       '-avoid_negative_ts', 'make_zero', '-movflags', '+faststart',
@@ -47,6 +48,54 @@ describe('recording ffmpeg arguments', () => {
 });
 
 describe('recording media finalization', () => {
+  it('reports derivative media-time progress only when duration is known and FFmpeg reports timestamps', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'streamvault-progress-'));
+    try {
+      const paths = {
+        part: path.join(dir, 'r.ts.part'), master: path.join(dir, 'r.ts'),
+        derivativePart: path.join(dir, 'r.mp4.part'), derivative: path.join(dir, 'r.mp4'),
+      };
+      fs.writeFileSync(paths.part, 'master');
+      const events: Array<{ phase: string; percent: number | null }> = [];
+      const run = vi.fn(async (command: string, args: string[], options?: { onStdout?: (chunk: string) => void }) => {
+        if (command === 'ffprobe') return { code: 0, stdout: '100', stderr: '' };
+        expect(args).toEqual(expect.arrayContaining(['-progress', 'pipe:1', '-nostats']));
+        options?.onStdout?.('out_time_us=25000000\nprogress=continue\nout_time_us=999999999\nprogress=continue\n');
+        fs.writeFileSync(paths.derivativePart, 'mp4');
+        return { code: 0, stdout: '', stderr: '' };
+      });
+      await finalizeRecordingMedia(paths, { run, onProgress: progress => events.push({ ...progress }) });
+      expect(events).toEqual([
+        { phase: 'master', percent: null },
+        { phase: 'probing', percent: null },
+        { phase: 'derivative', percent: null },
+        { phase: 'derivative', percent: 25 },
+        { phase: 'derivative', percent: 99 },
+        { phase: 'publishing', percent: null },
+      ]);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('leaves percent unknown when ffprobe cannot measure duration', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'streamvault-progress-'));
+    try {
+      const paths = {
+        part: path.join(dir, 'r.ts.part'), master: path.join(dir, 'r.ts'),
+        derivativePart: path.join(dir, 'r.mp4.part'), derivative: path.join(dir, 'r.mp4'),
+      };
+      fs.writeFileSync(paths.part, 'master');
+      const events: Array<{ phase: string; percent: number | null }> = [];
+      const run = async (command: string, _args: string[], options?: { onStdout?: (chunk: string) => void }) => {
+        if (command === 'ffprobe') return { code: 1, stdout: '', stderr: '' };
+        options?.onStdout?.('out_time_us=25000000\nprogress=continue\n');
+        fs.writeFileSync(paths.derivativePart, 'mp4');
+        return { code: 0, stdout: '', stderr: '' };
+      };
+      await finalizeRecordingMedia(paths, { run, onProgress: progress => events.push({ ...progress }) });
+      expect(events.filter(event => event.phase === 'derivative')).toEqual([{ phase: 'derivative', percent: null }]);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it('remuxes every recovered attempt segment into one master before publishing', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'streamvault-recorder-'));
     const firstPart = path.join(dir, 'r0.segment-000000.ts.part');

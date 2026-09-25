@@ -2,6 +2,7 @@ import type { DBRecording, DBRecordingRule } from './db.js';
 import type { CommercialSegmentWrite, DBCommercialSegment } from './commercial-store.js';
 import { buildAiringKey } from './epg-identity.js';
 import { validateCommercialIntervals } from './commercial-intervals.js';
+import type { FinalizationProgress } from './recorder-media.js';
 
 export type CommercialAnalysisStatus =
   | 'not_analyzed'
@@ -27,9 +28,10 @@ function overrideValue(value: number | null | undefined): boolean | null {
   return value === null || value === undefined ? null : value === 1;
 }
 
-export function mapRecordingForApi(recording: DBRecording) {
+export function mapRecordingForApi(recording: DBRecording, progress: FinalizationProgress | null = null) {
   return {
     ...recording,
+    finalization_progress: recording.status === 'finalizing' ? progress : null,
     master_path: recording.master_file_path ?? null,
     commercial_analysis_status: normalizeCommercialAnalysisStatus(recording.analysis_state),
     commercial_analysis_error: recording.analysis_error ?? null,

@@ -138,6 +138,60 @@ describe('Recordings integration', () => {
     expect(findButton(container, 'Cancel')).toBeTruthy();
   });
 
+  it('counts visible recordings rather than cancelled history and keeps finalizing in progress', async () => {
+    await act(async () => {
+      useRecordingStore.setState({ recordings: [
+        completedRecording,
+        { ...completedRecording, id: 'finalizing', status: 'finalizing' },
+        { ...completedRecording, id: 'scheduled', status: 'scheduled' },
+        ...Array.from({ length: 92 }, (_, index) => ({
+          ...completedRecording, id: `cancelled-${index}`, status: 'cancelled' as const,
+        })),
+      ] });
+    });
+    expect(findButton(container, 'Recordings (3)')).toBeTruthy();
+    expect(container.textContent).toContain('Finalizing');
+    expect(container.textContent).toContain('Upcoming');
+  });
+
+  it('shows measured derivative progress and an honest phase-only state while finalizing', async () => {
+    await act(async () => {
+      useRecordingStore.setState({ recordings: [
+        { ...completedRecording, id: 'derivative', status: 'finalizing', finalization_progress: { phase: 'derivative', percent: 42 } },
+        { ...completedRecording, id: 'queued', status: 'finalizing', finalization_progress: { phase: 'queued', percent: null } },
+      ] });
+    });
+    expect(container.textContent).toContain('Preparing playable copy · 42%');
+    expect(container.textContent).toContain('Waiting to finalize');
+    const progress = container.querySelector('[role="progressbar"]');
+    expect(progress?.getAttribute('aria-valuenow')).toBe('42');
+    expect(container.querySelectorAll('[role="progressbar"]')).toHaveLength(1);
+  });
+
+  it('uses mobile-safe editable fields without overflowing the schedule form', () => {
+    const form = container.querySelector('#schedule-recording-form');
+    expect(form).not.toBeNull();
+    const fields = form?.querySelectorAll('input') ?? [];
+    expect(fields).toHaveLength(4);
+    for (const input of fields) {
+      expect(input.className).toContain('text-base');
+      expect(input.className).toContain('min-w-0');
+      expect(input.className).toContain('max-w-full');
+      expect(input.id).toBeTruthy();
+      expect(form?.querySelector(`label[for="${input.id}"]`)).not.toBeNull();
+    }
+  });
+
+  it('uses iPhone-safe font sizing on recurring-rule inputs and selects', async () => {
+    await act(async () => findButton(container, 'Rules (0)').click());
+    const form = container.querySelector('#recurring-rule-form');
+    expect(form).not.toBeNull();
+    for (const field of form?.querySelectorAll('input:not([type="checkbox"]), select') ?? []) {
+      expect(field.className).toContain('text-base');
+      expect(field.className).toContain('min-w-0');
+    }
+  });
+
   it('creates a rolling recurring rule from searchable channels with an explicit newest-N limit', async () => {
     vi.useFakeTimers();
     const createdRule = {
@@ -175,7 +229,18 @@ describe('Recordings integration', () => {
     expect(container.textContent).toContain('converts this legacy stop-after rule');
     expect(container.textContent).toContain('deleted immediately and cannot be restored');
 
+    await act(async () => findButton(container, 'Edit').click());
+    const editor = container.querySelector('form:has(#edit-existing-title)');
+    expect(editor).not.toBeNull();
+    for (const field of editor?.querySelectorAll('input:not([type="checkbox"]), select') ?? []) {
+      expect(field.className).toContain('text-base');
+      expect(field.className).toContain('min-w-0');
+    }
+    await act(async () => findButton(container, 'Cancel edit').click());
+
     const existingRetention = container.querySelector('input[aria-label="Keep latest for SportsCenter"]') as HTMLInputElement;
+    expect(existingRetention.className).toContain('text-base');
+    expect(existingRetention.className).toContain('min-w-0');
     expect(existingRetention.value).toBe('1');
     await act(async () => {
       const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;

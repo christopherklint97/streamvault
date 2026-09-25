@@ -5,14 +5,14 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DBRecording, DBRecordingRule } from './db.js';
-import type { RecordingMediaPaths, RunProcessOptions } from './recorder-media.js';
+import type { FinalizationProgress, RecordingMediaPaths, RunProcessOptions } from './recorder-media.js';
 
 const state = vi.hoisted(() => ({
   records: new Map<string, DBRecording>(),
   rules: new Map<string, DBRecordingRule>(),
   deleted: [] as string[],
   spawned: [] as Array<{ process: EventEmitter & Record<string, unknown>; args: string[] }>,
-  finalize: undefined as undefined | ((paths: RecordingMediaPaths, dependencies?: { signal?: AbortSignal }) => Promise<{
+  finalize: undefined as undefined | ((paths: RecordingMediaPaths, dependencies?: { signal?: AbortSignal; onProgress?: (progress: FinalizationProgress) => void }) => Promise<{
     durationSeconds: number;
     masterSize: number;
     derivativeSize: number;
@@ -109,7 +109,7 @@ vi.mock('./recorder-media.js', async importOriginal => {
   const actual = await importOriginal<typeof import('./recorder-media.js')>();
   return {
     ...actual,
-    finalizeRecordingMedia: (paths: RecordingMediaPaths, dependencies?: { signal?: AbortSignal; options?: RunProcessOptions }) => {
+    finalizeRecordingMedia: (paths: RecordingMediaPaths, dependencies?: { signal?: AbortSignal; options?: RunProcessOptions; onProgress?: (progress: FinalizationProgress) => void }) => {
       if (!state.finalize) throw new Error('finalize mock not configured');
       return state.finalize(paths, dependencies);
     },
@@ -183,6 +183,32 @@ afterEach(() => {
 });
 
 describe('recorder lifecycle integration', () => {
+  it('exposes live finalization phase and measured percent, then clears it at completion', async () => {
+    state.records.set('r1', recording());
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    state.finalize = async (paths, dependencies) => {
+      dependencies?.onProgress?.({ phase: 'derivative', percent: 34 });
+      await blocked;
+      fs.writeFileSync(paths.master, 'master');
+      fs.writeFileSync(paths.derivative, 'mp4');
+      return { durationSeconds: 30, masterSize: 6, derivativeSize: 3, derivativeError: null };
+    };
+    const recorder = await import('./recorder.js');
+    expect(recorder.getFinalizationProgress('r1', 'scheduled')).toBeNull();
+    await recorder.startRecording('r1');
+    fs.writeFileSync(state.spawned[0].args.at(-1)!, 'captured');
+    const stopping = recorder.stopRecording('r1');
+    await flush();
+    expect(state.records.get('r1')?.status).toBe('finalizing');
+    expect(recorder.getFinalizationProgress('r1', 'finalizing')).toEqual({ phase: 'derivative', percent: 34 });
+    expect(recorder.getFinalizationProgress('r1', 'cancelled')).toBeNull();
+    release();
+    await stopping;
+    expect(recorder.getFinalizationProgress('r1', 'completed')).toBeNull();
+    expect(recorder.getFinalizationProgress('r1', 'finalizing')).toBeNull();
+  });
+
   it('directly cancelling a scheduled recording removes every unpublished artifact', async () => {
     const nested = path.join(recordingsDir, '2026', '09', '20');
     fs.mkdirSync(nested, { recursive: true });

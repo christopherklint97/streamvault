@@ -32,6 +32,12 @@ function segment(overrides: Partial<DBCommercialSegment> = {}): DBCommercialSegm
 }
 
 describe('recording API mapping', () => {
+  it('includes live finalization progress without claiming it for terminal rows', () => {
+    const progress = { phase: 'derivative' as const, percent: 42 };
+    expect(mapRecordingForApi(recording({ status: 'finalizing' }), progress).finalization_progress).toEqual(progress);
+    expect(mapRecordingForApi(recording()).finalization_progress).toBeNull();
+  });
+
   it('exposes the exact commercial summary fields expected by the frontend', () => {
     const result = mapRecordingForApi(recording({
       analysis_state: 'not_requested', analysis_error: 'old', commercial_segment_count: 2,

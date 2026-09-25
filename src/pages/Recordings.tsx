@@ -92,6 +92,17 @@ function RecordingCard({ rec, onPlay, onCancel, onStop, onDelete, onAnalyze, onR
   const analysisStatus = getRecordingAnalysisStatus(rec);
   const segmentCount = rec.commercial_segment_count ?? 0;
   const commercialSeconds = getRecordingCommercialSeconds(rec);
+  const finalization = rec.status === 'finalizing' ? rec.finalization_progress : null;
+  const finalizationLabel = finalization?.phase === 'queued' ? 'Waiting to finalize'
+    : finalization?.phase === 'master' ? 'Preparing recording file'
+    : finalization?.phase === 'probing' ? 'Checking recording duration'
+    : finalization?.phase === 'derivative' ? 'Preparing playable copy'
+    : finalization?.phase === 'publishing' ? 'Publishing recording'
+    : 'Finalizing captured media';
+  const derivativePercent = finalization?.phase === 'derivative'
+    && typeof finalization.percent === 'number' && Number.isFinite(finalization.percent)
+    && finalization.percent >= 0 && finalization.percent <= 99
+    ? finalization.percent : null;
   return (
     <div className="bg-surface-border rounded-[10px] p-3.5 flex flex-col gap-1.5">
       <div className="flex items-center gap-2">
@@ -105,6 +116,16 @@ function RecordingCard({ rec, onPlay, onCancel, onStop, onDelete, onAnalyze, onR
         <span className="text-13 text-[#9ca3af] overflow-hidden text-ellipsis whitespace-nowrap">{rec.channel_name}</span>
       </div>
       <div className="text-base font-semibold overflow-hidden text-ellipsis whitespace-nowrap">{rec.title}</div>
+      {rec.status === 'finalizing' && (
+        <div className="text-13 text-[#c4b5fd]" aria-live="polite">
+          {finalizationLabel}{derivativePercent !== null ? ` · ${derivativePercent}%` : ''}
+          {derivativePercent !== null && (
+            <div role="progressbar" aria-label="Playable copy progress" aria-valuenow={derivativePercent} aria-valuemin={0} aria-valuemax={100} className="mt-2 h-1.5 overflow-hidden rounded-full bg-[#37334c]">
+              <div className="h-full rounded-full bg-[#8b5cf6] transition-[width] duration-300" style={{ width: `${derivativePercent}%` }} />
+            </div>
+          )}
+        </div>
+      )}
       {rec.status === 'completed' && (
         <div className="flex flex-wrap items-center gap-2">
           <span
@@ -214,10 +235,10 @@ function RuleEditForm({ rule, onCancel, onSave }: {
     if (saved) onCancel();
   }, [draft, onCancel, onSave, retentionTouched, rule.enabled, rule.max_recordings]);
 
-  const inputClass = 'w-full rounded border border-[#333] bg-[#1a1a2e] px-2 py-1.5 text-13 text-white outline-none focus:border-[#3b82f6]';
+  const inputClass = 'w-full min-w-0 max-w-full rounded border border-[#333] bg-[#1a1a2e] px-2 py-1.5 text-base text-white outline-none focus:border-[#3b82f6]';
   return (
-    <form className="mt-2 rounded border border-[#333] bg-[#151525] p-3" onSubmit={submit}>
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+    <form className="mt-2 min-w-0 rounded border border-[#333] bg-[#151525] p-3" onSubmit={submit}>
+      <div className="grid min-w-0 grid-cols-1 gap-3 [&>*]:min-w-0 lg:grid-cols-2">
         <div className="relative">
           <label className="block text-12 text-[#9ca3af]" htmlFor={`edit-${rule.id}-channel`}>Channel</label>
           <input id={`edit-${rule.id}-channel`} data-focusable autoComplete="off" value={channelQuery} onChange={(event) => searchChannels(event.target.value)} className={inputClass} />
@@ -384,7 +405,7 @@ function RuleCard({ rule, onToggle, onDelete, onRetentionChange, onUpdate }: {
               placeholder="All"
               value={retentionValue}
               onChange={(event) => setRetentionValue(event.target.value)}
-              className="mt-1 w-full rounded border border-[#333] bg-[#1a1a2e] px-2 py-1.5 text-13 text-white outline-none focus:border-[#3b82f6]"
+              className="mt-1 w-full min-w-0 max-w-full rounded border border-[#333] bg-[#1a1a2e] px-2 py-1.5 text-base text-white outline-none focus:border-[#3b82f6]"
             />
           </label>
           <button
@@ -504,14 +525,15 @@ function ScheduleForm({ onCreated }: { onCreated: () => void }) {
   }, [selectedChannel, title, startTime, endTime, createRecording, onCreated]);
 
   return (
-    <div className="bg-surface-border rounded-[10px] p-4 mb-6">
+    <div id="schedule-recording-form" className="bg-surface-border rounded-[10px] p-4 mb-6 min-w-0">
       <h3 className="text-15 font-semibold mb-3 text-[#d1d5db]">Schedule Recording</h3>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 min-w-0 [&>*]:min-w-0">
         {/* Channel search */}
         <div className="relative">
-          <label className="block text-12 text-[#9ca3af] mb-1">Channel</label>
+          <label htmlFor="schedule-channel" className="block text-12 text-[#9ca3af] mb-1">Channel</label>
           <input
-            className="w-full py-2 px-3 rounded bg-[#1a1a2e] border border-[#333] text-white text-14 outline-none focus:border-[#3b82f6]"
+            id="schedule-channel"
+            className="w-full min-w-0 max-w-full py-2 px-3 rounded bg-[#1a1a2e] border border-[#333] text-white text-base outline-none focus:border-[#3b82f6]"
             placeholder="Search live TV channels..."
             value={query}
             onChange={(e) => { handleSearch(e.target.value); if (selectedChannel) setSelectedChannel(null); }}
@@ -537,9 +559,10 @@ function ScheduleForm({ onCreated }: { onCreated: () => void }) {
 
         {/* Title */}
         <div>
-          <label className="block text-12 text-[#9ca3af] mb-1">Title</label>
+          <label htmlFor="schedule-title" className="block text-12 text-[#9ca3af] mb-1">Title</label>
           <input
-            className="w-full py-2 px-3 rounded bg-[#1a1a2e] border border-[#333] text-white text-14 outline-none focus:border-[#3b82f6]"
+            id="schedule-title"
+            className="w-full min-w-0 max-w-full py-2 px-3 rounded bg-[#1a1a2e] border border-[#333] text-white text-base outline-none focus:border-[#3b82f6]"
             placeholder="Recording title"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
@@ -548,10 +571,11 @@ function ScheduleForm({ onCreated }: { onCreated: () => void }) {
 
         {/* Start time */}
         <div>
-          <label className="block text-12 text-[#9ca3af] mb-1">Start Time</label>
+          <label htmlFor="schedule-start" className="block text-12 text-[#9ca3af] mb-1">Start Time</label>
           <input
+            id="schedule-start"
             type="datetime-local"
-            className="w-full py-2 px-3 rounded bg-[#1a1a2e] border border-[#333] text-white text-14 outline-none focus:border-[#3b82f6] [color-scheme:dark]"
+            className="w-full min-w-0 max-w-full py-2 px-3 rounded bg-[#1a1a2e] border border-[#333] text-white text-base outline-none focus:border-[#3b82f6] [color-scheme:dark]"
             value={startTime}
             onChange={(e) => setStartTime(e.target.value)}
           />
@@ -559,10 +583,11 @@ function ScheduleForm({ onCreated }: { onCreated: () => void }) {
 
         {/* End time */}
         <div>
-          <label className="block text-12 text-[#9ca3af] mb-1">End Time</label>
+          <label htmlFor="schedule-end" className="block text-12 text-[#9ca3af] mb-1">End Time</label>
           <input
+            id="schedule-end"
             type="datetime-local"
-            className="w-full py-2 px-3 rounded bg-[#1a1a2e] border border-[#333] text-white text-14 outline-none focus:border-[#3b82f6] [color-scheme:dark]"
+            className="w-full min-w-0 max-w-full py-2 px-3 rounded bg-[#1a1a2e] border border-[#333] text-white text-base outline-none focus:border-[#3b82f6] [color-scheme:dark]"
             value={endTime}
             onChange={(e) => setEndTime(e.target.value)}
           />
@@ -669,10 +694,10 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
   }, [createRule, draft, onCreated, selectedChannel, showToast]);
 
   return (
-    <form className="mb-6 rounded-[10px] bg-surface-border p-4" onSubmit={handleSubmit}>
+    <form id="recurring-rule-form" className="mb-6 min-w-0 rounded-[10px] bg-surface-border p-4" onSubmit={handleSubmit}>
       <h3 className="mb-1 text-15 font-semibold text-[#d1d5db]">Create recurring rule</h3>
       <p className="mb-4 text-12 text-[#9ca3af]">Match future guide programs on one channel.</p>
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 min-w-0 [&>*]:min-w-0 lg:grid-cols-2">
         <div className="relative">
           <label className="mb-1 block text-12 text-[#9ca3af]" htmlFor="rule-channel-search">Channel</label>
           <input
@@ -684,7 +709,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
             aria-expanded={results.length > 0}
             aria-controls="rule-channel-results"
             autoComplete="off"
-            className="w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-14 text-white outline-none focus:border-[#3b82f6]"
+            className="w-full min-w-0 max-w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-base text-white outline-none focus:border-[#3b82f6]"
             placeholder="Search live TV channels..."
             value={query}
             onChange={(event) => handleSearch(event.target.value)}
@@ -715,7 +740,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
             id="rule-match-title"
             data-focusable
             autoComplete="off"
-            className="w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-14 text-white outline-none focus:border-[#3b82f6]"
+            className="w-full min-w-0 max-w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-base text-white outline-none focus:border-[#3b82f6]"
             placeholder="e.g. SportsCenter"
             value={draft.matchTitle}
             onChange={(event) => setDraft((current) => ({ ...current, matchTitle: event.target.value }))}
@@ -727,7 +752,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
           <select
             id="rule-match-type"
             data-focusable
-            className="w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-14 text-white outline-none focus:border-[#3b82f6]"
+            className="w-full min-w-0 max-w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-base text-white outline-none focus:border-[#3b82f6]"
             value={draft.matchType}
             onChange={(event) => setDraft((current) => ({ ...current, matchType: event.target.value as RecordingRuleMatchType }))}
           >
@@ -742,7 +767,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
           <select
             id="rule-repeat-policy"
             data-focusable
-            className="w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-14 text-white outline-none focus:border-[#3b82f6]"
+            className="w-full min-w-0 max-w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-base text-white outline-none focus:border-[#3b82f6]"
             value={draft.repeatPolicy}
             onChange={(event) => setDraft((current) => ({ ...current, repeatPolicy: event.target.value as RecordingRepeatPolicy }))}
           >
@@ -759,7 +784,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
             id="rule-cadence-mode"
             data-focusable
             disabled={draft.recordOnce}
-            className="w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-14 text-white outline-none disabled:opacity-40 focus:border-[#3b82f6]"
+            className="w-full min-w-0 max-w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-base text-white outline-none disabled:opacity-40 focus:border-[#3b82f6]"
             value={draft.cadenceMode}
             onChange={(event) => setDraft((current) => ({ ...current, cadenceMode: event.target.value as RecordingCadenceMode }))}
           >
@@ -780,7 +805,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
                 step={1}
                 value={draft.cadenceInterval}
                 onChange={(event) => setDraft((current) => ({ ...current, cadenceInterval: event.target.value }))}
-                className="mt-1 w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-14 text-white outline-none focus:border-[#3b82f6]"
+                className="mt-1 w-full min-w-0 max-w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-base text-white outline-none focus:border-[#3b82f6]"
               />
             </label>
           )}
@@ -793,7 +818,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
                 type="time"
                 value={draft.dailyStartTime}
                 onChange={(event) => setDraft((current) => ({ ...current, dailyStartTime: event.target.value }))}
-                className="mt-1 w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-14 text-white outline-none [color-scheme:dark] focus:border-[#3b82f6]"
+                className="mt-1 w-full min-w-0 max-w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-base text-white outline-none [color-scheme:dark] focus:border-[#3b82f6]"
               />
             </label>
           )}
@@ -802,20 +827,20 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
           </p>
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid min-w-0 grid-cols-2 gap-3 [&>*]:min-w-0">
           <div>
             <label className="mb-1 block text-12 text-[#9ca3af]" htmlFor="rule-padding-before">Padding before (min)</label>
-            <input id="rule-padding-before" data-focusable type="number" inputMode="numeric" min={0} step={1} value={draft.paddingBeforeMinutes} onChange={(event) => setDraft((current) => ({ ...current, paddingBeforeMinutes: Number(event.target.value) }))} className="w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-14 text-white outline-none focus:border-[#3b82f6]" />
+            <input id="rule-padding-before" data-focusable type="number" inputMode="numeric" min={0} step={1} value={draft.paddingBeforeMinutes} onChange={(event) => setDraft((current) => ({ ...current, paddingBeforeMinutes: Number(event.target.value) }))} className="w-full min-w-0 max-w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-base text-white outline-none focus:border-[#3b82f6]" />
           </div>
           <div>
             <label className="mb-1 block text-12 text-[#9ca3af]" htmlFor="rule-padding-after">Padding after (min)</label>
-            <input id="rule-padding-after" data-focusable type="number" inputMode="numeric" min={0} step={1} value={draft.paddingAfterMinutes} onChange={(event) => setDraft((current) => ({ ...current, paddingAfterMinutes: Number(event.target.value) }))} className="w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-14 text-white outline-none focus:border-[#3b82f6]" />
+            <input id="rule-padding-after" data-focusable type="number" inputMode="numeric" min={0} step={1} value={draft.paddingAfterMinutes} onChange={(event) => setDraft((current) => ({ ...current, paddingAfterMinutes: Number(event.target.value) }))} className="w-full min-w-0 max-w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-base text-white outline-none focus:border-[#3b82f6]" />
           </div>
         </div>
 
         <div>
           <label className="mb-1 block text-12 text-[#9ca3af]" htmlFor="rule-retention-limit">Keep latest completed recordings</label>
-          <input id="rule-retention-limit" data-focusable type="number" inputMode="numeric" min={0} step={1} disabled={draft.recordOnce} placeholder="Keep all" value={draft.retentionLimit} onChange={(event) => setDraft((current) => ({ ...current, retentionLimit: event.target.value }))} className="w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-14 text-white outline-none disabled:opacity-40 focus:border-[#3b82f6]" />
+          <input id="rule-retention-limit" data-focusable type="number" inputMode="numeric" min={0} step={1} disabled={draft.recordOnce} placeholder="Keep all" value={draft.retentionLimit} onChange={(event) => setDraft((current) => ({ ...current, retentionLimit: event.target.value }))} className="w-full min-w-0 max-w-full rounded border border-[#333] bg-[#1a1a2e] px-3 py-2 text-base text-white outline-none disabled:opacity-40 focus:border-[#3b82f6]" />
           <p className="mt-1 text-12 text-[#6b7280]">Set 1 for newest only. Older completed recordings are removed after a newer one is ready.</p>
           <label className="mt-2 flex cursor-pointer items-center gap-2 text-13 text-[#d1d5db]" htmlFor="rule-record-once">
             <input id="rule-record-once" data-focusable type="checkbox" checked={draft.recordOnce} onChange={(event) => setDraft((current) => ({ ...current, recordOnce: event.target.checked }))} />
@@ -906,6 +931,8 @@ export default function Recordings() {
     return { upcoming, inProgress, completed, failed };
   }, [recordings]);
 
+  const visibleRecordingCount = upcoming.length + inProgress.length + completed.length + failed.length;
+
   return (
     <FocusZone className="p-4 lg:p-6 lg:px-8 h-full overflow-y-auto pb-20 lg:pb-8 outline-hidden">
       <div className="flex items-center justify-between mb-4">
@@ -926,7 +953,7 @@ export default function Recordings() {
           )}
           onClick={() => setTab('recordings')}
         >
-          Recordings ({recordings.length})
+          Recordings ({visibleRecordingCount})
         </button>
         <button
           className={cn(
@@ -1023,7 +1050,7 @@ export default function Recordings() {
             </section>
           )}
 
-          {recordings.length === 0 && (
+          {visibleRecordingCount === 0 && (
             <div className="text-center text-[#6b7280] py-12 text-base">
               No recordings yet. Schedule one from the TV Guide.
             </div>

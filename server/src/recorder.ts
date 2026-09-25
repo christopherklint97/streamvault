@@ -31,6 +31,7 @@ import {
   parseConfiguredConcurrency,
   shouldRetryCapture,
 } from './recorder-media.js';
+import type { FinalizationProgress } from './recorder-media.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_RECORDINGS_DIR = path.join(__dirname, '..', 'data', 'recordings');
@@ -63,6 +64,7 @@ interface FinalizingRecording {
   promise: Promise<void>;
   started: boolean;
   cancelQueued: () => void;
+  progress: FinalizationProgress;
 }
 
 const activeRecordings = new Map<string, ActiveRecording>();
@@ -127,6 +129,12 @@ export function getCaptureCount(): number {
 
 export function isRecordingActive(id: string): boolean {
   return activeRecordings.has(id) || startingRecordings.has(id) || finalizingRecordings.has(id);
+}
+
+/** Live, non-persistent phase; a finalizing row without a worker has unknown progress. */
+export function getFinalizationProgress(id: string, status: string): FinalizationProgress | null {
+  if (status !== 'finalizing') return null;
+  return finalizingRecordings.get(id)?.progress ?? null;
 }
 
 /** Check available disk space in bytes. Returns Infinity if unable to check. */
@@ -332,14 +340,20 @@ async function publishCompletedRecording(
   }
 
   const controller = new AbortController();
-  const entry: FinalizingRecording = { controller, promise: Promise.resolve(), started: false, cancelQueued: () => {} };
+  const entry: FinalizingRecording = {
+    controller, promise: Promise.resolve(), started: false, cancelQueued: () => {},
+    progress: { phase: 'queued', percent: null },
+  };
   let completedRuleId: string | null = null;
   const queuedFinalization = enqueueFinalization(async () => {
     entry.started = true;
     try {
       const segments = discoverRecordingArtifacts(getRecordingsDir(), id)
         .filter(file => isCaptureSegment(file, id));
-      const result = await finalizeRecordingMedia({ ...paths, segments }, { signal: controller.signal });
+      const result = await finalizeRecordingMedia({ ...paths, segments }, {
+        signal: controller.signal,
+        onProgress: progress => { entry.progress = progress; },
+      });
       const hasDerivative = result.derivativeError === null;
       const now = Date.now();
       const published = completeRecordingAndAdvanceCadence(id, {

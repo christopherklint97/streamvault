@@ -101,6 +101,11 @@ export interface Recording {
   channel_name: string;
   title: string;
   status: RecordingStatus;
+  finalization_progress?: {
+    phase: 'queued' | 'master' | 'probing' | 'derivative' | 'publishing';
+    /** Progress of the playable-copy step only, not of the entire finalization. */
+    percent: number | null;
+  } | null;
   start_time: number;
   end_time: number;
   actual_start: number | null;

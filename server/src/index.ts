@@ -47,6 +47,7 @@ import {
   deleteRecordingFile,
   getRecordingFilePath,
   getRecordingMasterFilePath,
+  getFinalizationProgress,
   recoverRecordings,
   enforceRuleRetention,
   reconcileRecordOnceRule,
@@ -1577,6 +1578,9 @@ app.get('/api/proxy', async (req, res) => {
 
 // ---------- Recordings ----------
 
+const mapRecordingWithProgressForApi = (recording: DBRecording) =>
+  mapRecordingForApi(recording, getFinalizationProgress(recording.id, recording.status));
+
 app.get('/api/recordings', requireAuth, (_req, res) => {
   const status = _req.query.status as string | undefined;
   const limit = parseIntegerQuery(_req.query.limit, 1, 200);
@@ -1586,7 +1590,7 @@ app.get('/api/recordings', requireAuth, (_req, res) => {
     return;
   }
   const recordings = getRecordings({ status, limit, offset });
-  res.json({ recordings: recordings.map(mapRecordingForApi) });
+  res.json({ recordings: recordings.map(mapRecordingWithProgressForApi) });
 });
 
 app.post('/api/recordings', requireAuth, (req, res) => {
@@ -1624,7 +1628,7 @@ app.post('/api/recordings', requireAuth, (req, res) => {
     });
   }
 
-  res.json({ recording: mapRecordingForApi(getRecording(id) ?? recording) });
+  res.json({ recording: mapRecordingWithProgressForApi(getRecording(id) ?? recording) });
 });
 
 app.post('/api/recordings/from-program', requireAuth, (req, res) => {
@@ -1673,7 +1677,7 @@ app.post('/api/recordings/from-program', requireAuth, (req, res) => {
     });
   }
 
-  res.json({ recording: mapRecordingForApi(getRecording(inserted.id) ?? inserted) });
+  res.json({ recording: mapRecordingWithProgressForApi(getRecording(inserted.id) ?? inserted) });
 });
 
 app.get('/api/recordings/:id', requireAuth, (req, res) => {
@@ -1683,7 +1687,7 @@ app.get('/api/recordings/:id', requireAuth, (req, res) => {
     res.status(404).json({ error: 'Recording not found' });
     return;
   }
-  res.json({ recording: mapRecordingForApi(recording) });
+  res.json({ recording: mapRecordingWithProgressForApi(recording) });
 });
 
 app.get('/api/recordings/:id/commercial-segments', requireAuth, (req, res) => {
