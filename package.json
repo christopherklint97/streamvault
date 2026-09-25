@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:wgt": "tsc -b && vite build --mode tizen",
     "build:tizen5": "tsc -b && vite build --mode tizen5",
     "lint": "eslint .",
     "preview": "vite preview",

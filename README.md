@@ -77,7 +77,8 @@ scripts/        # Tizen signing, packaging, and deployment
 ```bash
 npm install
 npm run dev       # Start frontend dev server
-npm run build     # TypeScript check + Vite build (PWA + Tizen 6.5+ widget)
+npm run build     # Web PWA (root-relative assets)
+npm run build:wgt # Tizen 6.5+ unsigned widget bundle (relative assets, no PWA)
 npm run build:tizen5  # Tizen 5.0/5.5 widget (Chromium 63) — legacy bundle, no PWA
 npm run lint      # ESLint
 npm run typecheck # TypeScript only
@@ -107,7 +108,7 @@ Set `STREAMVAULT_AUTH_TOKEN` to protect config, sync/crawl, recordings, and reco
 
 Tokens are backend-specific. StreamVault never sends the active backend's token while probing a different origin, and a successful switch replaces or clears the stored token.
 
-The stream proxy validates URLs and blocks localhost/private/link-local targets. `/api/proxy` is limited to the configured Xtream server host plus optional `STREAMVAULT_PROXY_ALLOWED_HOSTS` entries.
+The stream proxy validates client-supplied entry URLs against the configured Xtream server host and optional `STREAMVAULT_PROXY_ALLOWED_HOSTS` entries. Redirects may lead to public CDN origins, but private DNS/IP destinations are rejected; private LAN redirects are allowed only back to the same saved Xtream origin.
 
 Useful server environment variables:
 
