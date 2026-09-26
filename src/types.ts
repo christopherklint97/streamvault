@@ -14,6 +14,10 @@ export interface Channel {
   seriesId?: string;
   /** Explicit recording identity; avoids inferring it from a synthetic channel ID. */
   recordingId?: string;
+  /** Finite MPEG-TS masters require a browser demuxer, not native <video>. */
+  recordingTransport?: 'mpegts' | 'native';
+  recordingSize?: number;
+  recordingVodReady?: boolean;
 }
 
 export interface Program {

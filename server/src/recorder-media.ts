@@ -178,7 +178,9 @@ export function discoverRecordingArtifacts(root: string, recordingId: string): s
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       const fullPath = path.join(directory, entry.name);
       if (entry.isDirectory()) {
-        walk(fullPath);
+        // Prepared VOD segments are managed by the async cache cleanup path.
+        // Traversing thousands of them synchronously would stall every scan.
+        if (!/\.hls(?:\.part-[a-f0-9-]+)?$/.test(entry.name)) walk(fullPath);
       } else if (entry.isFile() && entry.name.startsWith(exactPrefix)) {
         matches.push(fullPath);
       }

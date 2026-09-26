@@ -19,7 +19,9 @@ import {
 import type { DBRecording } from './db.js';
 import { resolveStreamUrl, VLC_HEADERS } from './stream-utils.js';
 import { logger } from './logger.js';
-import { cancelCommercialAnalysis, notifyCommercialAnalysisQueued } from './commercial-analysis-worker.js';
+import { measureDiskUsage } from './recording-disk-usage.js';
+import { recordingVodHlsPreparer, removeRecordingVodHlsCache } from './recording-vod-hls.js';
+import { cancelCommercialAnalysis } from './commercial-analysis-worker.js';
 import {
   buildCaptureSegmentPath,
   buildMasterCaptureArgs,
@@ -57,6 +59,7 @@ interface ActiveRecording {
 interface StartingRecording {
   done: Promise<void>;
   resolve: () => void;
+  controller: AbortController;
 }
 
 interface FinalizingRecording {
@@ -165,6 +168,10 @@ export function getRecordingsDiskUsage(): number {
   return total;
 }
 
+export function getRecordingsDiskUsageAsync(): Promise<number> {
+  return measureDiskUsage(getRecordingsDir());
+}
+
 function recordingPaths(recordingsDir: string, dateDir: string, id: string) {
   const part = path.join(dateDir, `${id}.ts.part`);
   const master = path.join(dateDir, `${id}.ts`);
@@ -180,6 +187,14 @@ function recordingPaths(recordingsDir: string, dateDir: string, id: string) {
   };
 }
 
+function vodMasterPathForRecord(id: string): string | null {
+  const relative = getRecording(id)?.master_file_path;
+  if (!relative) return null;
+  const root = path.resolve(getRecordingsDir());
+  const full = path.resolve(root, relative);
+  return full.startsWith(`${root}${path.sep}`) && path.basename(full) === `${id}.ts` ? full : null;
+}
+
 function isCaptureSegment(file: string, id: string): boolean {
   const name = path.basename(file);
   return name.startsWith(`${id}.segment-`) && (name.endsWith('.ts') || name.endsWith('.ts.part'));
@@ -188,6 +203,14 @@ function isCaptureSegment(file: string, id: string): boolean {
 function normalizeLegacyCapturePart(id: string): void {
   const root = getRecordingsDir();
   let artifacts = discoverRecordingArtifacts(root, id);
+  // Original attempts are authoritative; the legacy-named part is an
+  // interrupted concat output and must not become a duplicate segment.
+  if (artifacts.some(file => isCaptureSegment(file, id))) {
+    for (const file of artifacts.filter(file => path.basename(file) === `${id}.ts.part`)) {
+      fs.rmSync(file, { force: true });
+    }
+    return;
+  }
   const legacyParts = artifacts.filter(file => path.basename(file) === `${id}.ts.part`);
   for (const legacyPart of legacyParts) {
     const attempt = nextCaptureAttemptIndex(artifacts, id);
@@ -366,9 +389,11 @@ async function publishCompletedRecording(
         file_size: result.masterSize + (hasDerivative ? result.derivativeSize : 0),
         duration: result.durationSeconds,
         error: null,
-        analysis_state: 'queued',
+        // Analyze only when explicitly requested; automatic Comskip can saturate
+        // the recording disk for hours and delay playback of completed media.
+        analysis_state: 'not_requested',
         analysis_error: null,
-        analysis_requested_at: now,
+        analysis_requested_at: null,
         analysis_started_at: null,
         analysis_completed_at: null,
       }, current.rule_id, current.rule_revision ?? null, current.program_start_time ?? null, current.airing_key ?? null);
@@ -377,7 +402,6 @@ async function publishCompletedRecording(
         return;
       }
       completedRuleId = current.rule_id ?? null;
-      notifyCommercialAnalysisQueued();
       logger.info(
         `Recording ${id}: completed (${(result.masterSize / 1e6).toFixed(1)}MB master, ${result.durationSeconds}s)` +
         (result.derivativeError ? `; MP4 derivative failed: ${result.derivativeError}` : ''),
@@ -422,7 +446,7 @@ async function publishCompletedRecording(
 function createStartingRecording(id: string): StartingRecording {
   let resolve!: () => void;
   const done = new Promise<void>(settle => { resolve = settle; });
-  const starting = { done, resolve };
+  const starting = { done, resolve, controller: new AbortController() };
   startingRecordings.set(id, starting);
   return starting;
 }
@@ -500,11 +524,15 @@ export async function startRecording(id: string): Promise<void> {
   const starting = createStartingRecording(id);
   let streamUrl: string;
   try {
-    await resolveStreamUrl(rec.channel_id);
+    await resolveStreamUrl(rec.channel_id, starting.controller.signal);
     // ffmpeg must only contact our validated proxy; upstream redirects may change
     // between the preflight and capture and must never bypass the URL/DNS guard.
     streamUrl = `http://127.0.0.1:${process.env.PORT || '3001'}/api/stream/${encodeURIComponent(rec.channel_id)}?subs=1`;
   } catch (error) {
+    if (stoppingAll || starting.controller.signal.aborted) {
+      finishStartingRecording(id, starting);
+      return;
+    }
     const message = error instanceof Error ? error.message : 'Failed to resolve stream URL';
     if (updateRecordingIfStatus(id, ['scheduled', 'recording'], { status: 'failed', error: message })) {
       markCadenceRetry(rec);
@@ -650,7 +678,10 @@ export async function cancelRecording(id: string, _deleteFile = false): Promise<
   retryTimers.delete(id);
 
   const starting = startingRecordings.get(id);
-  if (starting) await starting.done;
+  if (starting) {
+    starting.controller.abort();
+    await starting.done;
+  }
 
   const active = activeRecordings.get(id);
   if (active) {
@@ -672,6 +703,8 @@ export async function cancelRecording(id: string, _deleteFile = false): Promise<
   // Capture/finalization artifacts are unpublished and unusable after cancellation;
   // always remove them so cancelled rows cannot strand disk space. `deleteFile`
   // is retained for API compatibility and logging only.
+  const vodMaster = vodMasterPathForRecord(id);
+  if (vodMaster) await removeRecordingVodHlsCache(vodMaster);
   removeRecordingArtifacts(id);
   logger.info(`Recording ${id}: cancelled${_deleteFile ? ' (file deleted)' : ''}`);
   requestRuleReconciliation(recording?.rule_id ?? null);
@@ -681,6 +714,8 @@ export async function cancelRecording(id: string, _deleteFile = false): Promise<
 async function prepareRecordingDeletion(id: string): Promise<void> {
   await cancelCommercialAnalysis(id);
   if (isRecordingActive(id)) await cancelRecording(id, false);
+  const vodMaster = vodMasterPathForRecord(id);
+  if (vodMaster) await removeRecordingVodHlsCache(vodMaster);
 }
 
 /** Await any writer for this recording, then remove every exact-id artifact. */
@@ -692,10 +727,17 @@ export async function deleteRecordingFile(id: string): Promise<number> {
 /** Stop captures gracefully and await capture finalization before database shutdown. */
 export async function stopAllRecordings(): Promise<void> {
   stoppingAll = true;
+  const vodStop = recordingVodHlsPreparer.stop();
   for (const timer of retryTimers.values()) clearTimeout(timer);
   retryTimers.clear();
-  await Promise.all([...startingRecordings.values()].map(starting => starting.done));
-  await Promise.all([...activeRecordings.keys()].map(id => stopRecording(id, true)));
+  const starting = [...startingRecordings.values()];
+  for (const entry of starting) entry.controller.abort();
+  // Stop live captures while preflights settle rather than behind them.
+  await Promise.all([
+    ...[...activeRecordings.keys()].map(id => stopRecording(id, true)),
+    ...starting.map(entry => entry.done),
+    vodStop,
+  ]);
   const finalizers = [...finalizingRecordings.entries()];
   for (const [, finalizing] of finalizers) {
     finalizing.controller.abort();
@@ -734,7 +776,11 @@ export async function recoverRecordings(): Promise<void> {
     ...getRecordingsByStatus('finalizing'),
   ];
   const cancelled = getRecordingsByStatus('cancelled');
-  for (const rec of cancelled) removeRecordingArtifacts(rec.id);
+  for (const rec of cancelled) {
+    const vodMaster = vodMasterPathForRecord(rec.id);
+    if (vodMaster) await removeRecordingVodHlsCache(vodMaster);
+    removeRecordingArtifacts(rec.id);
+  }
   const now = Date.now();
 
   // Restore every still-live capture first so the scheduler can resume it on its

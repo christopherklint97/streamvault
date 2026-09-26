@@ -5,6 +5,21 @@ import { seekRecordingPlayback, stopActivePlayback, usePlayer } from './usePlaye
 import { commercialSkipSession } from '../services/commercialSkipSession';
 import { usePlayerStore } from '../stores/playerStore';
 import { useAppStore } from '../stores/appStore';
+import { saveWatchProgress } from '../services/channel-service';
+import { getRecordingVodStatus } from '../services/recordingPlayback';
+
+const mpegtsMock = vi.hoisted(() => ({
+  createPlayer: vi.fn(() => ({
+    on: vi.fn(), attachMediaElement: vi.fn(), load: vi.fn(), unload: vi.fn(), detachMediaElement: vi.fn(), destroy: vi.fn(),
+  })),
+}));
+vi.mock('mpegts.js', () => ({ default: { isSupported: () => true, createPlayer: mpegtsMock.createPlayer, Events: {
+  ERROR: 'error', LOADING_COMPLETE: 'complete', MEDIA_INFO: 'info', STATISTICS_INFO: 'stats',
+} } }));
+vi.mock('../services/recordingPlayback', () => ({
+  getRecordingPlaybackUrl: vi.fn(async () => '/api/recordings/r1/stream?ticket=fresh'),
+  getRecordingVodStatus: vi.fn(async () => 'missing'),
+}));
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -48,9 +63,86 @@ describe('usePlayer manual seek integration', () => {
     video.remove();
     container.remove();
     vi.restoreAllMocks();
+    mpegtsMock.createPlayer.mockClear();
+    vi.mocked(getRecordingVodStatus).mockReset().mockResolvedValue('missing');
     vi.useRealTimers();
     localStorage.clear();
     useAppStore.setState({ showToast: false, toastMessage: '' });
+  });
+
+  it('demuxes a finite TS-only recording instead of assigning MPEG-TS to native video', async () => {
+    usePlayerStore.setState({ currentChannel: {
+      id: 'recording_r1', name: 'Recording', url: '/ticketed', logo: '', group: '', region: '',
+      contentType: 'movies', recordingId: 'r1', recordingTransport: 'mpegts',
+      recordingSize: 123456, duration: 120,
+    } });
+    await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
+    await vi.waitFor(() => expect(mpegtsMock.createPlayer).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'mpegts', isLive: false, url: '/ticketed', filesize: 123456, duration: 120000 }),
+      expect.any(Object),
+    ));
+    expect(video.src).not.toContain('/ticketed');
+    await act(async () => hookRef.current?.stop());
+  });
+
+  it('sends a TS-only iPhone recording through native HLS, not a whole-file MSE demux', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15');
+    usePlayerStore.setState({ currentChannel: {
+      id: 'recording_r1', name: 'Recording', url: '/api/recordings/r1/stream?ticket=abc',
+      logo: '', group: '', region: '', contentType: 'movies', recordingId: 'r1',
+      recordingTransport: 'mpegts', duration: 120, recordingSize: 123456,
+    } });
+    await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
+    expect(video.src).toContain('/api/recordings/r1/hls/index.m3u8?ticket=abc');
+    expect(mpegtsMock.createPlayer).not.toHaveBeenCalled();
+    await act(async () => hookRef.current?.seek(42));
+    await vi.waitFor(() => expect(video.src).toContain('ticket=fresh&start=42'));
+  });
+
+  it('opens a prepared recording as finite VOD at the saved absolute position', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15');
+    saveWatchProgress('recording_r1', 42, 120, 'movies');
+    usePlayerStore.setState({ currentChannel: {
+      id: 'recording_r1', name: 'Recording', url: '/api/recordings/r1/stream?ticket=abc',
+      logo: '', group: '', region: '', contentType: 'movies', recordingId: 'r1',
+      recordingTransport: 'mpegts', recordingVodReady: true, duration: 120,
+    } });
+    await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
+    expect(video.src).toContain('/api/recordings/r1/hls/index.m3u8?ticket=abc');
+    expect(video.src).not.toContain('start=42');
+    expect(video.dataset.streamOffset).toBe('0');
+  });
+
+  it('switches rolling iPhone playback to a finite seekable rendition at the same absolute time', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15');
+    usePlayerStore.setState({ currentChannel: {
+      id: 'recording_r1', name: 'Recording', url: '/api/recordings/r1/stream?ticket=abc',
+      logo: '', group: '', region: '', contentType: 'movies', recordingId: 'r1',
+      recordingTransport: 'mpegts', recordingVodReady: false, duration: 120,
+    } });
+    await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
+    video.currentTime = 48;
+    vi.mocked(getRecordingVodStatus).mockResolvedValue('ready');
+    await vi.waitFor(() => expect(video.src).toContain('ticket=fresh'), { timeout: 18_000 });
+    expect(video.src).not.toContain('start=48');
+    expect(video.dataset.streamOffset).toBe('0');
+  }, 20_000);
+
+  it('seeks to the absolute timeline once the native VOD rendition is available', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15');
+    usePlayerStore.setState({ currentChannel: {
+      id: 'recording_r1', name: 'Recording', url: '/api/recordings/r1/stream?ticket=old',
+      logo: '', group: '', region: '', contentType: 'movies', recordingId: 'r1',
+      recordingTransport: 'mpegts', recordingVodReady: true, duration: 120,
+    } });
+    vi.mocked(getRecordingVodStatus).mockResolvedValue('ready');
+    await act(async () => hookRef.current?.seek(70));
+    await vi.waitFor(() => expect(video.src).toContain('ticket=fresh'));
+    expect(video.src).not.toContain('start=70');
+    expect(video.dataset.streamOffset).toBe('0');
+    Object.defineProperty(video, 'duration', { configurable: true, value: 120 });
+    await act(async () => video.dispatchEvent(new Event('loadedmetadata')));
+    expect(video.currentTime).toBe(70);
   });
 
   it('still closes AVPlay when stop throws during backend cleanup', () => {
