@@ -9,6 +9,7 @@ import { ensureRecordingSchema } from './db-migrations.js';
 import { createCommercialStore, type CommercialSegmentWrite, type DBCommercialSegment } from './commercial-store.js';
 import { createProgramStore } from './program-store.js';
 import { getProgramWindow } from './program-window.js';
+import { measureSlowOperation } from './slow-operation.js';
 import {
   backupDatabaseInWorker,
   checkDatabaseReadable,
@@ -18,7 +19,7 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', 'data');
-const DB_PATH = path.join(DATA_DIR, 'streamvault.db');
+export const DB_PATH = path.join(DATA_DIR, 'streamvault.db');
 const BACKUP_DIR = path.join(DATA_DIR, 'backups');
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -571,7 +572,9 @@ export function savePrograms(programs: DBProgram[]): void {
 
 /** Save a completed program snapshot for specific channels without touching other channels. */
 export function saveProgramsForChannels(programs: DBProgram[], channelIds?: string[]): void {
-  programStore.saveSnapshot(programs, Date.now(), channelIds ?? [...new Set(programs.map(program => program.channel_id))]);
+  measureSlowOperation('EPG snapshot write', () => {
+    programStore.saveSnapshot(programs, Date.now(), channelIds ?? [...new Set(programs.map(program => program.channel_id))]);
+  }, message => logger.warn(message));
 }
 
 export function getPrograms(from?: number, to?: number): DBProgram[] {
@@ -584,15 +587,17 @@ export function getPrograms(from?: number, to?: number): DBProgram[] {
 /** Get programs for specific channel IDs within a time range */
 export function getProgramsByChannelIds(channelIds: string[], from?: number, to?: number): DBProgram[] {
   if (channelIds.length === 0) return [];
-  const placeholders = channelIds.map(() => '?').join(',');
-  if (from !== undefined && to !== undefined) {
+  return measureSlowOperation('EPG batch read', () => {
+    const placeholders = channelIds.map(() => '?').join(',');
+    if (from !== undefined && to !== undefined) {
+      return db.prepare(
+        `SELECT * FROM programs WHERE channel_id IN (${placeholders}) AND start_time < ? AND stop_time > ? ORDER BY channel_id, start_time`
+      ).all(...channelIds, to, from) as DBProgram[];
+    }
     return db.prepare(
-      `SELECT * FROM programs WHERE channel_id IN (${placeholders}) AND start_time < ? AND stop_time > ? ORDER BY channel_id, start_time`
-    ).all(...channelIds, to, from) as DBProgram[];
-  }
-  return db.prepare(
-    `SELECT * FROM programs WHERE channel_id IN (${placeholders}) ORDER BY channel_id, start_time`
-  ).all(...channelIds) as DBProgram[];
+      `SELECT * FROM programs WHERE channel_id IN (${placeholders}) ORDER BY channel_id, start_time`
+    ).all(...channelIds) as DBProgram[];
+  }, message => logger.warn(`${message} (${channelIds.length} channels)`));
 }
 
 /** Get all programs for a single channel, ordered by start time */

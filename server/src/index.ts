@@ -17,7 +17,7 @@ function setStreamSocketOpts(res: import('express').Response): void {
 }
 import {
   getChannels, getChannelById, getChannelsByIds, getChannelsByGroup, getChannelCount, getChannelCountByGroup, getGroups, getRegions,
-  getPrograms, getProgramsByChannelIds, getProgramsByChannel, saveProgramsForChannels,
+  getPrograms, saveProgramsForChannels, DB_PATH,
   getProgramByAiringKey, getProgramByLegacyIdentity,
   getConfig, setConfig,
   getCategories, getCategoryByName, getContentTypeCounts,
@@ -35,8 +35,11 @@ import type { DBRecording, DBRecordingRule } from './db.js';
 import { getStatus, sync, cancelSync, startupSync, startCrawl, cancelCrawl } from './sync.js';
 import { fetchXtreamStreamsByCategory, fetchXtreamShortEpg, fetchAllCategoryStreams, fetchXtreamSeriesInfo, fetchXtreamVodInfo } from './xtream.js';
 import { createOnDemandEpg } from './on-demand-epg.js';
+import { createEpgReadWorker } from './epg-read-worker.js';
+import { createEpgWriteWorker } from './epg-write-worker.js';
 import type { XtreamConfig } from './xtream.js';
 import { logger } from './logger.js';
+import { startEventLoopMonitor } from './event-loop-monitor.js';
 import { requestStream, pickHeader, VLC_HEADERS } from './stream-utils.js';
 import { prewarmUpstream } from './http-agent.js';
 import {
@@ -47,6 +50,7 @@ import {
   deleteRecordingFile,
   getRecordingFilePath,
   getRecordingMasterFilePath,
+  getRecordingsDiskUsageAsync,
   getFinalizationProgress,
   recoverRecordings,
   enforceRuleRetention,
@@ -77,6 +81,9 @@ import { buildFragmentedMp4Args } from './vod-remux.js';
 import { buildBrowserCompatibleVideoArgs } from './browser-transcode.js';
 import { buildIosHlsArgs, iosHlsContentType } from './ios-hls.js';
 import { IOS_HLS_IDLE_TIMEOUT_MS, findReusableIosHlsSession, iosHlsProcessExitState, iosHlsSessionKey, iosHlsSessionLimitReason, selectIosHlsSessionsToRetire } from './ios-hls-sessions.js';
+import { buildRecordingHlsArgs, parseRecordingHlsStart } from './recording-hls.js';
+import { registerRecordingVodRoutes } from './recording-vod-routes.js';
+import { recordingVodHlsPreparer } from './recording-vod-hls.js';
 import { createIosHlsAuthorizationLimiter, createIosHlsTicket, sanitizeFfmpegMessage, verifyIosHlsTicket } from './ios-hls-security.js';
 import { selectIosVodFallback } from './ios-vod.js';
 import {
@@ -191,11 +198,20 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Request logging
-app.use((req, _res, next) => {
+// Request logging; include completion timing only when a request is slow.
+app.use((req, res, next) => {
+  const start = performance.now();
   logger.info(`${req.method} ${req.path}`);
+  res.on('finish', () => {
+    const duration = performance.now() - start;
+    if (duration >= 500 && req.path.startsWith('/api/')) {
+      logger.warn(`Slow ${req.method} ${req.path}: ${Math.round(duration)}ms (${res.statusCode})`);
+    }
+  });
   next();
 });
+
+const stopEventLoopMonitor = startEventLoopMonitor(message => logger.warn(message));
 
 app.get('/api/health', (_req, res) => {
   const database = getDatabaseHealth();
@@ -539,15 +555,17 @@ app.get('/api/programs', (req, res) => {
 
 // ---------- Batch EPG (for channel list view) ----------
 
+const epgReader = createEpgReadWorker(DB_PATH, message => logger.warn(message));
+const epgWriter = createEpgWriteWorker(DB_PATH, message => logger.warn(message));
 const onDemandEpg = createOnDemandEpg({
-  read: getProgramsByChannelIds,
+  read: epgReader.read,
   fetch: fetchXtreamShortEpg,
-  save: saveProgramsForChannels,
+  save: epgWriter.save,
   getConfig: getXtreamConfig,
   warn: message => logger.warn(message),
 });
 
-app.get('/api/epg/batch', (req, res) => {
+app.get('/api/epg/batch', async (req, res) => {
   const idsParam = req.query.ids as string | undefined;
   if (!idsParam) {
     res.json({ programs: {} });
@@ -561,7 +579,7 @@ app.get('/api/epg/batch', (req, res) => {
     res.status(400).json({ error: 'Invalid time range' });
     return;
   }
-  const dbPrograms = onDemandEpg.get(channelIds, from, to);
+  const dbPrograms = await onDemandEpg.get(channelIds, from, to);
 
   // Group by channel ID
   const grouped: Record<string, Array<{ channelId: string; title: string; description: string; start: string; stop: string }>> = {};
@@ -580,7 +598,7 @@ app.get('/api/epg/batch', (req, res) => {
 
 // ---------- EPG for single channel (full schedule) ----------
 
-app.get('/api/epg/channel/:channelId', (req, res) => {
+app.get('/api/epg/channel/:channelId', async (req, res) => {
   const channelId = req.params.channelId;
   const from = req.query.from === undefined ? undefined : Number(req.query.from);
   const to = req.query.to === undefined ? undefined : Number(req.query.to);
@@ -589,8 +607,8 @@ app.get('/api/epg/channel/:channelId', (req, res) => {
     return;
   }
   const dbPrograms = from !== undefined && to !== undefined
-    ? onDemandEpg.get([channelId], from, to)
-    : getProgramsByChannel(channelId, from, to);
+    ? await onDemandEpg.get([channelId], from, to)
+    : await epgReader.read([channelId], from ?? Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER);
   const programs = dbPrograms.map(p => ({
     channelId: p.channel_id,
     title: p.title,
@@ -1302,7 +1320,7 @@ app.get('/api/ios-hls/:channelId/index.m3u8', (req, res) => {
 app.get('/api/ios-hls-assets/:sessionId/:asset', (req, res) => {
   const session = iosHlsSessions.get(req.params.sessionId);
   const asset = req.params.asset;
-  if (!session || !/^(init\.mp4|segment-\d+\.m4s)$/.test(asset)) {
+  if (!session || !/^(init\.mp4|segment-\d+\.(?:m4s|ts))$/.test(asset)) {
     res.status(404).end();
     return;
   }
@@ -1312,7 +1330,8 @@ app.get('/api/ios-hls-assets/:sessionId/:asset', (req, res) => {
     res.status(404).end();
     return;
   }
-  res.type(asset.endsWith('.mp4') ? 'video/mp4' : 'video/iso.segment').set('Cache-Control', 'no-store').sendFile(filePath);
+  res.type(asset.endsWith('.mp4') ? 'video/mp4' : asset.endsWith('.ts') ? 'video/mp2t' : 'video/iso.segment')
+    .set('Cache-Control', 'no-store').sendFile(filePath);
 });
 
 // ---------- Stream Proxy ----------
@@ -1878,6 +1897,103 @@ app.post('/api/recordings/:id/playback-ticket', requireAuth, (req, res) => {
   res.json({ url: `${directUrl}?ticket=${encodeURIComponent(ticket)}`, expiresAt });
 });
 
+recordingVodHlsPreparer.setQuotaChecker(async (_master, estimatedBytes) => {
+  const maxGb = parseInt(getConfig('recording_max_disk_gb', '50'), 10);
+  return !(maxGb > 0) || await getRecordingsDiskUsageAsync() + estimatedBytes <= maxGb * 1_073_741_824;
+});
+registerRecordingVodRoutes(app, {
+  getMasterPath: getRecordingMasterFilePath,
+  getStatus: id => getRecording(id)?.status ?? null,
+  getDuration: id => getRecording(id)?.duration ?? 0,
+  canAccess: (id, ticket) => canAccessRecordingStream(id, process.env.STREAMVAULT_AUTH_TOKEN, ticket),
+  requireAuth,
+  ensure: (master, durationSeconds) => recordingVodHlsPreparer.ensure(master, durationSeconds),
+  isPreparing: master => recordingVodHlsPreparer.isPreparing(master),
+});
+
+// Native iPhone HLS from a verified local TS master. The opaque session URL
+// keeps refreshing after the short-lived stream ticket has expired.
+app.get('/api/recordings/:id/hls/index.m3u8', (req, res) => {
+  const recordingId = String(req.params.id);
+  const channelId = `recording_${recordingId}`;
+  const sessionId = typeof req.query.session === 'string' ? req.query.session : null;
+  if (sessionId) {
+    const session = iosHlsSessions.get(sessionId);
+    if (!session || session.channelId !== channelId || session.expiresAt <= Date.now()) {
+      res.status(404).json({ error: 'Recording HLS session expired' });
+      return;
+    }
+    session.expiresAt = Date.now() + IOS_HLS_IDLE_TIMEOUT_MS;
+    const playlistPath = path.join(session.directory, 'index.m3u8');
+    const started = Date.now();
+    const sendPlaylist = () => {
+      if (res.writableEnded || res.destroyed) return;
+      if (fs.existsSync(playlistPath)) {
+        const playlist = fs.readFileSync(playlistPath, 'utf8')
+          .replace(/segment-\d+\.ts/g, asset => `/api/ios-hls-assets/${sessionId}/${asset}`);
+        res.type('application/vnd.apple.mpegurl').set('Cache-Control', 'no-store').send(playlist);
+      } else if (Date.now() - started > 20_000 || session.state !== 'running') {
+        res.status(504).json({ error: 'Recording HLS failed to prepare' });
+      } else setTimeout(sendPlaylist, 100).unref();
+    };
+    sendPlaylist();
+    return;
+  }
+
+  const ticket = typeof req.query.ticket === 'string' ? req.query.ticket : undefined;
+  if (!canAccessRecordingStream(recordingId, process.env.STREAMVAULT_AUTH_TOKEN, ticket)) {
+    res.status(401).json({ error: 'Valid playback ticket required' });
+    return;
+  }
+  const recording = getRecording(recordingId);
+  const masterPath = getRecordingMasterFilePath(recordingId);
+  if (recording?.status !== 'completed' || !masterPath || !masterPath.endsWith('.ts')) {
+    res.status(404).json({ error: 'Completed TS master not found' });
+    return;
+  }
+  const startSeconds = parseRecordingHlsStart(req.query.start, recording.duration);
+  if (startSeconds === null) {
+    res.status(400).json({ error: 'Invalid recording HLS start' });
+    return;
+  }
+  const key = iosHlsSessionKey(channelId, masterPath, startSeconds);
+  const existing = findReusableIosHlsSession(iosHlsSessions, key);
+  if (existing) {
+    res.set('Cache-Control', 'no-store').redirect(302, `/api/recordings/${encodeURIComponent(recordingId)}/hls/index.m3u8?session=${existing}`);
+    return;
+  }
+  for (const id of selectIosHlsSessionsToRetire(iosHlsSessions, channelId, MAX_IOS_HLS_SESSIONS)) {
+    retireIosHlsSession(id, 'superseded');
+  }
+  const id = randomUUID();
+  const directory = path.join(IOS_HLS_ROOT, id);
+  fs.mkdirSync(directory, { recursive: true });
+  const ff = spawn('ionice', ['-c', '3', 'nice', '-n', '15', 'ffmpeg',
+    ...buildRecordingHlsArgs(masterPath, path.join(directory, 'index.m3u8'), startSeconds)],
+  { stdio: ['ignore', 'ignore', 'pipe'] });
+  iosHlsSessions.set(id, {
+    directory, process: ff, channelId, key, state: 'running',
+    createdAt: Date.now(), expiresAt: Date.now() + IOS_HLS_IDLE_TIMEOUT_MS,
+  });
+  scheduleIosHlsCleanup(id);
+  let diagnostics = 0;
+  ff.stderr.on('data', chunk => {
+    if (diagnostics++ < 4) logger.warn(`Recording HLS[${recordingId}]: ${sanitizeFfmpegMessage(chunk.toString().slice(0, 500))}`);
+  });
+  ff.on('error', err => {
+    logger.error(`Recording HLS spawn failed: ${err.message}`);
+    retireIosHlsSession(id, 'spawn-error');
+  });
+  ff.on('exit', (code, signal) => {
+    const session = iosHlsSessions.get(id);
+    if (!session) return;
+    session.state = iosHlsProcessExitState(code, signal);
+    if (session.state === 'failed') retireIosHlsSession(id, `ffmpeg-exit-${code ?? signal ?? 'unknown'}`);
+  });
+  logger.info(`Recording HLS started: ${recordingId}, offset=${startSeconds}, session=${id}`);
+  res.set('Cache-Control', 'no-store').redirect(302, `/api/recordings/${encodeURIComponent(recordingId)}/hls/index.m3u8?session=${id}`);
+});
+
 app.get('/api/recordings/:id/stream', (req, res) => {
   const recordingId = String(req.params.id);
   const ticket = typeof req.query.ticket === 'string' ? req.query.ticket : undefined;
@@ -2225,6 +2341,7 @@ let shuttingDown = false;
 function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
+  stopEventLoopMonitor();
   logger.info(`Received ${signal}, shutting down gracefully...`);
   if (backupTimer) clearTimeout(backupTimer);
   const schedulerShutdown = stopScheduler().catch(error => {
@@ -2255,7 +2372,8 @@ function shutdown(signal: string): void {
     logger.warn(`Recorder/analysis shutdown failed: ${error instanceof Error ? error.message : error}`);
   });
 
-  void Promise.all([backupShutdown, httpShutdown, recorderAndAnalysisShutdown]).then(() => {
+  void Promise.all([backupShutdown, httpShutdown, recorderAndAnalysisShutdown]).then(async () => {
+    await Promise.all([epgReader.close(), epgWriter.close()]);
     closeDatabase();
     clearTimeout(forceExit);
     process.exit(0);

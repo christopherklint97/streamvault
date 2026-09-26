@@ -266,6 +266,25 @@ describe('recorder lifecycle integration', () => {
     expect(fs.existsSync(sidecar)).toBe(false);
   });
 
+  it('removes a completed VOD HLS package and interrupted staging without touching a sibling', async () => {
+    const nested = path.join(recordingsDir, '2026', '09', '20');
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(nested, 'r1.ts'), 'master');
+    fs.writeFileSync(path.join(nested, 'r10.ts'), 'other master');
+    for (const name of ['r1.hls', 'r1.hls.part-dead', 'r10.hls']) {
+      fs.mkdirSync(path.join(nested, name));
+      fs.writeFileSync(path.join(nested, name, 'segment-00000.ts'), name);
+    }
+    state.records.set('r1', recording({
+      status: 'completed', file_path: '2026/09/20/r1.ts', master_file_path: '2026/09/20/r1.ts',
+    }));
+    const recorder = await import('./recorder.js');
+    await recorder.deleteRecordingFile('r1');
+    expect(fs.existsSync(path.join(nested, 'r1.hls'))).toBe(false);
+    expect(fs.existsSync(path.join(nested, 'r1.hls.part-dead'))).toBe(false);
+    expect(fs.existsSync(path.join(nested, 'r10.hls', 'segment-00000.ts'))).toBe(true);
+  });
+
   it('retries a clean early EOF into a new segment and finalizes every attempt', async () => {
     state.rules.set('rule-1', rule({
       cadence_occurrence_progress: 3,
@@ -303,7 +322,8 @@ describe('recorder lifecycle integration', () => {
       cadence_retry_start: null,
       cadence_retry_key: null,
     });
-    expect(state.analysisNotifications).toBe(1);
+    expect(state.analysisNotifications).toBe(0);
+    expect(state.records.get('r1')?.analysis_state).toBe('not_requested');
   });
 
   it('does not let an old rule revision advance the edited rule cadence', async () => {
@@ -578,7 +598,8 @@ describe('recorder lifecycle integration', () => {
     await vi.waitFor(() => expect(state.records.get('r1')?.status).toBe('completed'));
 
     expect(state.records.get('r1')?.master_file_path).toMatch(/r1\.ts$/);
-    expect(state.analysisNotifications).toBe(1);
+    expect(state.analysisNotifications).toBe(0);
+    expect(state.records.get('r1')?.analysis_state).toBe('not_requested');
   });
 
   it('requeues live recordings before returning without awaiting past-end finalization', async () => {
@@ -641,5 +662,53 @@ describe('recorder lifecycle integration', () => {
     expect(fs.readFileSync(expiredCapturePath, 'utf8')).toBe('expired-at-shutdown');
     expect(finalizationCalls).toBe(0);
     expect(state.analysisNotifications).toBe(0);
+  });
+
+  it('ignores an interrupted concat output when original capture segments are recoverable', async () => {
+    vi.resetModules();
+    const dir = path.join(recordingsDir, '2026', '09', '20');
+    fs.mkdirSync(dir, { recursive: true });
+    for (const [name, data] of [
+      ['r1.segment-000000.ts.part', 'first'],
+      ['r1.segment-000001.ts.part', 'second'],
+      ['r1.ts.part', 'first-partial-duplicate'],
+    ]) fs.writeFileSync(path.join(dir, name), data);
+    state.records.set('r1', recording({ status: 'finalizing', end_time: 5_000 }));
+    let segments: string[] = [];
+    state.finalize = async paths => {
+      segments = paths.segments ?? [];
+      fs.writeFileSync(paths.master, 'firstsecond');
+      return { durationSeconds: 30, masterSize: 11, derivativeSize: 0, derivativeError: 'no derivative' };
+    };
+    const recorder = await import('./recorder.js');
+    await recorder.recoverRecordings();
+    await vi.waitFor(() => expect(state.records.get('r1')?.status).toBe('completed'));
+    expect(segments.map(segment => path.basename(segment))).toEqual([
+      'r1.segment-000000.ts.part', 'r1.segment-000001.ts.part',
+    ]);
+    expect(fs.existsSync(path.join(dir, 'r1.ts.part'))).toBe(false);
+  });
+
+  it('stops active captures before waiting for a stalled preflight and leaves the preflight restartable', async () => {
+    vi.resetModules();
+    const { resolveStreamUrl } = await import('./stream-utils.js');
+    vi.mocked(resolveStreamUrl).mockResolvedValueOnce('https://example.test/live');
+    state.records.set('active', recording({ id: 'active', end_time: 120_000 }));
+    state.records.set('pending', recording({ id: 'pending', end_time: 120_000 }));
+    const recorder = await import('./recorder.js');
+    await recorder.startRecording('active');
+    const activeCapture = state.spawned[0].process;
+    fs.writeFileSync(state.spawned[0].args.at(-1)!, 'captured');
+    let rejectPreflight!: (reason: Error) => void;
+    vi.mocked(resolveStreamUrl).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectPreflight = reject; }));
+    const starting = recorder.startRecording('pending');
+    await flush();
+    const stopping = recorder.stopAllRecordings();
+    await flush();
+    expect(activeCapture.kill).toHaveBeenCalledWith('SIGINT');
+    rejectPreflight(new Error('shutdown abort'));
+    await Promise.all([starting, stopping]);
+    expect(state.records.get('pending')?.status).toBe('scheduled');
+    expect(state.records.get('pending')?.error).toBeNull();
   });
 });

@@ -16,7 +16,7 @@ export const VLC_HEADERS: Record<string, string> = {
 };
 
 /** Manually follow redirects while preserving headers (Node fetch strips them across origins) */
-export async function fetchWithRedirects(url: string, headers: Record<string, string>, maxRedirects = 10, timeout?: number, allowUrl?: (url: string) => boolean): Promise<Response> {
+export async function fetchWithRedirects(url: string, headers: Record<string, string>, maxRedirects = 10, timeout?: number, allowUrl?: (url: string) => boolean, signal?: AbortSignal): Promise<Response> {
   let currentUrl = url;
   for (let i = 0; i < maxRedirects; i++) {
     if (allowUrl && !allowUrl(currentUrl)) throw new Error('Redirect target is not allowed');
@@ -24,7 +24,8 @@ export async function fetchWithRedirects(url: string, headers: Record<string, st
       headers,
       redirect: 'manual',
     };
-    if (timeout) opts.signal = AbortSignal.timeout(timeout);
+    opts.signal = timeout && signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)])
+      : signal ?? (timeout ? AbortSignal.timeout(timeout) : undefined);
     const resp = await fetch(currentUrl, opts);
     if (resp.status >= 300 && resp.status < 400) {
       const location = resp.headers.get('location');
@@ -116,7 +117,7 @@ function pickHeader(headers: Record<string, string | string[] | undefined>, name
 export { pickHeader };
 
 /** Resolve the final stream URL for a channel, following all redirects */
-export async function resolveStreamUrl(channelId: string): Promise<string> {
+export async function resolveStreamUrl(channelId: string, signal?: AbortSignal): Promise<string> {
   const channel = getChannelById(channelId);
   if (!channel?.url) {
     throw new Error(`Channel ${channelId} not found or has no URL`);
@@ -124,7 +125,7 @@ export async function resolveStreamUrl(channelId: string): Promise<string> {
 
   // Follow redirects to get the final URL
   const resp = await fetchWithRedirects(channel.url, VLC_HEADERS, 10, 30_000,
-    url => validateSourceHttpUrl(url, getConfig('xtream_server')).ok);
+    url => validateSourceHttpUrl(url, getConfig('xtream_server')).ok, signal);
   // We got a final response — extract its URL
   const finalUrl = resp.url || channel.url;
   // Consume the body to free resources
