@@ -16,14 +16,12 @@ function setStreamSocketOpts(res: import('express').Response): void {
   }
 }
 import {
-  getChannels, getChannelById, getChannelsByIds, getChannelsByGroup, getChannelCount, getChannelCountByGroup, getGroups, getRegions,
+  getChannelById,
   getPrograms, saveProgramsForChannels, DB_PATH,
   getProgramByAiringKey, getProgramByLegacyIdentity,
   getConfig, setConfig,
-  getCategories, getCategoryByName, getContentTypeCounts,
-  saveChannelsForCategory, markCategoryFetched,
+  getCategories, getCategoryByName,
   searchChannelsByName, getChannelCountByContentType,
-  getChannelsByContentTypeCursor, getChannelsByGroupCursor,
   insertRecording, insertRecordingForAiring, updateRecording, deleteRecording, getRecording, getRecordings,
   getRecordingsByRuleId,
   getCommercialSegments, queueCommercialAnalysis, replaceCommercialSegmentsIfIdle,
@@ -36,6 +34,8 @@ import { getStatus, sync, cancelSync, startupSync, startCrawl, cancelCrawl } fro
 import { fetchXtreamStreamsByCategory, fetchXtreamShortEpg, fetchAllCategoryStreams, fetchXtreamSeriesInfo, fetchXtreamVodInfo } from './xtream.js';
 import { createOnDemandEpg } from './on-demand-epg.js';
 import { createEpgReadWorker } from './epg-read-worker.js';
+import { createChannelReadWorker } from './channel-read-worker.js';
+import { saveCategorySnapshot, closeCategorySnapshotWorker, getCatalogGeneration, rotateCatalogGeneration } from './category-write-service.js';
 import { createEpgWriteWorker } from './epg-write-worker.js';
 import type { XtreamConfig } from './xtream.js';
 import { logger } from './logger.js';
@@ -255,11 +255,11 @@ async function refreshCategoryForBrowse(group: string | undefined, inputMode: st
   if (!refresh) {
     const config = getXtreamConfig();
     if (!config) return;
+    const catalogGeneration = getCatalogGeneration();
     logger.info(`Refreshing category "${group}" (${category.id})`);
     refresh = fetchXtreamStreamsByCategory(config, category.id, category.name)
-      .then(channels => {
-        saveChannelsForCategory(category.id, channels);
-        markCategoryFetched(category.id, channels.length);
+      .then(async channels => {
+        await saveCategorySnapshot(category.id, channels, catalogGeneration);
         logger.info(`Category "${group}" refreshed: ${channels.length} streams`);
       })
       .catch(error => {
@@ -282,29 +282,24 @@ app.get('/api/categories', (req, res) => {
 
 // ---------- Channels ----------
 
-app.get('/api/channels', async (req, res) => {
+app.get('/api/channels', async (req, res, next) => {
   const group = req.query.group as string | undefined;
-  const limit = parseIntegerQuery(req.query.limit, 1, 200);
+  const requestedLimit = parseIntegerQuery(req.query.limit, 1, 200);
   const cursorSort = parseIntegerQuery(req.query.cursorSort, 0);
   const cursorName = req.query.cursorName as string | undefined;
-  if (limit === null || cursorSort === null || (cursorName !== undefined && cursorSort === undefined) || (cursorSort !== undefined && cursorName === undefined)) {
+  const cursorId = req.query.cursorId as string | undefined;
+  if (requestedLimit === null || cursorSort === null || (cursorName !== undefined && cursorSort === undefined) || (cursorSort !== undefined && cursorName === undefined) || (cursorId !== undefined && cursorName === undefined)) {
     res.status(400).json({ error: 'Invalid pagination parameters' });
     return;
   }
+  const limit = requestedLimit ?? 20;
   const inputMode = getConfig('input_mode', 'manual');
-
-  await refreshCategoryForBrowse(group, inputMode);
-
-  // Return channels from DB (with optional pagination)
-  let dbChannels;
-  let total: number;
-  if (group && group !== 'All') {
-    dbChannels = getChannelsByGroup(group, limit, cursorSort, cursorName);
-    total = limit ? getChannelCountByGroup(group) : dbChannels.length;
-  } else {
-    dbChannels = getChannels(limit, cursorSort, cursorName);
-    total = limit ? getChannelCount() : dbChannels.length;
-  }
+  let page;
+  try {
+    await refreshCategoryForBrowse(group, inputMode);
+    page = await channelReader.page({ group, limit, cursorSort, cursorName, cursorId, inputMode });
+  } catch (error) { next(error); return; }
+  const { channels: dbChannels, total, groups, regions, contentTypeCounts } = page;
 
   const channels = dbChannels.map(ch => ({
     id: ch.id,
@@ -316,33 +311,20 @@ app.get('/api/channels', async (req, res) => {
     contentType: ch.content_type,
   }));
 
-  // Groups come from categories in xtream mode, from channels in manual mode
-  let groups: string[];
-  const contentTypeCounts: Record<string, number> = {};
-  if (inputMode === 'xtream') {
-    const cats = getCategories();
-    groups = ['All', ...cats.map(c => c.name)];
-    for (const c of cats) {
-      contentTypeCounts[c.content_type] = (contentTypeCounts[c.content_type] || 0) + 1;
-    }
-  } else {
-    groups = ['All', ...getGroups()];
-    const counts = getContentTypeCounts();
-    Object.assign(contentTypeCounts, counts);
-  }
-
-  const regions = ['All', ...getRegions()];
   // Include cursor for next page (last item's sort_order + name)
   const lastChannel = dbChannels[dbChannels.length - 1];
-  const nextCursor = lastChannel && limit && dbChannels.length === limit
-    ? { sort: lastChannel.sort_order ?? 0, name: lastChannel.name }
+  const nextCursor = lastChannel && dbChannels.length === limit
+    ? { sort: lastChannel.sort_order ?? 0, name: lastChannel.name, id: lastChannel.id }
     : null;
   res.json({ channels, total, groups, regions, contentTypeCounts, nextCursor });
 });
 
 // ---------- Batch fetch channels by IDs ----------
 
-app.post('/api/channels/by-ids', (req, res) => {
+const channelReader = createChannelReadWorker(DB_PATH, message => logger.warn(message));
+// Keep dashboard counts independent of UK browsing when either SQLite read stalls.
+const channelStatusReader = createChannelReadWorker(DB_PATH, message => logger.warn(message));
+app.post('/api/channels/by-ids', async (req, res, next) => {
   const { ids } = req.body;
   if (!Array.isArray(ids) || ids.length === 0) {
     res.json({ channels: [] });
@@ -350,7 +332,9 @@ app.post('/api/channels/by-ids', (req, res) => {
   }
   // Cap at 200 to avoid huge queries
   const capped = ids.slice(0, 200);
-  const dbChannels = getChannelsByIds(capped);
+  let dbChannels;
+  try { dbChannels = await channelReader.byIds(capped); }
+  catch (error) { next(error); return; }
   const channels = dbChannels.map(ch => ({
     id: ch.id,
     name: ch.name,
@@ -365,7 +349,7 @@ app.post('/api/channels/by-ids', (req, res) => {
 
 // ---------- Browse (lightweight, paginated by content type) ----------
 
-app.get('/api/browse', async (req, res) => {
+app.get('/api/browse', async (req, res, next) => {
   const contentType = req.query.type as string | undefined;
   const group = req.query.group as string | undefined;
   const requestedLimit = parseIntegerQuery(req.query.limit, 1, 200);
@@ -377,9 +361,9 @@ app.get('/api/browse', async (req, res) => {
   const after = req.query.after as string | undefined; // cursor: serialized sort key + name
   if (after) {
     try {
-      const cursor = JSON.parse(after) as { a?: unknown; s?: unknown; n?: unknown };
+      const cursor = JSON.parse(after) as { a?: unknown; s?: unknown; n?: unknown; i?: unknown };
       const sortValue = contentType === 'movies' || contentType === 'series' ? cursor.a : cursor.s;
-      if (!cursor || typeof cursor !== 'object' || typeof sortValue !== 'number' || typeof cursor.n !== 'string') {
+      if (!cursor || typeof cursor !== 'object' || typeof sortValue !== 'number' || typeof cursor.n !== 'string' || (cursor.i !== undefined && typeof cursor.i !== 'string')) {
         throw new Error('invalid cursor');
       }
     } catch {
@@ -389,20 +373,16 @@ app.get('/api/browse', async (req, res) => {
   }
   const inputMode = getConfig('input_mode', 'manual');
 
-  let dbChannels;
-  let total: number;
-
-  if (group && group !== 'All') {
-    await refreshCategoryForBrowse(group, inputMode);
-    dbChannels = getChannelsByGroupCursor(group, limit, after, contentType);
-    total = getChannelCountByGroup(group);
-  } else if (contentType) {
-    dbChannels = getChannelsByContentTypeCursor(contentType, limit, after);
-    total = getChannelCountByContentType(contentType);
-  } else {
+  if ((!group || group === 'All') && !contentType) {
     res.json({ channels: [], total: 0, nextCursor: null });
     return;
   }
+  let dbChannels;
+  let total: number;
+  try {
+    if (group && group !== 'All') await refreshCategoryForBrowse(group, inputMode);
+    ({ channels: dbChannels, total } = await channelReader.browse({ group, type: contentType, limit, after }));
+  } catch (error) { next(error); return; }
 
   const channels = dbChannels.map(ch => ({
     id: ch.id,
@@ -420,9 +400,9 @@ app.get('/api/browse', async (req, res) => {
   if (lastItem && dbChannels.length === limit) {
     const effectiveType = lastItem.content_type || contentType;
     if (effectiveType === 'movies' || effectiveType === 'series') {
-      nextCursor = JSON.stringify({ a: lastItem.added ?? 0, n: lastItem.name });
+      nextCursor = JSON.stringify({ a: lastItem.added ?? 0, n: lastItem.name, i: lastItem.id });
     } else {
-      nextCursor = JSON.stringify({ s: lastItem.sort_order ?? 0, n: lastItem.name });
+      nextCursor = JSON.stringify({ s: lastItem.sort_order ?? 0, n: lastItem.name, i: lastItem.id });
     }
   }
 
@@ -458,11 +438,9 @@ app.get('/api/search', async (req, res) => {
         const cats = getCategories(contentType);
         const unfetchedCats = cats.filter(c => !c.fetched_at);
         if (unfetchedCats.length > 0) {
+          const catalogGeneration = getCatalogGeneration();
           // Fire and forget — results will be available on next search
-          fetchAllCategoryStreams(config, unfetchedCats, (catId, channels) => {
-            saveChannelsForCategory(catId, channels);
-            markCategoryFetched(catId, channels.length);
-          }).finally(() => {
+          fetchAllCategoryStreams(config, unfetchedCats, (catId, channels) => saveCategorySnapshot(catId, channels, catalogGeneration)).finally(() => {
             fetchAllInProgress.delete(contentType);
             logger.info(`Background fetch complete for ${contentType}`);
           });
@@ -524,10 +502,8 @@ app.post('/api/fetch-all', async (req, res) => {
   fetchAllInProgress.add(contentType);
   res.json({ ok: true, message: `Fetching ${unfetchedCats.length} categories` });
 
-  fetchAllCategoryStreams(config, unfetchedCats, (catId, channels) => {
-    saveChannelsForCategory(catId, channels);
-    markCategoryFetched(catId, channels.length);
-  }).finally(() => {
+  const catalogGeneration = getCatalogGeneration();
+  fetchAllCategoryStreams(config, unfetchedCats, (catId, channels) => saveCategorySnapshot(catId, channels, catalogGeneration)).finally(() => {
     fetchAllInProgress.delete(contentType);
     logger.info(`Fetch-all complete for ${contentType}`);
   });
@@ -2217,6 +2193,14 @@ app.put('/api/config', requireAuth, (req, res) => {
       }
     }
   }
+  const sourceChanged = (inputMode !== undefined && inputMode !== getConfig('input_mode', 'manual'))
+    || (xtreamServer !== undefined && xtreamServer !== getConfig('xtream_server', ''))
+    || (xtreamUsername !== undefined && xtreamUsername !== getConfig('xtream_username', ''))
+    || (xtreamPassword !== undefined && xtreamPassword !== '' && xtreamPassword !== getConfig('xtream_password', ''));
+  if (sourceChanged) {
+    cancelCrawl();
+    rotateCatalogGeneration();
+  }
   if (inputMode !== undefined) setConfig('input_mode', inputMode);
   if (playlistUrl !== undefined) setConfig('playlist_url', playlistUrl);
   if (epgUrl !== undefined) setConfig('epg_url', epgUrl);
@@ -2230,8 +2214,9 @@ app.put('/api/config', requireAuth, (req, res) => {
 
 // ---------- Sync ----------
 
-app.get('/api/status', (_req, res) => {
-  res.json(getStatus());
+app.get('/api/status', async (_req, res, next) => {
+  try { res.json(getStatus(await channelStatusReader.status())); }
+  catch (error) { next(error); }
 });
 
 app.post('/api/sync', requireAuth, (_req, res) => {
@@ -2373,7 +2358,7 @@ function shutdown(signal: string): void {
   });
 
   void Promise.all([backupShutdown, httpShutdown, recorderAndAnalysisShutdown]).then(async () => {
-    await Promise.all([epgReader.close(), epgWriter.close()]);
+    await Promise.all([epgReader.close(), epgWriter.close(), channelReader.close(), channelStatusReader.close(), closeCategorySnapshotWorker()]);
     closeDatabase();
     clearTimeout(forceExit);
     process.exit(0);

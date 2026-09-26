@@ -43,6 +43,24 @@ describe('Xtream live catalog metadata', () => {
 });
 
 describe('Xtream catalog crawl cancellation', () => {
+  it('waits for an asynchronous category snapshot before counting completion', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('[]', { status: 200 })));
+    let publish!: () => void;
+    const saved = new Promise<void>(resolve => { publish = resolve; });
+    const crawl = fetchAllCategoryStreams(
+      { server: 'https://provider.example', username: 'user', password: 'pass' },
+      [{ id: 'live_1', name: 'News' }],
+      () => saved,
+      1,
+    );
+    let settled = false;
+    void crawl.then(() => { settled = true; });
+    await new Promise(resolve => setTimeout(resolve, 600));
+    expect(settled).toBe(false);
+    publish();
+    await expect(crawl).resolves.toBe(0);
+  });
+
   it('aborts the active category request before publishing its channels', async () => {
     let requestSignal: AbortSignal | undefined;
     const fetchMock = vi.fn((_input: string | URL | Request, init?: RequestInit) => {

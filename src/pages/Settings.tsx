@@ -43,7 +43,6 @@ function SettingsContent() {
   const xtreamCredentials = useChannelStore((s) => s.xtreamCredentials);
   const playlistUrl = useChannelStore((s) => s.playlistUrl);
   const epgUrl = useChannelStore((s) => s.epgUrl);
-  const channels = useChannelStore((s) => s.channels);
   const isLoading = useChannelStore((s) => s.isLoading);
   const error = useChannelStore((s) => s.error);
   const loadingPhase = useChannelStore((s) => s.loadingPhase);
@@ -401,7 +400,7 @@ function SettingsContent() {
             <h2 className="text-base lg:text-20 font-bold text-accent">Stream Library</h2>
             <div className="flex items-center gap-2 text-sm lg:text-base text-[#888]">
               <span className="text-[#888]">Streams cached:</span>
-              <span className="text-[#ccc]">{channels.length.toLocaleString()}</span>
+              <span className="text-[#ccc]">{channelCount.toLocaleString()}</span>
             </div>
             <div className="flex items-center gap-2 text-sm lg:text-base text-[#888]">
               <span className="text-[#888]">Last full crawl:</span>

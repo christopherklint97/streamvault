@@ -43,7 +43,7 @@ interface ChannelState {
   channelCount: number;
   channelTotal: number;
   hasMore: boolean;
-  nextCursor: { sort: number; name: string } | null;
+  nextCursor: { sort: number; name: string; id?: string } | null;
   syncInterval: SyncInterval;
   lastSyncTime: number;
   isCrawling: boolean;
@@ -328,9 +328,9 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     const signal = fetchAbortController.signal;
     try {
       const params = new URLSearchParams();
+      params.set('limit', String(PAGE_SIZE));
       if (group && group !== 'All') {
         params.set('group', group);
-        params.set('limit', String(PAGE_SIZE));
       }
       const qs = params.toString();
       const data = await apiFetch(apiBaseUrl, `/api/channels${qs ? '?' + qs : ''}`, { signal });
@@ -342,7 +342,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
         groups: data.groups,
         regions: data.regions,
         contentTypeCounts: data.contentTypeCounts || {},
-        channelCount: channels.length,
+        channelCount: group && group !== 'All' ? get().channelCount : total,
         channelTotal: total,
         hasMore: channels.length < total,
         nextCursor: data.nextCursor || null,
@@ -376,14 +376,14 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
   fetchMoreChannels: async () => {
     const { apiBaseUrl, backendGeneration, channels, channelTotal, hasMore, selectedGroup, nextCursor } = get();
     if (!hasApi(apiBaseUrl) || !hasMore || !nextCursor) return;
-    if (!selectedGroup || selectedGroup === 'All') return;
     try {
       const params = new URLSearchParams({
-        group: selectedGroup,
         limit: String(PAGE_SIZE),
         cursorSort: String(nextCursor.sort),
         cursorName: nextCursor.name,
       });
+      if (nextCursor.id) params.set('cursorId', nextCursor.id);
+      if (selectedGroup && selectedGroup !== 'All') params.set('group', selectedGroup);
       const data = await apiFetch(apiBaseUrl, `/api/channels?${params}`);
       if (get().backendGeneration !== backendGeneration) return;
       const newChannels: Channel[] = data.channels;
@@ -391,7 +391,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
       const total: number = data.total ?? channelTotal;
       set({
         channels: merged,
-        channelCount: merged.length,
+        channelCount: selectedGroup && selectedGroup !== 'All' ? get().channelCount : total,
         channelTotal: total,
         hasMore: merged.length < total,
         nextCursor: data.nextCursor || null,

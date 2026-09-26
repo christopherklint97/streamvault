@@ -8,6 +8,7 @@ export function ensureBrowseIndexes(db: InstanceType<typeof Database>): void {
     CREATE INDEX IF NOT EXISTS idx_channels_type_order ON channels(content_type, sort_order, name);
     CREATE INDEX IF NOT EXISTS idx_channels_group_order ON channels(grp, sort_order, name);
     CREATE INDEX IF NOT EXISTS idx_channels_order ON channels(sort_order, name);
+    CREATE INDEX IF NOT EXISTS idx_channels_region ON channels(region);
   `);
 }
 

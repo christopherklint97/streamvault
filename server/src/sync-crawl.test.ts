@@ -50,6 +50,17 @@ afterEach(() => {
 });
 
 describe('catalog crawl', () => {
+  it('uses an off-thread status snapshot instead of synchronous database reads', async () => {
+    const { getStatus } = await import('./sync.js');
+    expect(getStatus({
+      channelCount: 23, categoryCount: 5, lastSyncTime: 123, lastCrawlTime: 456,
+      contentTypeCounts: { livetv: 4, movies: 1 }, crawlConfigured: true,
+    })).toMatchObject({
+      channelCount: 23, categoryCount: 5, lastSyncTime: 123, lastCrawlTime: 456,
+      contentTypeCounts: { livetv: 4, movies: 1 }, crawlAvailable: true,
+    });
+  });
+
   it('indexes all categories without scanning every channel for EPG', async () => {
     const { startCrawl } = await import('./sync.js');
     await startCrawl();
@@ -70,6 +81,7 @@ describe('catalog crawl', () => {
     const crawl = startCrawl();
     await vi.waitFor(() => expect(mocks.fetchAllCategoryStreams).toHaveBeenCalledOnce());
     cancelCrawl();
+    expect(mocks.setConfig).toHaveBeenCalledWith('catalog_generation', expect.any(String));
     expect(getStatus()).toMatchObject({
       isCrawling: true,
       crawlProgress: 'Cancelling crawl...',
