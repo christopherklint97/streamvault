@@ -6,6 +6,7 @@ import { logger } from './logger.js';
 import { ensureBrowseIndexes, ensureChannelSearchIndex } from './db-indexes.js';
 import { createCategorySnapshotWriter } from './channel-snapshot.js';
 import { ensureRecordingSchema } from './db-migrations.js';
+import { createArchiveStore, ensureArchiveSchema } from './archive-store.js';
 import { createCommercialStore, type CommercialSegmentWrite, type DBCommercialSegment } from './commercial-store.js';
 import { createProgramStore } from './program-store.js';
 import { getProgramWindow } from './program-window.js';
@@ -215,6 +216,8 @@ db.exec(`
 // Additive migrations run only after all legacy base tables exist. They are
 // transactional and safe to execute on every startup.
 ensureRecordingSchema(db);
+ensureArchiveSchema(db);
+export const archiveStore = createArchiveStore(db);
 const commercialStore = createCommercialStore(db);
 const programStore = createProgramStore(db);
 
@@ -612,6 +615,18 @@ export function getProgramsByChannel(channelId: string, from?: number, to?: numb
   ).all(channelId) as DBProgram[];
 }
 
+/** Bounded labels for the archive timeline; guide absence never blocks capture. */
+export function getArchivePrograms(channelId: string, from: number, to: number): Array<{ title: string; startTime: number; endTime: number }> {
+  return db.prepare(`SELECT title,startTime,endTime FROM (
+    SELECT title,start_time AS startTime,stop_time AS endTime FROM programs
+      WHERE channel_id = ? AND start_time < ? AND stop_time > ?
+    UNION
+    SELECT h.title,h.startTime,h.endTime FROM archive_program_history h
+      WHERE h.channelId = ? AND h.startTime < ? AND h.endTime > ?
+        AND NOT EXISTS(SELECT 1 FROM programs p WHERE p.id = h.programId)
+  ) ORDER BY startTime LIMIT 500`).all(channelId, to, from, channelId, to, from) as Array<{ title: string; startTime: number; endTime: number }>;
+}
+
 export function getProgramByAiringKey(airingKey: string): DBProgram | undefined {
   return db.prepare('SELECT * FROM programs WHERE airing_key = ? ORDER BY last_seen DESC LIMIT 1').get(airingKey) as DBProgram | undefined;
 }
@@ -631,6 +646,7 @@ export function getProgramCount(): number {
 
 export interface DBRecording {
   id: string;
+  capture_format?: 'file' | 'segmented';
   channel_id: string;
   channel_name: string;
   title: string;
@@ -674,7 +690,8 @@ export function insertRecording(rec: DBRecording): void {
       rule_revision, cadence_slot, created_at, airing_key, content_key,
       master_file_path, derivative_file_path, derivative_error, analysis_state, analysis_error,
       analysis_requested_at, analysis_started_at, analysis_completed_at, analysis_profile, commercial_skip_override
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      , capture_format
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     rec.id, rec.channel_id, rec.channel_name, rec.title, rec.status, rec.start_time, rec.end_time,
     rec.actual_start, rec.actual_end, rec.file_path, rec.file_size, rec.duration, rec.error, rec.rule_id,
@@ -684,6 +701,7 @@ export function insertRecording(rec: DBRecording): void {
     rec.analysis_state ?? 'not_requested', rec.analysis_error ?? null, rec.analysis_requested_at ?? null,
     rec.analysis_started_at ?? null, rec.analysis_completed_at ?? null, rec.analysis_profile ?? null,
     rec.commercial_skip_override ?? null,
+    rec.capture_format ?? (process.env.STREAMVAULT_SEGMENTED_RECORDINGS === '1' ? 'segmented' : 'file'),
   );
 }
 
@@ -758,6 +776,7 @@ export function completeRecordingAndAdvanceCadence(
 }
 
 export function deleteRecording(id: string): void {
+  archiveStore.removeRecordingRefs(id);
   commercialStore.deleteRecordingWithSegments(id);
 }
 

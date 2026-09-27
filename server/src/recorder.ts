@@ -32,6 +32,8 @@ import {
   shouldRetryCapture,
 } from './recorder-media.js';
 import type { FinalizationProgress } from './recorder-media.js';
+import { startSegmentedRecording, stopSegmentedRecording, cancelSegmentedRecording,
+  segmentedActive, segmentedCaptureCount, stopAllSegmentedRecordings } from './segmented-recordings.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_RECORDINGS_DIR = path.join(__dirname, '..', 'data', 'recordings');
@@ -120,15 +122,15 @@ function enqueueRuleTask<T>(ruleId: string, task: () => Promise<T> | T): Promise
 }
 
 export function getActiveCount(): number {
-  return activeRecordings.size + startingRecordings.size + finalizingRecordings.size;
+  return activeRecordings.size + startingRecordings.size + finalizingRecordings.size + segmentedCaptureCount();
 }
 
 export function getCaptureCount(): number {
-  return activeRecordings.size + startingRecordings.size;
+  return activeRecordings.size + startingRecordings.size + segmentedCaptureCount();
 }
 
 export function isRecordingActive(id: string): boolean {
-  return activeRecordings.has(id) || startingRecordings.has(id) || finalizingRecordings.has(id);
+  return activeRecordings.has(id) || startingRecordings.has(id) || finalizingRecordings.has(id) || segmentedActive(id);
 }
 
 /** Live, non-persistent phase; a finalizing row without a worker has unknown progress. */
@@ -214,6 +216,7 @@ function recoveryPaths(id: string): ReturnType<typeof recordingPaths> | null {
 function removeRecordingArtifacts(id: string, verifyRemoval = false): number {
   const root = getRecordingsDir();
   const recording = getRecording(id);
+  if (recording?.capture_format === 'segmented') return 0;
   const artifacts = new Set(discoverRecordingArtifacts(root, id));
   if (recording) {
     for (const artifact of buildRecordingArtifactPaths(root, recording)) artifacts.add(artifact);
@@ -450,6 +453,11 @@ export async function startRecording(id: string): Promise<void> {
     if (!rec) logger.error(`Recording ${id} not found`);
     return;
   }
+  if (rec.capture_format === 'segmented') {
+    if (Date.now() >= rec.end_time) await stopSegmentedRecording(id);
+    else startSegmentedRecording(rec);
+    return;
+  }
 
   const recordingsDir = getRecordingsDir();
   fs.mkdirSync(recordingsDir, { recursive: true });
@@ -523,7 +531,8 @@ export async function startRecording(id: string): Promise<void> {
 
   const retryCount = retryCounts.get(id) ?? 0;
   logger.info(`Recording ${id}: starting stream-copy attempt ${attemptIndex + 1} for "${rec.title}" → ${path.relative(recordingsDir, capturePart)}`);
-  const ffmpeg = spawn('ffmpeg', buildMasterCaptureArgs(streamUrl, capturePart, VLC_HEADERS), {
+  const ffmpeg = spawn('ffmpeg', buildMasterCaptureArgs(streamUrl, capturePart,
+    { ...VLC_HEADERS, ...(process.env.STREAMVAULT_AUTH_TOKEN ? { Authorization: `Bearer ${process.env.STREAMVAULT_AUTH_TOKEN}` } : {}) }), {
     stdio: ['ignore', 'ignore', 'pipe'],
   });
 
@@ -593,7 +602,7 @@ export async function startRecording(id: string): Promise<void> {
 
   ffmpeg.stderr?.on('data', (data: Buffer) => {
     const line = data.toString().trim();
-    if (line) logger.debug(`ffmpeg [${id}]: ${line}`);
+    if (line) logger.debug(`ffmpeg [${id}]: ${line.replaceAll(process.env.STREAMVAULT_AUTH_TOKEN || '\0', '[redacted]')}`);
   });
   const settle = () => {
     void active.finishOnce().catch(error => {
@@ -611,6 +620,7 @@ export async function startRecording(id: string): Promise<void> {
 }
 
 export async function stopRecording(id: string, preserveIfFuture = false): Promise<void> {
+  if (getRecording(id)?.capture_format === 'segmented') return stopSegmentedRecording(id, preserveIfFuture);
   const starting = startingRecordings.get(id);
   if (starting) await starting.done;
 
@@ -642,6 +652,12 @@ export async function stopRecording(id: string, preserveIfFuture = false): Promi
 
 export async function cancelRecording(id: string, _deleteFile = false): Promise<void> {
   const recording = getRecording(id);
+  if (recording?.capture_format === 'segmented') {
+    await cancelSegmentedRecording(id);
+    markCadenceRetry(recording);
+    requestRuleReconciliation(recording.rule_id);
+    return;
+  }
   updateRecording(id, { status: 'cancelled', actual_end: Date.now() });
   markCadenceRetry(recording);
   retryCounts.delete(id);
@@ -686,12 +702,14 @@ async function prepareRecordingDeletion(id: string): Promise<void> {
 /** Await any writer for this recording, then remove every exact-id artifact. */
 export async function deleteRecordingFile(id: string): Promise<number> {
   await prepareRecordingDeletion(id);
+  if (getRecording(id)?.capture_format === 'segmented') return 0;
   return removeRecordingArtifacts(id, true);
 }
 
 /** Stop captures gracefully and await capture finalization before database shutdown. */
 export async function stopAllRecordings(): Promise<void> {
   stoppingAll = true;
+  await stopAllSegmentedRecordings();
   for (const timer of retryTimers.values()) clearTimeout(timer);
   retryTimers.clear();
   await Promise.all([...startingRecordings.values()].map(starting => starting.done));
@@ -740,6 +758,11 @@ export async function recoverRecordings(): Promise<void> {
   // Restore every still-live capture first so the scheduler can resume it on its
   // immediate startup tick, regardless of how long older media takes to finish.
   for (const rec of interrupted) {
+    if (rec.capture_format === 'segmented') {
+      if (rec.status === 'recording' && now < rec.end_time) updateRecordingIfStatus(rec.id, ['recording'], { status: 'scheduled', error: null });
+      else void stopSegmentedRecording(rec.id);
+      continue;
+    }
     if (rec.status === 'recording' && now < rec.end_time) {
       normalizeLegacyCapturePart(rec.id);
       logger.info(`Recovering recording ${rec.id}: "${rec.title}" (still within time window)`);
@@ -748,6 +771,7 @@ export async function recoverRecordings(): Promise<void> {
   }
 
   for (const rec of interrupted) {
+    if (rec.capture_format === 'segmented') continue;
     if (rec.status === 'recording' && now < rec.end_time) continue;
     normalizeLegacyCapturePart(rec.id);
     const paths = recoveryPaths(rec.id);

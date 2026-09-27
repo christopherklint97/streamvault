@@ -17,6 +17,7 @@ function setStreamSocketOpts(res: import('express').Response): void {
 }
 import {
   getChannels, getChannelById, getChannelsByIds, getChannelsByGroup, getChannelCount, getChannelCountByGroup, getGroups, getRegions,
+  archiveStore, getArchivePrograms,
   getPrograms, getProgramsByChannelIds, getProgramsByChannel, saveProgramsForChannels,
   getProgramByAiringKey, getProgramByLegacyIdentity,
   getConfig, setConfig,
@@ -94,6 +95,11 @@ import {
   type ProbedSubtitleTrack,
 } from './subtitles.js';
 import { parseByteRange } from './ranges.js';
+import { createArchiveRouter } from './archive-routes.js';
+import { loadArchiveSigningKey } from './archive-hls.js';
+import { ArchiveCapture } from './archive-capture.js';
+import { pruneArchive } from './archive-retention.js';
+import { setSegmentedCapture, onSegmentedChunk, recoverSegmentedRefs } from './segmented-recordings.js';
 import {
   allowedProxyHostsFromConfig,
   canAccessRecordingStream,
@@ -190,6 +196,16 @@ app.use(cors({
   origin: allowedOrigins.length > 0 ? allowedOrigins : true,
 }));
 app.use(express.json());
+
+const archiveRoot = process.env.RECORDINGS_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'recordings');
+let archiveRecovering = false;
+const archiveCapture = new ArchiveCapture(archiveStore, archiveRoot, PORT,
+  id => { onSegmentedChunk(id); if (!archiveRecovering) pruneArchive(archiveStore, archiveRoot, id); });
+setSegmentedCapture(archiveCapture);
+const archiveTicketSecret = loadArchiveSigningKey(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data'));
+app.use(createArchiveRouter({ store: archiveStore, root: archiveRoot, secret: archiveTicketSecret,
+  getChannel: getChannelById, getRecording, getPrograms: getArchivePrograms,
+  start: id => archiveCapture.start(id), stop: id => archiveCapture.stopArchive(id) }));
 
 // Request logging
 app.use((req, _res, next) => {
@@ -2187,6 +2203,10 @@ app.get('/{*path}', (req, res) => {
 // ---------- Start ----------
 
 const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const archiveRetentionTimer = setInterval(() => {
+  for (const archive of archiveStore.archives()) pruneArchive(archiveStore, archiveRoot, archive.channelId);
+}, 60 * 60_000);
+archiveRetentionTimer.unref();
 let backupTimer: ReturnType<typeof setTimeout> | null = null;
 
 function scheduleNextBackup(): void {
@@ -2205,6 +2225,12 @@ function scheduleNextBackup(): void {
 const httpServer = app.listen(PORT, '0.0.0.0', () => {
   logger.info(`StreamVault server listening on http://0.0.0.0:${PORT}`);
   startupSync();
+  archiveRecovering = true;
+  try { archiveCapture.recover(); recoverSegmentedRefs(); }
+  finally { archiveRecovering = false; }
+  archiveCapture.startAll();
+  // The index survives restart; backstop cleanup does not depend on EPG or viewers.
+  for (const archive of archiveStore.archives()) pruneArchive(archiveStore, archiveRoot, archive.channelId);
   // Prewarm DNS+TLS to the Xtream upstream so first user click hits a warm socket
   const xtreamServer = getConfig('xtream_server');
   if (xtreamServer) prewarmUpstream(xtreamServer);
@@ -2227,6 +2253,7 @@ function shutdown(signal: string): void {
   shuttingDown = true;
   logger.info(`Received ${signal}, shutting down gracefully...`);
   if (backupTimer) clearTimeout(backupTimer);
+  clearInterval(archiveRetentionTimer);
   const schedulerShutdown = stopScheduler().catch(error => {
     logger.warn(`Scheduler shutdown failed: ${error instanceof Error ? error.message : error}`);
   });
@@ -2249,7 +2276,7 @@ function shutdown(signal: string): void {
   });
 
   const recorderAndAnalysisShutdown = (async () => {
-    await Promise.all([schedulerShutdown, stopAllRecordings()]);
+    await Promise.all([schedulerShutdown, stopAllRecordings(), archiveCapture.stopAll()]);
     await stopCommercialAnalysisWorker();
   })().catch(error => {
     logger.warn(`Recorder/analysis shutdown failed: ${error instanceof Error ? error.message : error}`);

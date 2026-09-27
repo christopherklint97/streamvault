@@ -153,6 +153,19 @@ export function createProgramStore(db: SqliteDatabase) {
     if (scope.size === 0) return;
     const scopeJson = JSON.stringify([...scope]);
     const retainedJson = JSON.stringify([...retainedIds]);
+    if (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='archive_program_history'").get()) {
+      // Save labels only for enabled archive windows; provider EPG snapshots are not historical.
+      db.prepare(`INSERT OR REPLACE INTO archive_program_history(programId,channelId,title,startTime,endTime)
+        SELECT p.id,p.channel_id,p.title,p.start_time,p.stop_time FROM programs p
+        JOIN channel_archives a ON a.channelId = p.channel_id AND a.enabled = 1
+        WHERE p.channel_id IN (SELECT value FROM json_each(?))
+          AND p.id NOT IN (SELECT value FROM json_each(?))
+          AND p.stop_time > ? - (a.retentionHours + 1) * 3600000 AND p.start_time <= ?`).run(scopeJson, retainedJson, now, now);
+      db.prepare(`DELETE FROM archive_program_history WHERE NOT EXISTS (
+        SELECT 1 FROM channel_archives a WHERE a.channelId = archive_program_history.channelId
+          AND a.enabled = 1 AND archive_program_history.endTime > ? - (a.retentionHours + 1) * 3600000
+      )`).run(now);
+    }
     db.prepare(`
       DELETE FROM programs
       WHERE channel_id IN (SELECT value FROM json_each(?))
