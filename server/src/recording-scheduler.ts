@@ -7,8 +7,8 @@ import {
 } from './db.js';
 import type { DBProgram, DBRecordingRule } from './db.js';
 import {
-  startRecording, stopRecording, getActiveCount, getRecordingsDiskUsage,
-  deleteRecordingFile, enforceAllRuleRetentions,
+  startRecording, stopRecording, getActiveCount, getRecordingsDiskUsageAsync,
+  deleteRecordingFile, enforceAllRuleRetentions, getRecordingMasterFilePath,
 } from './recorder.js';
 import { logger } from './logger.js';
 import { randomUUID } from 'node:crypto';
@@ -18,6 +18,9 @@ import {
 } from './schedule-reconciliation.js';
 import { fetchXtreamShortEpg, type XtreamConfig } from './xtream.js';
 import { refreshRuleChannelPrograms } from './rule-epg-refresh.js';
+import { createDiskUsageCache } from './recording-disk-usage.js';
+import { getRecordingVodHlsState, removeAbandonedRecordingVodStaging, removeRecordingVodHlsCache } from './recording-vod-hls.js';
+import { hasActiveRecordingVodViewer } from './recording-vod-routes.js';
 
 let tickTimer: ReturnType<typeof setInterval> | null = null;
 let lastRuleCheck = 0;
@@ -29,6 +32,8 @@ let schedulerStopping = false;
 const TICK_INTERVAL = 60_000; // 60 seconds
 const RULE_CHECK_INTERVAL = 60 * 60 * 1000; // 1 hour
 const CLEANUP_INTERVAL = 60 * 60 * 1000; // 1 hour
+const diskUsageCache = createDiskUsageCache(getRecordingsDiskUsageAsync, Date.now, 10_000,
+  error => logger.warn(`Recording disk usage refresh failed: ${error instanceof Error ? error.message : error}`));
 
 export function startScheduler(): void {
   if (tickTimer) return;
@@ -480,8 +485,12 @@ export function reconcileRecordingRule(ruleId: string): void {
 }
 
 /** Clean up old recordings based on retention settings */
-async function runCleanup(): Promise<void> {
+export async function runCleanup(): Promise<void> {
   await enforceAllRuleRetentions();
+  for (const rec of getRecordings({ status: 'completed' })) {
+    const master = getRecordingMasterFilePath(rec.id);
+    if (master) await removeAbandonedRecordingVodStaging(master);
+  }
   const retentionDays = parseInt(getConfig('recording_retention_days', '30'), 10);
   const maxDiskGb = parseInt(getConfig('recording_max_disk_gb', '50'), 10);
 
@@ -490,6 +499,7 @@ async function runCleanup(): Promise<void> {
     const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
     const old = getRecordings({ status: 'completed' }).filter(r => r.actual_end && r.actual_end < cutoff);
     for (const rec of old) {
+      if (hasActiveRecordingVodViewer(rec.id)) continue;
       logger.info(`Cleanup: deleting recording ${rec.id} "${rec.title}" (age exceeded ${retentionDays}d retention)`);
       const deletedBytes = await deleteRecordingFile(rec.id);
       deleteRecording(rec.id);
@@ -500,20 +510,33 @@ async function runCleanup(): Promise<void> {
   // Disk-based cleanup
   if (maxDiskGb > 0) {
     const maxBytes = maxDiskGb * 1_073_741_824;
-    let usage = getRecordingsDiskUsage();
+    let usage = await getRecordingsDiskUsageAsync();
     if (usage > maxBytes) {
-      // Delete oldest completed recordings first
       const completed = getRecordings({ status: 'completed' });
-      // Sort oldest first (by actual_end ascending)
       completed.sort((a, b) => (a.actual_end ?? 0) - (b.actual_end ?? 0));
+      // Disposable seek packages are reclaimed before permanent masters. Do not
+      // evict a package while a native player still holds a session for it.
       for (const rec of completed) {
         if (usage <= maxBytes) break;
+        if (hasActiveRecordingVodViewer(rec.id)) continue;
+        const master = getRecordingMasterFilePath(rec.id);
+        if (!master || await getRecordingVodHlsState(master) !== 'ready') continue;
+        await removeRecordingVodHlsCache(master);
+        usage = await getRecordingsDiskUsageAsync();
+        logger.info(`Cleanup: reclaimed seekable cache for recording ${rec.id}; disk usage is now ${(usage / 1e9).toFixed(1)}GB`);
+      }
+      // If disposable renditions cannot bring usage below the limit, delete
+      // oldest completed recordings as before.
+      for (const rec of completed) {
+        if (usage <= maxBytes) break;
+        if (hasActiveRecordingVodViewer(rec.id)) continue;
         logger.info(`Cleanup: deleting recording ${rec.id} "${rec.title}" (disk usage ${(usage / 1e9).toFixed(1)}GB > ${maxDiskGb}GB limit)`);
         const deletedBytes = await deleteRecordingFile(rec.id);
         deleteRecording(rec.id);
-        usage = getRecordingsDiskUsage();
+        usage = await getRecordingsDiskUsageAsync();
         logger.info(`Cleanup: removed ${deletedBytes} bytes; disk usage is now ${(usage / 1e9).toFixed(1)}GB`);
       }
+      if (usage > maxBytes) logger.warn(`Cleanup: recording disk usage still exceeds ${maxDiskGb}GB; preserving actively viewed recordings`);
     }
   }
 }
@@ -522,7 +545,7 @@ async function runCleanup(): Promise<void> {
 export function getSchedulerStatus(): { activeCount: number; diskUsageBytes: number; schedulerRunning: boolean } {
   return {
     activeCount: getActiveCount(),
-    diskUsageBytes: getRecordingsDiskUsage(),
+    diskUsageBytes: diskUsageCache.get(),
     schedulerRunning: tickTimer !== null,
   };
 }

@@ -18,6 +18,10 @@ export interface Channel {
   dvrHls?: boolean;
   /** Offset into a segment-aligned archive playlist for an exact programme start. */
   initialSeekSeconds?: number;
+  /** Finite MPEG-TS masters require a browser demuxer, not native <video>. */
+  recordingTransport?: 'mpegts' | 'native';
+  recordingSize?: number;
+  recordingVodReady?: boolean;
 }
 
 export interface Program {

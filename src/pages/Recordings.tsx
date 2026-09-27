@@ -10,9 +10,11 @@ import type {
 import { cn } from '../utils/cn';
 import FocusZone from '../components/FocusZone';
 import { getRecordingAnalysisStatus, getRecordingCommercialSeconds } from '../utils/recording-commercial';
-import { getRecordingPlaybackUrl } from '../services/recordingPlayback';
+import { getRecordingPlaybackUrl, getRecordingVodStatus } from '../services/recordingPlayback';
 import { getRecordingHlsPlayback } from '../services/archivePlayback';
 import ArchivePage from './ArchivePage';
+import { isAppleMobile } from '../utils/platform';
+import { recordingTransport } from '../utils/recording-transport';
 import {
   createRecordingRuleDraft,
   minutesToRuleTime,
@@ -82,7 +84,7 @@ const ANALYSIS_COLORS: Record<string, string> = {
   failed: '#b91c1c',
 };
 
-function RecordingCard({ rec, onPlay, onCancel, onStop, onDelete, onAnalyze, onReview }: {
+function RecordingRow({ rec, onPlay, onCancel, onStop, onDelete, onAnalyze, onReview }: {
   rec: Recording;
   onPlay: () => void;
   onCancel: () => void;
@@ -92,6 +94,15 @@ function RecordingCard({ rec, onPlay, onCancel, onStop, onDelete, onAnalyze, onR
   onReview: () => void;
 }) {
   const analysisStatus = getRecordingAnalysisStatus(rec);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const confirmButtonRef = useRef<HTMLButtonElement>(null);
+  const deleteButtonRef = useRef<HTMLButtonElement>(null);
+  const hadConfirmation = useRef(false);
+  useEffect(() => {
+    if (confirmDelete) confirmButtonRef.current?.focus();
+    else if (hadConfirmation.current) deleteButtonRef.current?.focus();
+    hadConfirmation.current = confirmDelete;
+  }, [confirmDelete]);
   const segmentCount = rec.commercial_segment_count ?? 0;
   const commercialSeconds = getRecordingCommercialSeconds(rec);
   const finalization = rec.status === 'finalizing' ? rec.finalization_progress : null;
@@ -105,71 +116,77 @@ function RecordingCard({ rec, onPlay, onCancel, onStop, onDelete, onAnalyze, onR
     && typeof finalization.percent === 'number' && Number.isFinite(finalization.percent)
     && finalization.percent >= 0 && finalization.percent <= 99
     ? finalization.percent : null;
+  const actionClass = 'min-h-11 rounded px-2.5 py-2 text-sm font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400';
   return (
-    <div className="bg-surface-border rounded-[10px] p-3.5 flex flex-col gap-1.5">
-      <div className="flex items-center gap-2">
-        <span
-          className="py-0.5 px-2 rounded text-11 font-semibold text-white uppercase tracking-wider"
-          style={{ backgroundColor: STATUS_COLORS[rec.status] || '#6b7280' }}
-        >
-          {rec.status === 'recording' && '⏺ '}
-          {STATUS_LABELS[rec.status] || rec.status}
+    <tr data-recording-row data-recording-id={rec.id} data-status={rec.status} className="grid min-w-0 grid-cols-2 gap-x-2 gap-y-1 border-b border-white/10 bg-[#171722] px-3 py-3 even:bg-[#1c1c29] lg:table-row lg:px-0 lg:py-0 lg:hover:bg-[#262638] lg:focus-within:bg-[#262638]">
+      <td className="col-span-2 block min-w-0 pb-1 lg:table-cell lg:px-4 lg:py-3 lg:align-middle">
+        {rec.status === 'completed' ? (
+          <button data-focusable aria-label={`Play ${rec.title}`} onClick={onPlay} className="block min-h-11 max-w-full break-words text-left text-base font-semibold text-white hover:text-cyan-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400 lg:text-lg">{rec.title}</button>
+        ) : <span className="block break-words text-base font-semibold text-white lg:text-lg">{rec.title}</span>}
+        <span className="block break-words text-sm text-[#b6bbc8]">{rec.channel_name}</span>
+        {rec.error && <span className="block break-words text-sm text-amber-300">{rec.error}</span>}
+      </td>
+      <td className="block min-w-0 text-sm text-[#d1d5db] lg:table-cell lg:px-4 lg:py-3 lg:align-middle">
+        <span className="sr-only lg:hidden">When: </span><time dateTime={new Date(rec.start_time).toISOString()}>{formatDateTime(rec.start_time)}</time>
+      </td>
+      <td className="block min-w-0 text-right text-sm text-[#b6bbc8] lg:table-cell lg:px-4 lg:py-3 lg:text-left lg:align-middle">
+        <span className="sr-only lg:hidden">Length and size: </span>
+        {rec.duration > 0 ? formatDuration(rec.duration) : '—'}
+        {rec.file_size > 0 && <span className="block">{formatBytes(rec.file_size)}</span>}
+      </td>
+      <td className="col-span-2 block min-w-0 py-1 lg:table-cell lg:px-4 lg:py-3 lg:align-middle">
+        <span className="inline-flex rounded-full px-2.5 py-1 text-xs font-bold uppercase tracking-wide text-white" style={{ backgroundColor: STATUS_COLORS[rec.status] || '#6b7280' }}>
+          {rec.status === 'recording' && '⏺ '}{STATUS_LABELS[rec.status] || rec.status}
         </span>
-        <span className="text-13 text-[#9ca3af] overflow-hidden text-ellipsis whitespace-nowrap">{rec.channel_name}</span>
-      </div>
-      <div className="text-base font-semibold overflow-hidden text-ellipsis whitespace-nowrap">{rec.title}</div>
-      {rec.status === 'finalizing' && (
-        <div className="text-13 text-[#c4b5fd]" aria-live="polite">
-          {finalizationLabel}{derivativePercent !== null ? ` · ${derivativePercent}%` : ''}
-          {derivativePercent !== null && (
-            <div role="progressbar" aria-label="Playable copy progress" aria-valuenow={derivativePercent} aria-valuemin={0} aria-valuemax={100} className="mt-2 h-1.5 overflow-hidden rounded-full bg-[#37334c]">
-              <div className="h-full rounded-full bg-[#8b5cf6] transition-[width] duration-300" style={{ width: `${derivativePercent}%` }} />
-            </div>
-          )}
-        </div>
-      )}
-      {rec.status === 'completed' && (
-        <div className="flex flex-wrap items-center gap-2">
-          <span
-            className="rounded px-2 py-0.5 text-11 font-semibold uppercase tracking-wide text-white"
-            style={{ backgroundColor: ANALYSIS_COLORS[analysisStatus] || '#475569' }}
-          >
-            {ANALYSIS_LABELS[analysisStatus] || analysisStatus}
-          </span>
-          {segmentCount > 0 && (
-            <span className="text-12 text-[#9ca3af]">
-              {segmentCount} {segmentCount === 1 ? 'break' : 'breaks'} · {formatDuration(commercialSeconds)}
-            </span>
-          )}
-        </div>
-      )}
-      <div className="flex gap-3 text-12 text-[#6b7280]">
-        <span>{formatDateTime(rec.start_time)}</span>
-        {rec.duration > 0 && <span>{formatDuration(rec.duration)}</span>}
-        {rec.file_size > 0 && <span>{formatBytes(rec.file_size)}</span>}
-      </div>
-      {rec.error && <div className="text-12 text-[#f59e0b] overflow-hidden text-ellipsis whitespace-nowrap">{rec.error}</div>}
-      <div className="flex gap-1.5 mt-1">
+        {rec.status === 'finalizing' && (
+          <div className="mt-1 text-sm text-[#c4b5fd]" aria-live="polite">
+            {finalizationLabel}{derivativePercent !== null ? ` · ${derivativePercent}%` : ''}
+            {derivativePercent !== null && (
+              <div role="progressbar" aria-label="Playable copy progress" aria-valuenow={derivativePercent} aria-valuemin={0} aria-valuemax={100} className="mt-1 h-1.5 overflow-hidden rounded-full bg-[#37334c]">
+                <div className="h-full rounded-full bg-[#8b5cf6] transition-[width] duration-300" style={{ width: `${derivativePercent}%` }} />
+              </div>
+            )}
+          </div>
+        )}
         {rec.status === 'completed' && (
-          <button className="py-1 px-3 rounded text-12 font-semibold bg-[#1d4ed8] text-white transition-colors duration-150 hover:bg-[#2563eb]" onClick={onPlay}>Play</button>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <span className="rounded px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-white" style={{ backgroundColor: ANALYSIS_COLORS[analysisStatus] || '#475569' }}>
+              {ANALYSIS_LABELS[analysisStatus] || analysisStatus}
+            </span>
+            {segmentCount > 0 && <span className="text-sm text-[#b6bbc8]">{segmentCount} {segmentCount === 1 ? 'break' : 'breaks'} · {formatDuration(commercialSeconds)}</span>}
+          </div>
+        )}
+      </td>
+      <td className="col-span-2 block min-w-0 pt-1 lg:table-cell lg:px-4 lg:py-3 lg:align-middle">
+        <div className="flex flex-wrap gap-2 lg:justify-end">
+        {rec.status === 'completed' && (
+          <button data-focusable className={`${actionClass} bg-[#1d4ed8] text-white hover:bg-[#2563eb]`} onClick={onPlay}>Play</button>
         )}
         {rec.status === 'completed' && rec.playback_format !== 'hls' && (analysisStatus === 'not_analyzed' || analysisStatus === 'failed') && (
-          <button className="py-1 px-3 rounded text-12 font-semibold bg-[#2a2a3e] text-[#dbeafe] transition-colors duration-150 hover:bg-[#334155]" onClick={onAnalyze}>
+          <button data-focusable className={`${actionClass} bg-[#30364a] text-[#dbeafe] hover:bg-[#334155]`} onClick={onAnalyze}>
             {analysisStatus === 'failed' ? 'Retry' : 'Analyze'}
           </button>
         )}
         {rec.status === 'completed' && (rec.playback_format === 'hls' || analysisStatus === 'review_needed' || analysisStatus === 'ready' || segmentCount > 0) && (
-          <button className="py-1 px-3 rounded text-12 font-semibold bg-[#78350f] text-[#fde68a] transition-colors duration-150 hover:bg-[#92400e]" onClick={onReview}>Review</button>
+          <button data-focusable className={`${actionClass} bg-[#78350f] text-[#fde68a] hover:bg-[#92400e]`} onClick={onReview}>Review</button>
         )}
         {rec.status === 'recording' && (
-          <button className="py-1 px-3 rounded text-12 font-semibold bg-[#b45309] text-white transition-colors duration-150 hover:bg-[#d97706]" onClick={onStop}>Stop</button>
+          <button data-focusable className={`${actionClass} bg-[#b45309] text-white hover:bg-[#d97706]`} onClick={onStop}>Stop</button>
         )}
         {(rec.status === 'scheduled' || rec.status === 'recording' || rec.status === 'finalizing') && (
-          <button className="py-1 px-3 rounded text-12 font-semibold bg-[#4b5563] text-white transition-colors duration-150 hover:bg-[#6b7280]" onClick={onCancel}>Cancel</button>
+          <button data-focusable className={`${actionClass} bg-[#4b5563] text-white hover:bg-[#6b7280]`} onClick={onCancel}>Cancel</button>
         )}
-        <button className="py-1 px-3 rounded text-12 font-semibold bg-[#2a2a3e] text-[#ef4444] transition-colors duration-150 hover:bg-[#7f1d1d] hover:text-[#fca5a5]" onClick={onDelete}>Delete</button>
-      </div>
-    </div>
+        {confirmDelete ? (
+          <>
+            <button ref={confirmButtonRef} data-focusable className={`${actionClass} bg-[#991b1b] text-white hover:bg-[#b91c1c]`} onClick={() => { setConfirmDelete(false); onDelete(); }}>Confirm delete</button>
+            <button data-focusable className={`${actionClass} bg-[#30364a] text-white hover:bg-[#475569]`} onClick={() => setConfirmDelete(false)}>Keep</button>
+          </>
+        ) : (
+          <button ref={deleteButtonRef} data-focusable className={`${actionClass} bg-[#2a2a3e] text-[#fca5a5] hover:bg-[#7f1d1d]`} onClick={() => setConfirmDelete(true)}>Delete</button>
+        )}
+        </div>
+      </td>
+    </tr>
   );
 }
 
@@ -880,6 +897,7 @@ export default function Recordings() {
   const navigateToRecording = useAppStore((s) => s.navigateToRecording);
   const showToast = useAppStore((s) => s.showToastMessage);
   const [tab, setTab] = useState<Tab>('recordings');
+  const [showSchedule, setShowSchedule] = useState(false);
 
   useEffect(() => {
     fetchRecordings();
@@ -900,6 +918,9 @@ export default function Recordings() {
       const playbackUrl = hls
         ? (await getRecordingHlsPlayback({ apiBaseUrl, recordingId: rec.id })).url
         : await getRecordingPlaybackUrl({ apiBaseUrl, recordingId: rec.id, directUrl });
+      const vodReady = !hls && recordingTransport(rec.file_path) === 'mpegts' && isAppleMobile()
+        ? await getRecordingVodStatus(apiBaseUrl, rec.id).then(status => status === 'ready').catch(() => false)
+        : false;
       setChannel({
         id: `recording_${rec.id}`,
         name: rec.title,
@@ -910,6 +931,9 @@ export default function Recordings() {
         contentType: 'movies',
         recordingId: rec.id,
         dvrHls: hls,
+        recordingTransport: recordingTransport(rec.file_path),
+        recordingSize: rec.file_size,
+        recordingVodReady: vodReady,
         duration: rec.duration,
       });
       navigate('player');
@@ -934,13 +958,19 @@ export default function Recordings() {
   }, [recordings]);
 
   const visibleRecordingCount = upcoming.length + inProgress.length + completed.length + failed.length;
+  const sections = [
+    { title: 'In Progress', items: inProgress },
+    { title: 'Upcoming', items: upcoming },
+    { title: 'Completed', items: completed },
+    { title: 'Failed', items: failed },
+  ];
 
   return (
     <FocusZone className="p-4 lg:p-6 lg:px-8 h-full overflow-y-auto pb-20 lg:pb-8 outline-hidden">
-      <div className="flex items-center justify-between mb-4">
+      <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-22 lg:text-28 font-bold">Recordings</h1>
         {status && (
-          <div className="flex gap-4 text-sm text-[#9ca3af]">
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-[#9ca3af]">
             <span>{status.activeCount} active</span>
             <span>{formatBytes(status.diskUsageBytes)} used</span>
           </div>
@@ -950,7 +980,7 @@ export default function Recordings() {
       <div className="flex gap-1 mb-5 border-b border-[#333]">
         <button
           className={cn(
-            'py-2 px-5 text-15 border-b-2 transition-colors duration-150 hover:text-[#e5e7eb]',
+            'whitespace-nowrap py-2 px-3 text-sm sm:px-5 sm:text-15 border-b-2 transition-colors duration-150 hover:text-[#e5e7eb]',
             tab === 'recordings' ? 'text-white border-[#3b82f6]' : 'text-[#9ca3af] border-transparent'
           )}
           onClick={() => setTab('recordings')}
@@ -959,7 +989,7 @@ export default function Recordings() {
         </button>
         <button
           className={cn(
-            'py-2 px-5 text-15 border-b-2 transition-colors duration-150 hover:text-[#e5e7eb]',
+            'whitespace-nowrap py-2 px-3 text-sm sm:px-5 sm:text-15 border-b-2 transition-colors duration-150 hover:text-[#e5e7eb]',
             tab === 'rules' ? 'text-white border-[#3b82f6]' : 'text-[#9ca3af] border-transparent'
           )}
           onClick={() => setTab('rules')}
@@ -974,86 +1004,52 @@ export default function Recordings() {
 
       {tab === 'recordings' && (
         <div className="pb-8">
-          <ScheduleForm onCreated={() => fetchRecordings()} />
+          <div className="mb-4 flex justify-end">
+            <button
+              data-focusable
+              aria-expanded={showSchedule}
+              aria-controls="schedule-recording-form"
+              onClick={() => setShowSchedule(value => !value)}
+              className="min-h-11 rounded-lg bg-[#1d4ed8] px-4 py-2 text-base font-semibold text-white hover:bg-[#2563eb] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400"
+            >
+              {showSchedule ? 'Hide Schedule' : 'Schedule Recording'}
+            </button>
+          </div>
+          {showSchedule && <ScheduleForm onCreated={() => { setShowSchedule(false); void fetchRecordings(); }} />}
 
-          {inProgress.length > 0 && (
-            <section className="mb-6">
-              <h2 className="text-18 font-semibold mb-3 text-[#d1d5db]">In Progress</h2>
-              <div className="grid grid-cols-1 lg:grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">
-                {inProgress.map(r => (
-                  <RecordingCard
-                    key={r.id}
-                    rec={r}
-                    onPlay={() => {}}
-                    onCancel={() => cancelRec(r.id)}
-                    onStop={() => stopRec(r.id)}
-                    onDelete={() => deleteRec(r.id)}
-                    onAnalyze={() => { void analyzeCommercials(r.id); }}
-                    onReview={() => navigateToRecording(r.id)}
-                  />
-                ))}
-              </div>
-            </section>
-          )}
-
-          {upcoming.length > 0 && (
-            <section className="mb-6">
-              <h2 className="text-18 font-semibold mb-3 text-[#d1d5db]">Upcoming</h2>
-              <div className="grid grid-cols-1 lg:grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">
-                {upcoming.map(r => (
-                  <RecordingCard
-                    key={r.id}
-                    rec={r}
-                    onPlay={() => {}}
-                    onCancel={() => cancelRec(r.id)}
-                    onStop={() => {}}
-                    onDelete={() => deleteRec(r.id)}
-                    onAnalyze={() => { void analyzeCommercials(r.id); }}
-                    onReview={() => navigateToRecording(r.id)}
-                  />
-                ))}
-              </div>
-            </section>
-          )}
-
-          {completed.length > 0 && (
-            <section className="mb-6">
-              <h2 className="text-18 font-semibold mb-3 text-[#d1d5db]">Completed</h2>
-              <div className="grid grid-cols-1 lg:grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">
-                {completed.map(r => (
-                  <RecordingCard
-                    key={r.id}
-                    rec={r}
-                    onPlay={() => handlePlay(r)}
-                    onCancel={() => {}}
-                    onStop={() => {}}
-                    onDelete={() => deleteRec(r.id)}
-                    onAnalyze={() => { void analyzeCommercials(r.id); }}
-                    onReview={() => navigateToRecording(r.id)}
-                  />
-                ))}
-              </div>
-            </section>
-          )}
-
-          {failed.length > 0 && (
-            <section className="mb-6">
-              <h2 className="text-18 font-semibold mb-3 text-[#d1d5db]">Failed</h2>
-              <div className="grid grid-cols-1 lg:grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">
-                {failed.map(r => (
-                  <RecordingCard
-                    key={r.id}
-                    rec={r}
-                    onPlay={() => {}}
-                    onCancel={() => {}}
-                    onStop={() => {}}
-                    onDelete={() => deleteRec(r.id)}
-                    onAnalyze={() => { void analyzeCommercials(r.id); }}
-                    onReview={() => navigateToRecording(r.id)}
-                  />
-                ))}
-              </div>
-            </section>
+          {visibleRecordingCount > 0 && (
+            <table aria-label="DVR recordings" className="block w-full min-w-0 border-collapse text-left lg:table lg:table-fixed">
+              <thead className="sr-only lg:not-sr-only lg:table-header-group lg:sticky lg:top-0 lg:z-10 lg:bg-[#242435]">
+                <tr className="border-b border-white/20 text-sm font-semibold text-[#d1d5db]">
+                  <th scope="col" className="w-[27%] px-4 py-3">Program</th>
+                  <th scope="col" className="w-[14%] px-4 py-3">When</th>
+                  <th scope="col" className="w-[13%] px-4 py-3">Length / size</th>
+                  <th scope="col" className="w-[16%] px-4 py-3">Status</th>
+                  <th scope="col" className="w-[30%] px-4 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              {sections.filter(section => section.items.length > 0).map(section => (
+                <tbody key={section.title} aria-label={section.title} className="block lg:table-row-group">
+                  <tr className="block lg:table-row">
+                    <th scope="rowgroup" colSpan={5} className="block border-b border-white/10 bg-[#202030] px-3 py-2 text-left text-sm font-semibold text-[#d1d5db] lg:table-cell lg:px-4 lg:py-3 lg:text-base">
+                      {section.title} <span className="text-[#9ca3af]">({section.items.length})</span>
+                    </th>
+                  </tr>
+                  {section.items.map(rec => (
+                    <RecordingRow
+                      key={rec.id}
+                      rec={rec}
+                      onPlay={() => { void handlePlay(rec); }}
+                      onCancel={() => { void cancelRec(rec.id); }}
+                      onStop={() => { void stopRec(rec.id); }}
+                      onDelete={() => { void deleteRec(rec.id); }}
+                      onAnalyze={() => { void analyzeCommercials(rec.id); }}
+                      onReview={() => navigateToRecording(rec.id)}
+                    />
+                  ))}
+                </tbody>
+              ))}
+            </table>
           )}
 
           {visibleRecordingCount === 0 && (

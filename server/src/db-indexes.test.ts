@@ -5,7 +5,7 @@ import { ensureBrowseIndexes, ensureChannelSearchIndex } from './db-indexes.js';
 
 test('browse pages use indexes instead of temporary full-catalogue sorts', () => {
   const db = new Database(':memory:');
-  db.exec('CREATE TABLE channels(id TEXT PRIMARY KEY, content_type TEXT, grp TEXT, added INTEGER, sort_order INTEGER, name TEXT)');
+  db.exec('CREATE TABLE channels(id TEXT PRIMARY KEY, content_type TEXT, grp TEXT, region TEXT, added INTEGER, sort_order INTEGER, name TEXT)');
   ensureBrowseIndexes(db);
   ensureBrowseIndexes(db);
   for (const filter of ["content_type = 'movies'", "grp = 'Movies'"]) {
@@ -17,6 +17,9 @@ test('browse pages use indexes instead of temporary full-catalogue sorts', () =>
   }
   const plan = db.prepare('EXPLAIN QUERY PLAN SELECT * FROM channels ORDER BY sort_order, name LIMIT 20').all() as { detail: string }[];
   expect(plan.some(row => row.detail.includes('TEMP B-TREE'))).toBe(false);
+  const regions = db.prepare("EXPLAIN QUERY PLAN SELECT DISTINCT region FROM channels WHERE region != '' ORDER BY region").all() as { detail: string }[];
+  expect(regions.some(row => row.detail.includes('USING COVERING INDEX idx_channels_region'))).toBe(true);
+  expect(regions.some(row => row.detail.includes('TEMP B-TREE'))).toBe(false);
   db.close();
 });
 

@@ -87,6 +87,63 @@ describe('Recordings integration', () => {
     vi.useRealTimers();
   });
 
+  it('keeps the header and tabs legible on narrow phones', () => {
+    const heading = container.querySelector('h1');
+    expect(heading?.parentElement?.className).toContain('flex-col');
+    for (const tab of [...container.querySelectorAll('button')].filter(button => button.textContent?.startsWith('Recordings (') || button.textContent?.startsWith('Rules ('))) {
+      expect(tab.className).toContain('whitespace-nowrap');
+    }
+  });
+
+  it('requires an explicit second action before permanently deleting a DVR file', async () => {
+    const deleteRecording = vi.fn(async () => {});
+    await act(async () => useRecordingStore.setState({ deleteRecording }));
+    await act(async () => findButton(container, 'Delete').click());
+    expect(deleteRecording).not.toHaveBeenCalled();
+    const confirm = findButton(container, 'Confirm delete');
+    expect(document.activeElement).toBe(confirm);
+    await act(async () => findButton(container, 'Keep').click());
+    expect(deleteRecording).not.toHaveBeenCalled();
+    await act(async () => findButton(container, 'Delete').click());
+    await act(async () => findButton(container, 'Confirm delete').click());
+    expect(deleteRecording).toHaveBeenCalledWith('recording-1');
+  });
+
+  it('keeps scheduling collapsed until requested so DVR rows are immediately available', async () => {
+    expect(container.querySelector('#schedule-recording-form')).toBeNull();
+    const toggle = findButton(container, 'Schedule Recording');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    await act(async () => toggle.click());
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(container.querySelector('#schedule-recording-form')).not.toBeNull();
+    expect(container.querySelector('table[aria-label="DVR recordings"]')).not.toBeNull();
+  });
+
+  it('shows a navigable DVR table with readable mobile rows and explicit actions', async () => {
+    await act(async () => {
+      useRecordingStore.setState({ recordings: [
+        completedRecording,
+        { ...completedRecording, id: 'scheduled-1', title: 'Later Show', status: 'scheduled' },
+        { ...completedRecording, id: 'finalizing-1', title: 'Finishing', status: 'finalizing' },
+      ] });
+    });
+    const table = container.querySelector('table[aria-label="DVR recordings"]');
+    expect(table).not.toBeNull();
+    expect([...table!.querySelectorAll('thead th')].map(cell => cell.textContent)).toEqual([
+      'Program', 'When', 'Length / size', 'Status', 'Actions',
+    ]);
+    const rows = [...table!.querySelectorAll('tr[data-recording-row]')];
+    expect(rows).toHaveLength(3);
+    expect(rows.map(row => row.getAttribute('data-recording-id'))).toEqual(['finalizing-1', 'scheduled-1', 'recording-1']);
+    expect(rows[2].className).toContain('grid-cols-2');
+    expect(rows[2].className).toContain('lg:table-row');
+    expect(rows[2].querySelector('button[aria-label="Play Evening News"]')).not.toBeNull();
+    for (const button of rows[2].querySelectorAll('button')) {
+      expect(button.hasAttribute('data-focusable')).toBe(true);
+      expect(button.className).toContain('min-h-11');
+    }
+  });
+
   it('waits for a playback ticket before setting the recording channel and navigating', async () => {
     let resolveTicket!: (url: string) => void;
     getRecordingPlaybackUrlMock.mockReturnValue(new Promise<string>((resolve) => {
@@ -193,7 +250,8 @@ describe('Recordings integration', () => {
     expect(container.querySelectorAll('[role="progressbar"]')).toHaveLength(1);
   });
 
-  it('uses mobile-safe editable fields without overflowing the schedule form', () => {
+  it('uses mobile-safe editable fields without overflowing the schedule form', async () => {
+    await act(async () => findButton(container, 'Schedule Recording').click());
     const form = container.querySelector('#schedule-recording-form');
     expect(form).not.toBeNull();
     const fields = form?.querySelectorAll('input') ?? [];
