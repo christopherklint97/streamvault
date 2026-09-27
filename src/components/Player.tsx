@@ -23,7 +23,7 @@ import type { Channel } from '../types';
 import { getAbsoluteSkipTarget } from '../utils/media-progress';
 import { shouldStartPlayerPlayback } from '../utils/player-lifecycle';
 import { getCommercialMarkers } from '../utils/commercial-markers';
-import { formatCommercialBreakSummary, getCommercialPlayerUiState, isCommercialUndoKey } from '../utils/commercial-player-ui';
+import { getCommercialPlayerUiState, isCommercialUndoKey } from '../utils/commercial-player-ui';
 
 const OSD_TIMEOUT = 5000;
 const MOBILE = isMobile();
@@ -504,10 +504,6 @@ export default function Player() {
     () => commercialUi.visible ? getCommercialMarkers(commercialSkip.segments, duration) : [],
     [commercialUi.visible, commercialSkip.segments, duration],
   );
-  const commercialBreakSummary = useMemo(
-    () => formatCommercialBreakSummary(commercialSkip.segments),
-    [commercialSkip.segments],
-  );
 
   const handleUndoCommercialSkip = useCallback(async () => {
     if (!commercialUi.canUndo) return;
@@ -826,13 +822,13 @@ export default function Player() {
               type="button"
               data-commercial-undo
               aria-label="Commercial break skipped. Undo skip"
-              className="pointer-events-auto rounded-full border border-amber-300/50 bg-black/90 px-5 py-3 text-sm font-semibold text-white shadow-2xl tap-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
+              className="pointer-events-auto rounded-full border border-white/30 bg-black/90 px-5 py-3 text-sm font-semibold text-white shadow-2xl tap-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400"
               onClick={(event) => {
                 event.stopPropagation();
                 void handleUndoCommercialSkip();
               }}
             >
-              Commercial break skipped — <span className="text-amber-300 underline">Undo</span>
+              Commercial break skipped — <span className="text-cyan-300 underline">Undo</span>
             </button>
           )}
         </div>
@@ -1107,12 +1103,6 @@ export default function Player() {
                   </div>
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-12 text-[#aaa] tabular-nums">{formatTime(seekDisplay)}</span>
-                    {commercialUi.visible && (
-                      <span className="flex flex-col items-center text-11 text-amber-300/90">
-                        <span data-commercial-skip-state>{commercialUi.statusLabel}</span>
-                        <span data-commercial-break-summary>{commercialBreakSummary}</span>
-                      </span>
-                    )}
                     <span className="text-12 text-[#aaa] tabular-nums">-{formatTime(remaining)}</span>
                   </div>
                 </div>
