@@ -7,6 +7,7 @@ import { useAppStore } from '../stores/appStore';
 import type { Channel } from '../types';
 
 interface ArchiveProgram { title: string; startTime: number; endTime: number }
+const ARCHIVE_VIEW_MS = 24 * 3_600_000;
 function when(ms: number | null): string { return ms == null ? 'No captured media yet' : new Date(ms).toLocaleString(); }
 function size(bytes: number): string { return `${(bytes / 1_000_000_000).toFixed(1)} GB`; }
 
@@ -54,18 +55,19 @@ export default function ArchivePage() {
     let active = true;
     for (const archive of archives) {
       if (!archive.enabled || archive.availableFrom === null || archive.availableTo === null) continue;
+      const from = Math.max(archive.availableFrom, archive.availableTo - ARCHIVE_VIEW_MS);
       void apiFetch<{ programs: ArchiveProgram[] }>(apiBaseUrl,
-        `/api/archives/${encodeURIComponent(archive.channelId)}/programs?from=${archive.availableFrom}&to=${archive.availableTo}`)
+        `/api/archives/${encodeURIComponent(archive.channelId)}/programs?from=${from}&to=${archive.availableTo}`)
         .then(data => { if (active) setPrograms(current => ({ ...current, [archive.channelId]: data.programs ?? [] })); })
         .catch(() => { /* Guide gaps do not prevent time-based playback. */ });
     }
     return () => { active = false; };
   }, [apiBaseUrl, archives]);
 
-  const toggle = async (channel: { id: string; name: string }, enabled: boolean) => {
+  const toggle = async (channel: { id: string; name: string }, enabled: boolean, retentionHours = 24) => {
     setBusy(true); setError('');
     try {
-      await setArchiveChannel(apiBaseUrl, channel.id, { channelName: channel.name, enabled, retentionHours: 24 });
+      await setArchiveChannel(apiBaseUrl, channel.id, { channelName: channel.name, enabled, retentionHours });
       setQuery(''); setResults([]); await refresh();
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(false); }
@@ -74,9 +76,11 @@ export default function ArchivePage() {
   const play = async (archive: ArchiveChannel, from?: number, to?: number) => {
     setBusy(true); setError('');
     try {
+      const endTime = Math.min(to ?? archive.availableTo ?? 0, archive.availableTo ?? 0);
+      const startTime = Math.max(from ?? archive.availableFrom ?? 0,
+        archive.availableFrom ?? 0, endTime - ARCHIVE_VIEW_MS);
       const snapshot = await getArchivePlayback({ apiBaseUrl, channelId: archive.channelId,
-        startTime: from ?? archive.availableFrom ?? 0,
-        endTime: to ?? archive.availableTo ?? 0 });
+        startTime, endTime });
       setChannel({ id: `archive_${archive.channelId}_${from ?? snapshot.startTime}`, name: archive.channelName,
         url: snapshot.url, logo: '', group: 'Archive', region: '', contentType: 'movies',
         duration: snapshot.duration, dvrHls: true,
@@ -91,7 +95,7 @@ export default function ArchivePage() {
 
   return <section className="pb-8 text-[#d1d5db]">
     <h2 className="text-18 font-semibold">Continuous channel archive</h2>
-    <p className="text-13 text-[#9ca3af] mb-4">Save a rolling 24 hours from selected channels. Capture starts when enabled; earlier broadcasts cannot be recovered.</p>
+    <p className="text-13 text-[#9ca3af] mb-4">Save a rolling 24 hours by default. Capture starts when enabled; earlier broadcasts cannot be recovered.</p>
     <label className="block text-13 mb-2" htmlFor="archive-search">Add a channel</label>
     <input id="archive-search" data-focusable value={query} onChange={event => {
       setQuery(event.target.value);
@@ -108,14 +112,15 @@ export default function ArchivePage() {
     {archives.length === 0 && <p className="mt-4 text-[#9ca3af]">No channels archived yet.</p>}
     <div className="grid grid-cols-1 gap-4 mt-4">
       {archives.map(archive => {
-        const from = archive.availableFrom;
+        const from = archive.availableFrom === null || archive.availableTo === null ? null
+          : Math.max(archive.availableFrom, archive.availableTo - ARCHIVE_VIEW_MS);
         const to = archive.availableTo;
         const available = from !== null && to !== null && to > from;
         const selected = available ? from + Math.round((to - from) * (offsets[archive.channelId] ?? 0) / 100) : null;
         return <article key={archive.channelId} className="rounded-lg border border-[#333] bg-[#1a1a2e] p-4">
           <div className="flex items-center justify-between gap-3">
             <h3 className="font-semibold">{archive.channelName}</h3>
-            <button data-focusable disabled={busy} onClick={() => { void toggle({ id: archive.channelId, name: archive.channelName }, !archive.enabled); }}
+            <button data-focusable disabled={busy} onClick={() => { void toggle({ id: archive.channelId, name: archive.channelName }, !archive.enabled, archive.retentionHours); }}
               className="rounded bg-[#333] px-3 py-1">{archive.enabled ? 'Stop archiving' : 'Resume archiving'}</button>
           </div>
           <p className="text-12 text-[#9ca3af] mt-2">{archive.status || (archive.enabled ? 'Starting' : 'Paused')} · {size(archive.diskUsageBytes)} stored · {when(from)} – {when(to)}</p>
