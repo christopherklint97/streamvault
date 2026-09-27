@@ -11,6 +11,8 @@ import { cn } from '../utils/cn';
 import FocusZone from '../components/FocusZone';
 import { getRecordingAnalysisStatus, getRecordingCommercialSeconds } from '../utils/recording-commercial';
 import { getRecordingPlaybackUrl } from '../services/recordingPlayback';
+import { getRecordingHlsPlayback } from '../services/archivePlayback';
+import ArchivePage from './ArchivePage';
 import {
   createRecordingRuleDraft,
   minutesToRuleTime,
@@ -857,7 +859,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
   );
 }
 
-type Tab = 'recordings' | 'rules';
+type Tab = 'recordings' | 'rules' | 'archive';
 
 export default function Recordings() {
   const recordings = useRecordingStore((s) => s.recordings);
@@ -894,11 +896,10 @@ export default function Recordings() {
   const handlePlay = useCallback(async (rec: Recording) => {
     const directUrl = `/api/recordings/${encodeURIComponent(rec.id)}/stream`;
     try {
-      const playbackUrl = await getRecordingPlaybackUrl({
-        apiBaseUrl,
-        recordingId: rec.id,
-        directUrl,
-      });
+      const hls = rec.playback_format === 'hls';
+      const playbackUrl = hls
+        ? (await getRecordingHlsPlayback({ apiBaseUrl, recordingId: rec.id })).url
+        : await getRecordingPlaybackUrl({ apiBaseUrl, recordingId: rec.id, directUrl });
       setChannel({
         id: `recording_${rec.id}`,
         name: rec.title,
@@ -908,6 +909,7 @@ export default function Recordings() {
         region: '',
         contentType: 'movies',
         recordingId: rec.id,
+        dvrHls: hls,
         duration: rec.duration,
       });
       navigate('player');
@@ -964,6 +966,10 @@ export default function Recordings() {
         >
           Rules ({rules.length})
         </button>
+        <button data-focusable className={cn(
+          'py-2 px-5 text-15 border-b-2 transition-colors duration-150 hover:text-[#e5e7eb]',
+          tab === 'archive' ? 'text-white border-[#3b82f6]' : 'text-[#9ca3af] border-transparent'
+        )} onClick={() => setTab('archive')}>24-hour archive</button>
       </div>
 
       {tab === 'recordings' && (
@@ -1058,6 +1064,7 @@ export default function Recordings() {
         </div>
       )}
 
+      {tab === 'archive' && <ArchivePage />}
       {tab === 'rules' && (
         <div className="pb-8">
           <RuleForm onCreated={() => { void fetchRules(); }} />

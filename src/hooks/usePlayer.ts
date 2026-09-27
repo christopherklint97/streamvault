@@ -32,6 +32,7 @@ import {
   seekHtml5,
 } from '../services/playbackSeek';
 import { useRecordingStore } from '../stores/recordingStore';
+import { attachFiniteHls } from '../services/finiteHls';
 import {
   getAvPlayClockReading,
   getHtml5ClockReading,
@@ -100,6 +101,7 @@ function beginCommercialPlayback(channel: Channel): number {
 // ---------------------------------------------------------------------------
 
 let activeMpegtsPlayer: MpegtsType.Player | null = null;
+let disposeFiniteHls: (() => void) | null = null;
 let bgProgressInterval: ReturnType<typeof setInterval> | null = null;
 let bgBufferTimer: ReturnType<typeof setTimeout> | null = null;
 let html5PlaybackGeneration = 0;
@@ -336,6 +338,9 @@ export function stopActivePlayback() {
     }
   }
 
+  disposeFiniteHls?.();
+  disposeFiniteHls = null;
+
   if (typeof webapis !== 'undefined' && webapis.avplay) {
     clearAvplayStallTimer();
     try {
@@ -474,7 +479,7 @@ export function usePlayer(): {
         // playback retains subtitle data so AVPlay can inventory real TEXT
         // tracks; setSilentSubtitle enforces the persisted Off state.
         const isRecording = Boolean(channel.recordingId);
-        const playerPath = isRecording
+        const playerPath = isRecording || channel.dvrHls
           ? channel.url
           : getStreamUrl(channel.id, channel.url, isLive ? true : keepSubsRef.current, isLive, audioOnly);
         const tizenPlayUrl = toAbsolutePlayerUrl(
@@ -690,6 +695,8 @@ export function usePlayer(): {
         activeMpegtsPlayer = null;
         previousPlayer.destroy();
       }
+      disposeFiniteHls?.();
+      disposeFiniteHls = null;
       // Reset the video element so the new source can attach cleanly
       video.pause();
       video.removeAttribute('src');
@@ -826,11 +833,11 @@ export function usePlayer(): {
       const isRecording = Boolean(channel.recordingId);
       // Recordings have a direct server URL; live/VOD go through stream proxy
       const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
-      const appleMobileVodPath = isAppleMobile()
+      const appleMobileVodPath = isAppleMobile() && !channel.dvrHls
         ? iphoneVodPlaybackPath(channel.id, channel.url, channel.contentType, resumePosition)
         : null;
-      const needsBrowserTranscode = !isLiveTs && !isRecording && !appleMobileVodPath;
-      const playUrl = isRecording
+      const needsBrowserTranscode = !isLiveTs && !isRecording && !channel.dvrHls && !appleMobileVodPath;
+      const playUrl = isRecording || channel.dvrHls
         ? channel.url
         : appleMobileVodPath
           ? `${apiBaseUrl}${appleMobileVodPath}`
@@ -925,6 +932,17 @@ export function usePlayer(): {
           log.error('HTML5: failed to import mpegts.js', e);
           disableLiveStreamRecovery();
           setError('Failed to load live TV player');
+        });
+      } else if (channel.dvrHls) {
+        setupEvents();
+        video.dataset.streamOffset = '0';
+        void attachFiniteHls(video, playUrl, detail => {
+          if (isCurrentPlayback()) setError(`DVR playback failed: ${detail}`);
+        }).then(dispose => {
+          if (!isCurrentPlayback()) { dispose(); return; }
+          disposeFiniteHls = dispose;
+        }).catch(error => {
+          if (isCurrentPlayback()) setError(error instanceof Error ? error.message : String(error));
         });
       } else {
         // VOD (MP4, etc) — direct URL (no proxy needed, browser handles it)
@@ -1044,10 +1062,10 @@ export function usePlayer(): {
       const video = document.getElementById('av-player') as HTMLVideoElement | null;
       const channel = usePlayerStore.getState().currentChannel;
       if (!video || !channel) return;
-      const appleMobileVodPath = isAppleMobile()
+      const appleMobileVodPath = isAppleMobile() && !channel.dvrHls
         ? iphoneVodPlaybackPath(channel.id, channel.url, channel.contentType, targetTime)
         : null;
-      const usesTranscode = channel.contentType !== 'livetv' && !channel.id.startsWith('recording_') && !appleMobileVodPath;
+      const usesTranscode = channel.contentType !== 'livetv' && !channel.recordingId && !channel.dvrHls && !appleMobileVodPath;
       const restartSelectedSubtitles = () => {
         const track = subtitleTracksRef.current.find(
           (candidate) => candidate.index === selectedSubtitleIndexRef.current,
