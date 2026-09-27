@@ -5,6 +5,15 @@ import Player from './Player';
 import { usePlayerStore } from '../stores/playerStore';
 import { useChannelStore } from '../stores/channelStore';
 import type { Channel } from '../types';
+import type { CommercialSkipSnapshot } from '../services/commercialSkipSession';
+
+const commercialFixture = vi.hoisted(() => ({
+  duration: 0,
+  snapshot: {
+    recordingId: null, generation: 0, phase: 'idle', enabled: false,
+    segments: [], seekPending: false, undo: null,
+  } as CommercialSkipSnapshot,
+}));
 
 vi.mock('../utils/platform', async (importOriginal) => ({
   ...await importOriginal<typeof import('../utils/platform')>(),
@@ -16,7 +25,8 @@ vi.mock('../hooks/usePlayer', () => {
   const player = {
     play: noop, stop: noop, retry: noop, togglePlay: noop,
     beginManualSeek: noop, seek: noop, getVideoElement: () => null,
-    playbackPosition: 0, playbackDuration: 0, commercialSkip: { segments: [], status: 'idle' }, undoCommercialSkip: noop,
+    playbackPosition: 0, get playbackDuration() { return commercialFixture.duration; },
+    get commercialSkip() { return commercialFixture.snapshot; }, undoCommercialSkip: noop,
     playerState: { status: 'playing' }, subtitleTracks: [], currentSubtitleIndex: -1,
     subtitleText: '', selectSubtitleTrack: noop,
   };
@@ -42,6 +52,32 @@ describe('player channel-list EPG', () => {
     vi.restoreAllMocks();
     usePlayerStore.setState({ currentChannel: null, groupChannels: [], channelListVisible: true });
     useChannelStore.setState({ programs: [], programsByChannel: new Map() });
+    commercialFixture.duration = 0;
+    commercialFixture.snapshot = { recordingId: null, generation: 0, phase: 'idle', enabled: false, segments: [], seekPending: false, undo: null };
+  });
+
+  it('keeps DVR seek markers but omits the persistent yellow commercial-break text', async () => {
+    commercialFixture.duration = 3600;
+    commercialFixture.snapshot = {
+      recordingId: 'rec-1', generation: 1, phase: 'ready', enabled: true,
+      segments: [{ id: 'ad-1', startSeconds: 120, endSeconds: 180, source: 'manual', confidence: null, state: 'accepted' }],
+      seekPending: false, undo: { segmentId: 'ad-1', originalPosition: 125, targetPosition: 180, expiresAt: Date.now() + 10000 },
+    };
+    usePlayerStore.setState({
+      currentChannel: { ...channel, id: 'recording_rec-1', recordingId: 'rec-1', contentType: 'movies', duration: 3600 },
+      groupChannels: [], channelListVisible: false,
+    });
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => { root.render(<Player />); });
+    expect(container.querySelectorAll('[data-commercial-marker]')).toHaveLength(1);
+    expect(container.querySelector('[data-commercial-skip-state]')).toBeNull();
+    expect(container.querySelector('[data-commercial-break-summary]')).toBeNull();
+    const undo = container.querySelector('[data-commercial-undo]');
+    expect(undo).not.toBeNull();
+    expect(undo?.className).not.toContain('amber');
+    expect(undo?.querySelector('span')?.className).not.toContain('amber');
   });
 
   it.each(['empty', 'future-only'] as const)(
