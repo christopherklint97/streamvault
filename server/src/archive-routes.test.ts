@@ -1,4 +1,4 @@
-import { it, expect } from 'vitest';
+import { it, expect, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import express from 'express';
 import fs from 'node:fs';
@@ -39,7 +39,11 @@ it('issues finite scoped playback and denies cross-snapshot and forged segment r
     expect((await show.json() as { startOffsetSeconds: number }).startOffsetSeconds).toBe(4);
     const response = await fetch(`${base}/api/archive/c/playback-ticket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ startTime: 1000, endTime: 21000 }) });
     expect(response.status).toBe(200);
-    const ticket = await response.json() as { url: string; snapshotId: string; duration: number };
+    const ticket = await response.json() as { url: string; snapshotId: string; duration: number; expiresAt: number };
+    expect(ticket.expiresAt - Date.now()).toBeGreaterThan(25 * 3_600_000);
+    const tooWide = await fetch(`${base}/api/archive/c/playback-ticket`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startTime: 1000, endTime: 1000 + 24 * 3_600_000 + 1 }) });
+    expect(tooWide.status).toBe(400);
     expect(ticket.duration).toBe(20);
     expect((ticket as { startOffsetSeconds?: number }).startOffsetSeconds).toBe(0);
     const clipped = await fetch(`${base}/api/archive/c/playback-ticket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ startTime: 5000, endTime: 16000 }) });
@@ -59,5 +63,11 @@ it('issues finite scoped playback and denies cross-snapshot and forged segment r
     fs.writeFileSync(path.join(root, 'two.ts'), Buffer.alloc(188, 0x47));
     store.publish({ id: 'two', channelId: 'other', start: 1000, end: 21000, duration: 20, path: 'two.ts', size: 188, epoch: 1 });
     expect((await fetch(base + segment.replace('/one.ts', '/two.ts'))).status).toBe(404);
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(ticket.expiresAt - 3_600_000);
+    try {
+      expect((await fetch(base + ticket.url)).status).toBe(200);
+      expect((await fetch(base + segment)).status).toBe(200);
+      expect(store.prunable('c', Number.MAX_SAFE_INTEGER, Date.now()).map(c => c.id)).not.toContain('one');
+    } finally { clock.mockRestore(); }
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); db.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });

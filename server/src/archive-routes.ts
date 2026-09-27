@@ -7,8 +7,11 @@ import { pruneArchive } from './archive-retention.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const LEASE_MS = 2 * 60 * 60_000;
-const MAX_LEASE_MS = 24 * 60 * 60_000;
+// Native finite HLS players do not renew a playlist ticket while paused or
+// scrubbing. A 26h lease pins up to one 24h window plus a two-hour margin.
+// Storage operators must budget pinned bytes above the ordinary retention cap.
+const LEASE_MS = 26 * 60 * 60_000;
+const MAX_LEASE_MS = 26 * 60 * 60_000;
 export function createArchiveRouter(deps: {
   store: ArchiveStore; root: string; secret: Buffer;
   getChannel: (id: string) => { id: string; name: string; content_type: string } | undefined;
@@ -59,7 +62,7 @@ export function createArchiveRouter(deps: {
     const archive = store.getArchive(channelId);
     if (!archive || !Number.isSafeInteger(startTime) || !Number.isSafeInteger(endTime) ||
       startTime < 0 || endTime <= startTime || endTime - startTime > archive.retentionHours * 3_600_000 ||
-      endTime - startTime > 168 * 3_600_000) {
+      endTime - startTime > 24 * 3_600_000) {
       res.status(400).json({ error: 'Invalid archive interval' }); return;
     }
     const now = Date.now();
