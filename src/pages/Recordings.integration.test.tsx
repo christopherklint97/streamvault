@@ -7,12 +7,17 @@ import { useChannelStore } from '../stores/channelStore';
 import { usePlayerStore } from '../stores/playerStore';
 import { useRecordingStore } from '../stores/recordingStore';
 
-const { getRecordingPlaybackUrlMock } = vi.hoisted(() => ({
+const { getRecordingPlaybackUrlMock, getRecordingHlsPlaybackMock } = vi.hoisted(() => ({
   getRecordingPlaybackUrlMock: vi.fn(),
+  getRecordingHlsPlaybackMock: vi.fn(),
 }));
 
 vi.mock('../services/recordingPlayback', () => ({
   getRecordingPlaybackUrl: getRecordingPlaybackUrlMock,
+}));
+vi.mock('../services/archivePlayback', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../services/archivePlayback')>(),
+  getRecordingHlsPlayback: getRecordingHlsPlaybackMock,
 }));
 
 import Recordings from './Recordings';
@@ -124,6 +129,24 @@ describe('Recordings integration', () => {
     expect(setChannel).not.toHaveBeenCalled();
     expect(navigate).not.toHaveBeenCalled();
     expect(showToastMessage).toHaveBeenCalledWith('Unable to play recording: ticket unavailable');
+  });
+
+  it('uses finite HLS tickets for segmented shows without falling back to the legacy file URL', async () => {
+    getRecordingHlsPlaybackMock.mockResolvedValue({
+      url: 'https://dvr.example.test/api/archive/snapshots/s1/index.m3u8?ticket=scope', duration: 1800,
+    });
+    await act(async () => {
+      useRecordingStore.setState({ recordings: [{ ...completedRecording, playback_format: 'hls' }] });
+    });
+    await act(async () => { findButton(container, 'Play').click(); await Promise.resolve(); });
+    expect(getRecordingHlsPlaybackMock).toHaveBeenCalledWith({
+      apiBaseUrl: 'https://dvr.example.test', recordingId: 'recording-1',
+    });
+    expect(getRecordingPlaybackUrlMock).not.toHaveBeenCalled();
+    expect(setChannel).toHaveBeenCalledWith(expect.objectContaining({
+      dvrHls: true, recordingId: 'recording-1',
+      url: 'https://dvr.example.test/api/archive/snapshots/s1/index.m3u8?ticket=scope',
+    }));
   });
 
   it('keeps finalizing recordings visible in the In Progress section', async () => {
