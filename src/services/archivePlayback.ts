@@ -7,6 +7,7 @@ export interface ArchiveChannel {
   enabled: boolean;
   retentionHours: number;
   status: string;
+  error?: string | null;
   lastPublishedAt: number | null;
   availableFrom: number | null;
   availableTo: number | null;
@@ -20,6 +21,7 @@ export interface ArchivePlayback {
   endTime: number;
   duration: number;
   snapshotId: string;
+  startOffsetSeconds?: number;
   gaps: Array<{ startTime: number; endTime: number }>;
 }
 

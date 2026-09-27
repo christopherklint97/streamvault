@@ -20,7 +20,8 @@ beforeEach(() => {
   container = document.createElement('div'); document.body.append(container); root = createRoot(container);
   fetchArchives.mockResolvedValue([{ channelId: 'live_7', channelName: 'ESPN', enabled: true,
     retentionHours: 24, availableFrom: 1000, availableTo: 2000, diskUsageBytes: 1000 }]);
-  getPlayback.mockResolvedValue({ url: '/api/archive/snapshots/s1/index.m3u8?ticket=x', duration: 1, startTime: 1000, endTime: 2000 });
+  getPlayback.mockResolvedValue({ url: '/api/archive/snapshots/s1/index.m3u8?ticket=x', duration: 1,
+    startTime: 1000, endTime: 2000, startOffsetSeconds: 0.2, gaps: [] });
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 
@@ -32,7 +33,7 @@ describe('archive playback', () => {
     expect(button).toBeDefined();
     await act(async () => { button?.click(); });
     expect(getPlayback).toHaveBeenCalledWith({ apiBaseUrl: '', channelId: 'live_7', startTime: 1000, endTime: 2000 });
-    expect(setChannel).toHaveBeenCalledWith(expect.objectContaining({ dvrHls: true, contentType: 'movies',
+    expect(setChannel).toHaveBeenCalledWith(expect.objectContaining({ dvrHls: true, initialSeekSeconds: 0.2, contentType: 'movies',
       url: '/api/archive/snapshots/s1/index.m3u8?ticket=x' }));
     expect(navigate).toHaveBeenCalledWith('player');
   });

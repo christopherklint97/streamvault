@@ -456,7 +456,9 @@ export function usePlayer(): {
     const savedProgress = channel.contentType !== 'livetv'
       ? getWatchProgress(channel.id)
       : null;
-    const resumePosition = normalizePlaybackStart(getResumePosition(savedProgress));
+    const resumePosition = normalizePlaybackStart(
+      savedProgress ? getResumePosition(savedProgress) : (channel.initialSeekSeconds ?? 0),
+    );
     if (resumePosition > 0) {
       log.info(`Resuming from position ${resumePosition.toFixed(1)}s`);
     }

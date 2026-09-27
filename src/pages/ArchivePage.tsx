@@ -77,9 +77,11 @@ export default function ArchivePage() {
       const snapshot = await getArchivePlayback({ apiBaseUrl, channelId: archive.channelId,
         startTime: from ?? archive.availableFrom ?? 0,
         endTime: to ?? archive.availableTo ?? 0 });
-      setChannel({ id: `archive_${archive.channelId}_${snapshot.startTime}`, name: archive.channelName,
+      setChannel({ id: `archive_${archive.channelId}_${from ?? snapshot.startTime}`, name: archive.channelName,
         url: snapshot.url, logo: '', group: 'Archive', region: '', contentType: 'movies',
-        duration: snapshot.duration, dvrHls: true });
+        duration: snapshot.duration, dvrHls: true,
+        initialSeekSeconds: snapshot.startOffsetSeconds ?? 0 });
+      if (snapshot.gaps?.length) showToast('This archive has capture gaps; missing broadcasts are skipped.');
       navigate('player');
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
@@ -116,7 +118,8 @@ export default function ArchivePage() {
             <button data-focusable disabled={busy} onClick={() => { void toggle({ id: archive.channelId, name: archive.channelName }, !archive.enabled); }}
               className="rounded bg-[#333] px-3 py-1">{archive.enabled ? 'Stop archiving' : 'Resume archiving'}</button>
           </div>
-          <p className="text-12 text-[#9ca3af] mt-2">{archive.enabled ? 'Capturing' : 'Paused'} · {size(archive.diskUsageBytes)} stored · {when(from)} – {when(to)}</p>
+          <p className="text-12 text-[#9ca3af] mt-2">{archive.status || (archive.enabled ? 'Starting' : 'Paused')} · {size(archive.diskUsageBytes)} stored · {when(from)} – {when(to)}</p>
+          {archive.error && <p role="status" className="text-12 text-amber-300 mt-1">{archive.error}</p>}
           {available && <>
             <button data-focusable disabled={busy} className="mt-3 rounded bg-blue-700 px-4 py-2"
               onClick={() => { void play(archive); }}>Watch archive (seek anywhere)</button>
@@ -126,7 +129,7 @@ export default function ArchivePage() {
             <input id={`archive-seek-${archive.channelId}`} data-focusable type="range" min="0" max="100"
               value={offsets[archive.channelId] ?? 0} onChange={event => setOffsets(current => ({ ...current, [archive.channelId]: Number(event.target.value) }))}
               className="w-full max-w-lg" />
-            <button data-focusable disabled={busy} className="rounded bg-[#333] px-3 py-2" onClick={() => { void play(archive, selected ?? from, to); }}>Play from here</button>
+            <button data-focusable disabled={busy} className="rounded bg-[#333] px-3 py-2" onClick={() => { void play(archive, Math.min(selected ?? from, to - 1000), to); }}>Play from here</button>
             {(programs[archive.channelId] ?? []).length > 0 && <div className="mt-4">
               <h4 className="text-13 font-semibold">Shows in the archive</h4>
               <div className="max-h-56 overflow-y-auto flex flex-col gap-1 mt-2">

@@ -16,6 +16,8 @@ export interface Channel {
   recordingId?: string;
   /** A finite, signed HLS DVR manifest rather than a provider VOD URL. */
   dvrHls?: boolean;
+  /** Offset into a segment-aligned archive playlist for an exact programme start. */
+  initialSeekSeconds?: number;
 }
 
 export interface Program {
