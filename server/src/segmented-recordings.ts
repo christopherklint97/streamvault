@@ -89,7 +89,7 @@ export function stopSegmentedRecording(id: string, resume = false): Promise<void
       derivative_file_path: null, derivative_error: null,
       file_size: chunks.reduce((sum, c) => sum + c.size, 0),
       duration: chunks.reduce((sum, c) => sum + c.duration, 0), error: null,
-      analysis_state: 'not_requested', analysis_error: 'Automatic commercial analysis requires a contiguous file; manually set markers for segmented recordings',
+      analysis_state: 'not_requested', analysis_error: null,
     }, rec.rule_id, rec.rule_revision ?? null, rec.program_start_time ?? null, rec.airing_key ?? null);
     if (!saved) archiveStore.removeRecordingRefs(id);
     else if (rec.rule_id) queueMicrotask(() => {

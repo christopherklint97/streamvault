@@ -201,7 +201,7 @@ function RecordingDetailContent({ recordingId }: RecordingDetailProps) {
   const override = metadata?.autoSkipOverride
     ?? (recording.commercial_skip_override == null ? null : Boolean(recording.commercial_skip_override));
   const effective = metadata?.effectiveAutoSkip ?? false;
-  const canAnalyze = analysisStatus === 'not_analyzed' || analysisStatus === 'failed';
+  const canAnalyze = recording.playback_format !== 'hls' && (analysisStatus === 'not_analyzed' || analysisStatus === 'failed');
 
   return (
     <FocusZone className="h-full overflow-y-auto p-4 pb-24 lg:p-8 outline-hidden" onBack={requestBack}>
@@ -239,6 +239,7 @@ function RecordingDetailContent({ recordingId }: RecordingDetailProps) {
             )}
           </div>
           {analysisError && <p role="alert" className="mt-3 rounded bg-[#451a1a] p-3 text-sm text-[#fecaca]">{analysisError}</p>}
+          {recording.playback_format === 'hls' && <p className="mt-2 text-sm text-[#999]">TS-only recordings skip automatic analysis. Add manual commercial intervals below if needed.</p>}
           {metadata?.analysis.detector && (
             <p className="mt-2 text-xs text-[#777]">
               Detector: {metadata.analysis.detector}{metadata.analysis.profileVersion ? ` · profile ${metadata.analysis.profileVersion}` : ''}

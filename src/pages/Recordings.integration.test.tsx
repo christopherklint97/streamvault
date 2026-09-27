@@ -138,6 +138,8 @@ describe('Recordings integration', () => {
     await act(async () => {
       useRecordingStore.setState({ recordings: [{ ...completedRecording, playback_format: 'hls' }] });
     });
+    expect(findButton(container, 'Review')).toBeTruthy();
+    expect(container.textContent).not.toContain('Analyze');
     await act(async () => { findButton(container, 'Play').click(); await Promise.resolve(); });
     expect(getRecordingHlsPlaybackMock).toHaveBeenCalledWith({
       apiBaseUrl: 'https://dvr.example.test', recordingId: 'recording-1',

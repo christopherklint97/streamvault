@@ -153,12 +153,12 @@ function RecordingCard({ rec, onPlay, onCancel, onStop, onDelete, onAnalyze, onR
         {rec.status === 'completed' && (
           <button className="py-1 px-3 rounded text-12 font-semibold bg-[#1d4ed8] text-white transition-colors duration-150 hover:bg-[#2563eb]" onClick={onPlay}>Play</button>
         )}
-        {rec.status === 'completed' && (analysisStatus === 'not_analyzed' || analysisStatus === 'failed') && (
+        {rec.status === 'completed' && rec.playback_format !== 'hls' && (analysisStatus === 'not_analyzed' || analysisStatus === 'failed') && (
           <button className="py-1 px-3 rounded text-12 font-semibold bg-[#2a2a3e] text-[#dbeafe] transition-colors duration-150 hover:bg-[#334155]" onClick={onAnalyze}>
             {analysisStatus === 'failed' ? 'Retry' : 'Analyze'}
           </button>
         )}
-        {rec.status === 'completed' && (analysisStatus === 'review_needed' || analysisStatus === 'ready' || segmentCount > 0) && (
+        {rec.status === 'completed' && (rec.playback_format === 'hls' || analysisStatus === 'review_needed' || analysisStatus === 'ready' || segmentCount > 0) && (
           <button className="py-1 px-3 rounded text-12 font-semibold bg-[#78350f] text-[#fde68a] transition-colors duration-150 hover:bg-[#92400e]" onClick={onReview}>Review</button>
         )}
         {rec.status === 'recording' && (
