@@ -477,7 +477,8 @@ export function usePlayer(): {
     const setError = usePlayerStore.getState().setError;
     const audioOnly = channel.contentType === 'livetv' && usePlayerStore.getState().audioOnly;
 
-    log.info(`▶ play() channel="${channel.name}" id=${channel.id} type=${channel.contentType} url=${channel.url ? channel.url.substring(0, 60) + '...' : '(empty)'}`);
+    // Provider URLs and DVR ticket queries are credentials; never send them to client logs.
+    log.info(`▶ play() channel="${channel.name}" id=${channel.id} type=${channel.contentType}`);
 
     // Check for saved progress to resume from
     const savedProgress = channel.contentType !== 'livetv'
@@ -515,7 +516,7 @@ export function usePlayer(): {
           playerPath,
           useChannelStore.getState().apiBaseUrl
         );
-        log.info(`AVPlay: opening ${tizenPlayUrl}`);
+        log.info(`AVPlay: opening ${channel.dvrHls ? 'finite DVR HLS' : channel.contentType} playback`);
         avplay.open(tizenPlayUrl);
         avplay.setDisplayRect(0, 0, 1920, 1080);
 
@@ -881,7 +882,7 @@ export function usePlayer(): {
             : needsBrowserTranscode
             ? `${apiBaseUrl}${browserTranscodePath(channel.id, channel.id.startsWith('episode_') ? channel.url : undefined, resumePosition)}`
             : getStreamUrl(channel.id, channel.url, isLiveTs ? true : keepSubsRef.current, isLiveTs, audioOnly);
-      log.info(`HTML5: playUrl=${playUrl}, contentType=${channel.contentType}`);
+      log.info(`HTML5: starting ${channel.dvrHls ? 'finite DVR HLS' : channel.contentType} playback`);
 
       if (isLiveTs || (isFiniteTsRecording && !appleRecordingHlsPath)) {
         // Native video cannot demux a saved MPEG-TS master either.
@@ -1004,7 +1005,7 @@ export function usePlayer(): {
         });
       } else {
         // VOD (MP4, etc) — direct URL (no proxy needed, browser handles it)
-        log.info(`HTML5: direct video playback, setting src=${playUrl}`);
+        log.info('HTML5: setting direct video source');
         setupEvents();
         // Force aggressive preload for VOD so the browser fills its buffer
         // before playback starts. iOS Safari may clamp this without user
