@@ -12,7 +12,7 @@ interface RecordingPlaybackRequest {
   pageOrigin?: string;
 }
 
-function resolveMediaUrl(url: string, apiBaseUrl: string, pageOrigin: string): string {
+export function resolveMediaUrl(url: string, apiBaseUrl: string, pageOrigin: string): string {
   let parsed: URL;
   try {
     parsed = new URL(url, pageOrigin);
