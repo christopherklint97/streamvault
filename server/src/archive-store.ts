@@ -98,6 +98,9 @@ export function createArchiveStore(db: Db) {
       return db.prepare('SELECT MIN(start) availableFrom, MAX(end) availableTo, COALESCE(SUM(size),0) diskUsageBytes FROM media_chunks WHERE channelId = ?')
         .get(channelId) as { availableFrom: number | null; availableTo: number | null; diskUsageBytes: number };
     },
+    totalUsageBytes(): number {
+      return (db.prepare('SELECT COALESCE(SUM(size),0) AS bytes FROM media_chunks').get() as { bytes: number }).bytes;
+    },
     addRecordingRef(recordingId: string, chunkId: string) {
       db.prepare('INSERT OR IGNORE INTO recording_chunk_refs(recordingId,chunkId) VALUES(?,?)').run(recordingId, chunkId);
     },

@@ -13,6 +13,11 @@ services:
     environment:
       - TZ=Europe/Stockholm
       - LOG_LEVEL=info
+      # New recordings store TS chunks only; existing recordings keep legacy playback.
+      - STREAMVAULT_SEGMENTED_RECORDINGS=${STREAMVAULT_SEGMENTED_RECORDINGS:-1}
+      # Stop archive capture before exhausting host disk or crowding other services.
+      - STREAMVAULT_ARCHIVE_MAX_DISK_GB=${STREAMVAULT_ARCHIVE_MAX_DISK_GB:-400}
+      - STREAMVAULT_ARCHIVE_RESERVE_GB=${STREAMVAULT_ARCHIVE_RESERVE_GB:-20}
       # Optional hardening. If set, browser clients must enter the same value
       # in Settings under Backend token.
       - STREAMVAULT_AUTH_TOKEN=${STREAMVAULT_AUTH_TOKEN:-}

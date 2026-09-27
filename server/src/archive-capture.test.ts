@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parsePublishedSegments, hlsCaptureArgs, hasArchiveReserve, nextArchiveEpoch } from './archive-capture.js';
+import { parsePublishedSegments, hlsCaptureArgs, hasArchiveReserve, hasArchiveCapacity, nextArchiveEpoch } from './archive-capture.js';
 import { ArchiveCapture } from './archive-capture.js';
 import { createArchiveStore, ensureArchiveSchema } from './archive-store.js';
 import Database from 'better-sqlite3';
@@ -41,6 +41,9 @@ describe('stream-copy HLS capture', () => {
     expect(auth.slice(auth.indexOf('-headers') + 1, auth.indexOf('-headers') + 2)).toEqual(['Authorization: Bearer private-token\r\n']);
     expect(hasArchiveReserve(6_000_000_000, 5_000_000_000)).toBe(true);
     expect(hasArchiveReserve(4_000_000_000, 5_000_000_000)).toBe(false);
+    expect(hasArchiveCapacity(600, 200, 100, 500)).toBe(true);
+    expect(hasArchiveCapacity(600, 300, 100, 300)).toBe(false);
+    expect(hasArchiveCapacity(100, 200, 100, 500)).toBe(false);
   });
 
   it('parses a source discontinuity once rather than for every following segment', () => {

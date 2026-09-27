@@ -5,9 +5,19 @@ import { randomUUID } from 'node:crypto';
 import { logger } from './logger.js';
 import type { ArchiveStore } from './archive-store.js';
 
-const RESERVE_BYTES = 5 * 1024 * 1024 * 1024;
+const GIB = 1024 * 1024 * 1024;
+const RESERVE_BYTES = 20 * GIB;
+const MAX_ARCHIVE_BYTES = 400 * GIB;
 export function hasArchiveReserve(freeBytes: number, reserveBytes = RESERVE_BYTES): boolean {
   return Number.isFinite(freeBytes) && freeBytes > reserveBytes;
+}
+export function hasArchiveCapacity(freeBytes: number, usedBytes: number, reserveBytes = RESERVE_BYTES,
+  maxBytes = MAX_ARCHIVE_BYTES): boolean {
+  return hasArchiveReserve(freeBytes, reserveBytes) && Number.isFinite(usedBytes) && usedBytes < maxBytes;
+}
+function gigabytes(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= 10_000 ? parsed : fallback;
 }
 export function nextArchiveEpoch(current: number, discontinuity: boolean): number {
   return current + (discontinuity ? 1 : 0);
@@ -51,9 +61,15 @@ export class ArchiveCapture {
   constructor(private readonly store: ArchiveStore, private readonly root: string, private readonly port: number,
     private readonly onPublished: (channelId: string) => void = () => {}) {}
 
-  private enoughSpace(): boolean {
-    try { const stats = fs.statfsSync(this.root); return hasArchiveReserve(stats.bavail * stats.bsize); }
-    catch { return false; }
+  private capacityError(): string | null {
+    const reserve = gigabytes(process.env.STREAMVAULT_ARCHIVE_RESERVE_GB, 20);
+    const maximum = gigabytes(process.env.STREAMVAULT_ARCHIVE_MAX_DISK_GB, 400);
+    try {
+      const stats = fs.statfsSync(this.root);
+      if (!hasArchiveReserve(stats.bavail * stats.bsize, reserve * GIB)) return `Less than ${reserve} GiB free; archive capture paused`;
+      if (this.store.totalUsageBytes() >= maximum * GIB) return `Archive media reached ${maximum} GiB cap; capture paused`;
+      return null;
+    } catch { return 'Archive storage unavailable; capture paused'; }
   }
 
   private showChannels = new Set<string>();
@@ -62,8 +78,9 @@ export class ArchiveCapture {
     if (this.stopping || this.writers.has(channelId) || this.retry.has(channelId) ||
       (!this.store.getArchive(channelId)?.enabled && !this.showChannels.has(channelId))) return;
     fs.mkdirSync(this.root, { recursive: true });
-    if (!this.enoughSpace()) {
-      this.store.setStatus(channelId, 'storage_low', 'Less than 5 GiB free; archive capture paused');
+    const capacityError = this.capacityError();
+    if (capacityError) {
+      this.store.setStatus(channelId, 'storage_low', capacityError);
       const timer = setTimeout(() => { this.retry.delete(channelId); this.start(channelId); }, 60_000);
       this.retry.set(channelId, timer);
       return;
@@ -93,8 +110,9 @@ export class ArchiveCapture {
   private poll(channelId: string): void {
     const writer = this.writers.get(channelId);
     if (!writer) return;
-    if (!this.enoughSpace()) {
-      this.store.setStatus(channelId, 'storage_low', 'Less than 5 GiB free; archive capture paused');
+    const capacityError = this.capacityError();
+    if (capacityError) {
+      this.store.setStatus(channelId, 'storage_low', capacityError);
       writer.process.kill('SIGINT');
     }
     this.importSession(channelId, writer.directory, writer);
