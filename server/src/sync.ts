@@ -5,9 +5,9 @@ import {
   getConfig, setConfig,
   getChannelCount, getCategoryCount,
   getCategories, getContentTypeCounts,
-  saveChannelsForCategory, markCategoryFetched,
 } from './db.js';
 import { logger } from './logger.js';
+import { getCatalogGeneration, rotateCatalogGeneration, saveCategorySnapshot } from './category-write-service.js';
 import { fetchXtreamCategories, fetchAllCategoryStreams } from './xtream.js';
 import type { XtreamConfig } from './xtream.js';
 import { matchRules } from './recording-scheduler.js';
@@ -46,14 +46,17 @@ let crawlAbortController: AbortController | null = null;
 let syncTimer: ReturnType<typeof setTimeout> | null = null;
 let scheduledCrawlTimer: ReturnType<typeof setTimeout> | null = null;
 
-export function getStatus(): SyncState & { crawlAvailable: boolean; contentTypeCounts: Record<string, number> } {
+export function getStatus(snapshot?: import('./channel-read-worker.js').DirectoryStatusSnapshot): SyncState & { crawlAvailable: boolean; contentTypeCounts: Record<string, number> } {
   if (!state.isSyncing) {
-    state.channelCount = getChannelCount();
-    state.categoryCount = getCategoryCount();
-    state.lastSyncTime = parseInt(getConfig('last_sync_time', '0'), 10);
-    state.lastCrawlTime = parseInt(getConfig('last_crawl_time', '0'), 10);
+    state.channelCount = snapshot?.channelCount ?? getChannelCount();
+    state.categoryCount = snapshot?.categoryCount ?? getCategoryCount();
+    state.lastSyncTime = snapshot?.lastSyncTime ?? parseInt(getConfig('last_sync_time', '0'), 10);
+    state.lastCrawlTime = snapshot?.lastCrawlTime ?? parseInt(getConfig('last_crawl_time', '0'), 10);
   }
 
+  if (snapshot) {
+    return { ...state, crawlAvailable: !state.isCrawling && snapshot.crawlConfigured, contentTypeCounts: snapshot.contentTypeCounts };
+  }
   // Compute content type counts for homepage browse section
   const inputMode = getConfig('input_mode', 'xtream');
   const contentTypeCounts: Record<string, number> = {};
@@ -123,6 +126,7 @@ export async function startCrawl(): Promise<void> {
   const controller = new AbortController();
   crawlAbortController = controller;
   const { signal } = controller;
+  const catalogGeneration = getCatalogGeneration();
   state.isCrawling = true;
   state.crawlProgress = 'Starting full stream crawl...';
   logger.info('Starting full stream crawl...');
@@ -139,10 +143,7 @@ export async function startCrawl(): Promise<void> {
     const totalStreams = await fetchAllCategoryStreams(
       config,
       allCats,
-      (catId, channels) => {
-        saveChannelsForCategory(catId, channels);
-        markCategoryFetched(catId, channels.length);
-      },
+      (catId, channels) => saveCategorySnapshot(catId, channels, catalogGeneration),
       2, // 2 concurrent workers (avoid overwhelming upstream server)
       signal,
     );
@@ -181,6 +182,7 @@ export async function startCrawl(): Promise<void> {
 export function cancelCrawl(): void {
   if (crawlAbortController && !crawlAbortController.signal.aborted) {
     crawlAbortController.abort();
+    rotateCatalogGeneration();
     state.crawlProgress = 'Cancelling crawl...';
     logger.info('Crawl cancellation requested');
   }

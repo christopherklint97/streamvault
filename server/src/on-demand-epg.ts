@@ -7,9 +7,9 @@ const BATCH_SIZE = 10;
 const MAX_PENDING = 100;
 
 type Dependencies = {
-  read: (ids: string[], from: number, to: number) => DBProgram[];
+  read: (ids: string[], from: number, to: number) => DBProgram[] | Promise<DBProgram[]>;
   fetch: (config: XtreamConfig, ids: number[], prefix: string, limit: number) => Promise<DBProgram[]>;
-  save: (programs: DBProgram[]) => void;
+  save: (programs: DBProgram[]) => void | Promise<void>;
   getConfig: () => XtreamConfig | null;
   warn: (message: string) => void;
 };
@@ -41,7 +41,7 @@ export function createOnDemandEpg({ read, fetch, save, getConfig, warn }: Depend
           const config = getConfig();
           if (config) {
             const programs = await fetch(config, ids, 'live_', 30);
-            if (programs.length > 0) save(programs);
+            if (programs.length > 0) await save(programs);
           }
         } catch (error) {
           warn(`On-demand EPG refresh failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -66,8 +66,8 @@ export function createOnDemandEpg({ read, fetch, save, getConfig, warn }: Depend
   }
 
   return {
-    get(channelIds: string[], from: number, to: number): DBProgram[] {
-      const programs = read(channelIds, from, to);
+    async get(channelIds: string[], from: number, to: number): Promise<DBProgram[]> {
+      const programs = await read(channelIds, from, to);
       const now = Date.now();
       if (to <= now || !getConfig()) return programs;
       const neededAt = Math.max(from, now);

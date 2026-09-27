@@ -385,7 +385,7 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
 export async function fetchAllCategoryStreams(
   config: XtreamConfig,
   categories: Array<{ id: string; name: string }>,
-  onCategoryDone: (categoryId: string, channels: DBChannel[]) => void,
+  onCategoryDone: (categoryId: string, channels: DBChannel[]) => void | Promise<void>,
   concurrency = 2,
   signal?: AbortSignal,
 ): Promise<number> {
@@ -406,7 +406,8 @@ export async function fetchAllCategoryStreams(
         try {
           const channels = await fetchXtreamStreamsByCategory(config, cat.id, cat.name, timeout, signal);
           if (signal?.aborted) return;
-          onCategoryDone(cat.id, channels);
+          await onCategoryDone(cat.id, channels);
+          if (signal?.aborted) return;
           totalFetched += channels.length;
           completed++;
           consecutiveErrors = 0;

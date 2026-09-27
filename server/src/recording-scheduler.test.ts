@@ -11,6 +11,11 @@ const state = vi.hoisted(() => ({
   programQueries: [] as unknown[][],
   lifecycleCalls: [] as string[],
   ruleUpdates: [] as Array<{ id: string; updates: Partial<DBRecordingRule> }>,
+  quotaGb: 50,
+  usageBytes: 0,
+  activeViewers: new Set<string>(),
+  deletedIds: [] as string[],
+  cacheRemoved: [] as string[],
 }));
 
 vi.mock('./db.js', () => ({
@@ -64,9 +69,9 @@ vi.mock('./db.js', () => ({
     if (existing) Object.assign(existing, updates);
   },
   getRecordingsByStatus: (status: string) => state.recordings.filter(recording => recording.status === status),
-  getRecordings: () => [],
-  deleteRecording: vi.fn(),
-  getConfig: (_key: string, fallback = '') => fallback,
+  getRecordings: (filter: { status?: string }) => state.recordings.filter(item => item.status === filter.status),
+  deleteRecording: (id: string) => { state.deletedIds.push(id); state.recordings = state.recordings.filter(item => item.id !== id); },
+  getConfig: (key: string, fallback = '') => key === 'recording_max_disk_gb' ? String(state.quotaGb) : key === 'recording_retention_days' ? '0' : fallback,
   saveProgramsForChannels: vi.fn(),
 }));
 
@@ -74,13 +79,20 @@ vi.mock('./recorder.js', () => ({
   startRecording: vi.fn(async (id: string) => { state.lifecycleCalls.push(`start:${id}`); }),
   stopRecording: vi.fn(async (id: string) => { state.lifecycleCalls.push(`stop:${id}`); }),
   getActiveCount: () => 0,
-  getRecordingsDiskUsage: () => 0,
-  deleteRecordingFile: vi.fn(async () => 0),
+  getRecordingsDiskUsageAsync: async () => state.usageBytes,
+  getRecordingMasterFilePath: (id: string) => state.recordings.find(item => item.id === id)?.master_file_path ? `${id}.ts` : null,
+  deleteRecordingFile: vi.fn(async () => { state.usageBytes -= 1_073_741_824; return 1_073_741_824; }),
   enforceAllRuleRetentions: vi.fn(async () => {}),
 }));
 
 vi.mock('./xtream.js', () => ({ fetchXtreamShortEpg: vi.fn() }));
 vi.mock('./rule-epg-refresh.js', () => ({ refreshRuleChannelPrograms: vi.fn() }));
+vi.mock('./recording-vod-hls.js', () => ({
+  getRecordingVodHlsState: async () => 'ready',
+  removeAbandonedRecordingVodStaging: async () => {},
+  removeRecordingVodHlsCache: async (master: string) => { state.cacheRemoved.push(master); state.usageBytes -= 268_435_456; },
+}));
+vi.mock('./recording-vod-routes.js', () => ({ hasActiveRecordingVodViewer: (id: string) => state.activeViewers.has(id) }));
 
 function rule(overrides: Partial<DBRecordingRule> = {}): DBRecordingRule {
   return {
@@ -123,6 +135,28 @@ beforeEach(() => {
   state.programQueries = [];
   state.lifecycleCalls = [];
   state.ruleUpdates = [];
+  state.quotaGb = 50;
+  state.usageBytes = 0;
+  state.activeViewers.clear();
+  state.deletedIds = [];
+  state.cacheRemoved = [];
+});
+
+describe('recording disk cleanup', () => {
+  it('never deletes a completed recording with an active VOD viewer under disk pressure', async () => {
+    state.quotaGb = 1;
+    state.usageBytes = 3 * 1_073_741_824;
+    state.activeViewers.add('watching');
+    state.recordings = [
+      recording({ id: 'watching', actual_end: 1, master_file_path: 'watching.ts' }),
+      recording({ id: 'other', actual_end: 2, master_file_path: 'other.ts' }),
+    ];
+    const { runCleanup } = await import('./recording-scheduler.js');
+    await runCleanup();
+    expect(state.cacheRemoved).toEqual(['other.ts']);
+    expect(state.deletedIds).toEqual(['other']);
+    expect(state.recordings.some(rec => rec.id === 'watching')).toBe(true);
+  });
 });
 
 describe('recording scheduler rule integration', () => {

@@ -10,7 +10,9 @@ import type {
 import { cn } from '../utils/cn';
 import FocusZone from '../components/FocusZone';
 import { getRecordingAnalysisStatus, getRecordingCommercialSeconds } from '../utils/recording-commercial';
-import { getRecordingPlaybackUrl } from '../services/recordingPlayback';
+import { getRecordingPlaybackUrl, getRecordingVodStatus } from '../services/recordingPlayback';
+import { isAppleMobile } from '../utils/platform';
+import { recordingTransport } from '../utils/recording-transport';
 import {
   createRecordingRuleDraft,
   minutesToRuleTime,
@@ -899,6 +901,9 @@ export default function Recordings() {
         recordingId: rec.id,
         directUrl,
       });
+      const vodReady = recordingTransport(rec.file_path) === 'mpegts' && isAppleMobile()
+        ? await getRecordingVodStatus(apiBaseUrl, rec.id).then(status => status === 'ready').catch(() => false)
+        : false;
       setChannel({
         id: `recording_${rec.id}`,
         name: rec.title,
@@ -908,6 +913,9 @@ export default function Recordings() {
         region: '',
         contentType: 'movies',
         recordingId: rec.id,
+        recordingTransport: recordingTransport(rec.file_path),
+        recordingSize: rec.file_size,
+        recordingVodReady: vodReady,
         duration: rec.duration,
       });
       navigate('player');

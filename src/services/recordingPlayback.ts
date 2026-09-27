@@ -1,5 +1,14 @@
 import { ApiError, apiFetch, hasStoredApiToken } from './api';
 
+export type RecordingVodStatus = 'missing' | 'preparing' | 'ready';
+
+export async function getRecordingVodStatus(apiBaseUrl: string, recordingId: string): Promise<RecordingVodStatus> {
+  const response = await apiFetch<{ status: RecordingVodStatus }>(
+    apiBaseUrl, `/api/recordings/${encodeURIComponent(recordingId)}/vod-status`,
+  );
+  return response.status;
+}
+
 interface PlaybackTicketResponse {
   url: string;
   expiresAt: number;

@@ -19,6 +19,8 @@ import {
 } from '../utils/subtitles';
 import { streamWebVttCues } from '../utils/webvtt-stream';
 import { isAppleMobile } from '../utils/platform';
+import { recordingHlsPath } from '../utils/recording-transport';
+import { getRecordingPlaybackUrl, getRecordingVodStatus } from '../services/recordingPlayback';
 import { getHtml5WatchProgress, getResumePosition } from '../utils/media-progress';
 import { LiveStreamRecovery } from '../utils/live-stream-recovery';
 import { hasDecodedFrameProgress, withLiveStreamOptions } from '../utils/live-stream-options';
@@ -102,12 +104,36 @@ function beginCommercialPlayback(channel: Channel): number {
 let activeMpegtsPlayer: MpegtsType.Player | null = null;
 let bgProgressInterval: ReturnType<typeof setInterval> | null = null;
 let bgBufferTimer: ReturnType<typeof setTimeout> | null = null;
+let recordingVodPoll: ReturnType<typeof setInterval> | null = null;
 let html5PlaybackGeneration = 0;
 let restartActiveLiveStream: (() => void) | null = null;
 let activeBrowserSubtitleController: AbortController | null = null;
 let activeBrowserTextTrack: TextTrack | null = null;
 const browserProgrammaticTextTracks = new WeakSet<TextTrack>();
 const browserSubtitleSession = new BrowserSubtitleSession();
+
+function clearRecordingVodPoll(): void {
+  if (recordingVodPoll) clearInterval(recordingVodPoll);
+  recordingVodPoll = null;
+}
+
+/** Replace a rolling playlist with finite VOD without losing absolute watch time. */
+function loadFiniteRecordingHls(video: HTMLVideoElement, url: string, positionSeconds: number): void {
+  video.dataset.streamOffset = '0';
+  const target = Number.isFinite(positionSeconds) ? Math.max(0, positionSeconds) : 0;
+  video.addEventListener('loadedmetadata', () => {
+    if (!Number.isFinite(video.duration) || video.duration <= 0) {
+      toast('Seekable recording is not ready yet');
+      return;
+    }
+    if (target > 0) {
+      video.addEventListener('seeked', () => { void video.play().catch(() => {}); }, { once: true });
+      video.currentTime = Math.min(target, Math.max(0, video.duration - 1));
+    } else void video.play().catch(() => {});
+  }, { once: true });
+  video.src = url;
+  video.load();
+}
 
 function clearBrowserSubtitleTrack(): void {
   activeBrowserSubtitleController?.abort();
@@ -315,6 +341,7 @@ export function stopActivePlayback() {
   log.info('⏹ stopPlayback()');
 
   stopBgProgressTracking();
+  clearRecordingVodPoll();
   html5PlaybackGeneration += 1;
   playbackClock.reset();
   resetManualSeekIntent();
@@ -740,7 +767,9 @@ export function usePlayer(): {
         if (startupStarted) return;
         startupStarted = true;
         try {
-          if (resumePosition > 0 && !needsBrowserTranscode && !appleMobileVodPath) {
+          if (resumePosition > 0 && !needsBrowserTranscode && !appleMobileVodPath &&
+              (!appleRecordingHlsPath || channel.recordingVodReady) &&
+              (!isFiniteTsRecording || video.duration > 0)) {
             const resumeTarget = getInitialResumeTarget(resumePosition, video.duration);
             await retryPlaybackSeek(() => seekHtml5(video, resumeTarget));
           }
@@ -825,13 +854,17 @@ export function usePlayer(): {
 
       const isRecording = Boolean(channel.recordingId);
       // Recordings have a direct server URL; live/VOD go through stream proxy
+      const isFiniteTsRecording = isRecording && channel.recordingTransport === 'mpegts';
       const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
+      const appleRecordingHlsPath = isFiniteTsRecording && isAppleMobile()
+        ? recordingHlsPath(channel.url, channel.recordingVodReady ? 0 : resumePosition)
+        : null;
       const appleMobileVodPath = isAppleMobile()
         ? iphoneVodPlaybackPath(channel.id, channel.url, channel.contentType, resumePosition)
         : null;
       const needsBrowserTranscode = !isLiveTs && !isRecording && !appleMobileVodPath;
       const playUrl = isRecording
-        ? channel.url
+        ? appleRecordingHlsPath ? `${apiBaseUrl}${appleRecordingHlsPath}` : channel.url
         : appleMobileVodPath
           ? `${apiBaseUrl}${appleMobileVodPath}`
             : needsBrowserTranscode
@@ -839,9 +872,9 @@ export function usePlayer(): {
             : getStreamUrl(channel.id, channel.url, isLiveTs ? true : keepSubsRef.current, isLiveTs, audioOnly);
       log.info(`HTML5: playUrl=${playUrl}, contentType=${channel.contentType}`);
 
-      if (isLiveTs) {
-        // Live TV: MPEG-TS stream — use mpegts.js to demux in browser
-        log.info('HTML5: loading mpegts.js for live MPEG-TS playback...');
+      if (isLiveTs || (isFiniteTsRecording && !appleRecordingHlsPath)) {
+        // Native video cannot demux a saved MPEG-TS master either.
+        log.info(`HTML5: loading mpegts.js for ${isLiveTs ? 'live' : 'recorded'} MPEG-TS playback...`);
         setupEvents();
         const syncLiveSubtitleTracks = () => {
           if (!isCurrentPlayback()) return;
@@ -865,18 +898,23 @@ export function usePlayer(): {
           log.info(`HTML5: mpegts.js loaded, isSupported=${mpegts.isSupported()}`);
           if (!mpegts.isSupported()) {
             log.error('HTML5: mpegts.js not supported');
-            disableLiveStreamRecovery();
-            setError('Live TV playback not supported on this browser');
+            if (isLiveTs) disableLiveStreamRecovery();
+            setError(isLiveTs ? 'Live TV playback not supported on this browser' : 'Recording playback not supported on this browser');
             return;
           }
           const player = mpegts.createPlayer({
             type: 'mpegts',
-            isLive: true,
+            isLive: isLiveTs,
             url: playUrl,
+            ...(!isLiveTs && channel.duration ? { duration: channel.duration * 1000 } : {}),
+            ...(!isLiveTs && channel.recordingSize ? { filesize: channel.recordingSize } : {}),
           }, {
             enableWorker: false,
             enableStashBuffer: true,
             stashInitialSize: 2 * 1024 * 1024,  // 2MB initial buffer — enough for first few seconds
+            lazyLoad: !isLiveTs,
+            lazyLoadMaxDuration: 25,
+            lazyLoadRecoverDuration: 10,
             autoCleanupSourceBuffer: true,
             autoCleanupMaxBackwardDuration: 60,
             autoCleanupMinBackwardDuration: 30,
@@ -889,14 +927,18 @@ export function usePlayer(): {
           player.on(mpegts.Events.ERROR, (type: string, detail: string, info: unknown) => {
             if (!isCurrentPlayback() || activeMpegtsPlayer !== player) return;
             log.error(`mpegts ERROR: type=${type} detail=${detail}`, info);
-            setStatus('loading');
-            liveStreamRecovery.transportEnded('mpegts-error');
+            if (isLiveTs) {
+              setStatus('loading');
+              liveStreamRecovery.transportEnded('mpegts-error');
+            } else setError(`Recording playback failed (${detail})`);
           });
           player.on(mpegts.Events.LOADING_COMPLETE, () => {
             if (!isCurrentPlayback() || activeMpegtsPlayer !== player) return;
             log.info('mpegts: loading complete');
-            setStatus('loading');
-            liveStreamRecovery.transportEnded('loading-complete');
+            if (isLiveTs) {
+              setStatus('loading');
+              liveStreamRecovery.transportEnded('loading-complete');
+            }
           });
           player.on(mpegts.Events.MEDIA_INFO, (info: unknown) => {
             log.info('mpegts: media info received', info);
@@ -905,7 +947,7 @@ export function usePlayer(): {
             if (!isCurrentPlayback() || activeMpegtsPlayer !== player) return;
             log.debug('mpegts: stats', info);
             const decodedFrames = (info as { decodedFrames?: number }).decodedFrames;
-            if (hasDecodedFrameProgress(lastDecodedFrames, decodedFrames)) {
+            if (isLiveTs && hasDecodedFrameProgress(lastDecodedFrames, decodedFrames)) {
               lastDecodedFrames = decodedFrames;
               liveStreamRecovery.progress();
             }
@@ -918,13 +960,14 @@ export function usePlayer(): {
             log.info('HTML5: mpegts.js load() called — waiting for canplay to start playback');
           } catch (e) {
             log.error('HTML5: mpegts.js attach/load/play threw', e);
-            liveStreamRecovery.transportEnded('mpegts-error');
+            if (isLiveTs) liveStreamRecovery.transportEnded('mpegts-error');
+            else setError('Failed to start recorded MPEG-TS playback');
           }
         }).catch((e) => {
           if (!isCurrentPlayback()) return;
           log.error('HTML5: failed to import mpegts.js', e);
-          disableLiveStreamRecovery();
-          setError('Failed to load live TV player');
+          if (isLiveTs) disableLiveStreamRecovery();
+          setError(isLiveTs ? 'Failed to load live TV player' : 'Failed to load recording player');
         });
       } else {
         // VOD (MP4, etc) — direct URL (no proxy needed, browser handles it)
@@ -934,9 +977,38 @@ export function usePlayer(): {
         // before playback starts. iOS Safari may clamp this without user
         // gesture, but Chrome/Edge/Android honor it.
         try { video.preload = 'auto'; } catch { /* ignore */ }
-        video.dataset.streamOffset = needsBrowserTranscode || appleMobileVodPath ? String(resumePosition) : '0';
+        video.dataset.streamOffset = needsBrowserTranscode || appleMobileVodPath || (appleRecordingHlsPath && !channel.recordingVodReady)
+          ? String(resumePosition) : '0';
         video.src = playUrl;
         video.load();
+
+        if (appleRecordingHlsPath && !channel.recordingVodReady && channel.recordingId) {
+          clearRecordingVodPoll();
+          const recordingId = channel.recordingId;
+          let checking = false;
+          recordingVodPoll = setInterval(() => {
+            if (checking) return;
+            if (!isCurrentPlayback()) { clearRecordingVodPoll(); return; }
+            checking = true;
+            void (async () => {
+              try {
+                if (await getRecordingVodStatus(apiBaseUrl, recordingId) !== 'ready' || !isCurrentPlayback()) return;
+                const freshUrl = await getRecordingPlaybackUrl({
+                  apiBaseUrl, recordingId,
+                  directUrl: `/api/recordings/${encodeURIComponent(recordingId)}/stream`,
+                });
+                if (!isCurrentPlayback()) return;
+                const position = Number(video.dataset.streamOffset || 0) + video.currentTime;
+                clearRecordingVodPoll();
+                usePlayerStore.setState({ currentChannel: { ...channel, recordingVodReady: true } });
+                loadFiniteRecordingHls(video, `${apiBaseUrl}${recordingHlsPath(freshUrl, 0)}`, position);
+                toast('Full recording is ready to seek');
+              } catch (error) {
+                if (isCurrentPlayback()) log.warn('Seekable recording status check failed', error);
+              } finally { checking = false; }
+            })();
+          }, 5_000);
+        }
 
         if (!isRecording) {
           void fetchBrowserSubtitleTracks(channel, apiBaseUrl).then((tracks) => {
@@ -1047,6 +1119,7 @@ export function usePlayer(): {
       const appleMobileVodPath = isAppleMobile()
         ? iphoneVodPlaybackPath(channel.id, channel.url, channel.contentType, targetTime)
         : null;
+      const appleRecordingHls = channel.recordingTransport === 'mpegts' && isAppleMobile();
       const usesTranscode = channel.contentType !== 'livetv' && !channel.id.startsWith('recording_') && !appleMobileVodPath;
       const restartSelectedSubtitles = () => {
         const track = subtitleTracksRef.current.find(
@@ -1062,7 +1135,32 @@ export function usePlayer(): {
           );
         }
       };
-      if (appleMobileVodPath) {
+      if (appleRecordingHls && channel.recordingId) {
+        const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
+        const recordingId = channel.recordingId;
+        const seekGeneration = html5PlaybackGeneration;
+        void (async () => {
+          const status = await getRecordingVodStatus(apiBaseUrl, recordingId)
+            .catch(() => channel.recordingVodReady ? 'ready' : 'missing');
+          const freshUrl = await getRecordingPlaybackUrl({
+            apiBaseUrl, recordingId,
+            directUrl: `/api/recordings/${encodeURIComponent(recordingId)}/stream`,
+          });
+          if (html5PlaybackGeneration !== seekGeneration ||
+              usePlayerStore.getState().currentChannel?.id !== channel.id ||
+              latestManualSeekTarget !== targetTime) return;
+          if (status === 'ready') {
+            clearRecordingVodPoll();
+            usePlayerStore.setState({ currentChannel: { ...channel, recordingVodReady: true } });
+            loadFiniteRecordingHls(video, `${apiBaseUrl}${recordingHlsPath(freshUrl, 0)}`, targetTime);
+          } else {
+            video.dataset.streamOffset = String(targetTime);
+            video.src = `${apiBaseUrl}${recordingHlsPath(freshUrl, targetTime)}`;
+            video.load();
+            void video.play().catch(() => {});
+          }
+        })().catch(error => toast(`Recording seek failed: ${error instanceof Error ? error.message : String(error)}`));
+      } else if (appleMobileVodPath) {
         const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
         video.dataset.streamOffset = String(targetTime);
         video.src = `${apiBaseUrl}${appleMobileVodPath}`;

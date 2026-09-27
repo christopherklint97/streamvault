@@ -76,6 +76,25 @@ describe('commercial auto-skip config', () => {
     vi.useRealTimers();
   });
 
+  it('loads and extends the All-channel catalog in bounded cursor pages', async () => {
+    useChannelStore.setState({ selectedGroup: 'All' });
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        channels: [{ id: 'c1', name: 'One' }], total: 28560, groups: ['All'], regions: ['All'],
+        contentTypeCounts: { livetv: 1 }, nextCursor: { sort: 1, name: 'One', id: 'c1' },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        channels: [{ id: 'c2', name: 'Two' }], total: 28560, nextCursor: { sort: 2, name: 'Two' },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    await useChannelStore.getState().fetchChannels();
+    expect(new URL(String(fetchMock.mock.calls[0][0]), 'https://streamvault.test').searchParams.get('limit')).toBe('20');
+    await useChannelStore.getState().fetchMoreChannels();
+    expect(new URL(String(fetchMock.mock.calls[1][0]), 'https://streamvault.test').searchParams.get('cursorSort')).toBe('1');
+    expect(new URL(String(fetchMock.mock.calls[1][0]), 'https://streamvault.test').searchParams.get('cursorId')).toBe('c1');
+    expect(useChannelStore.getState().channels.map(channel => channel.id)).toEqual(['c1', 'c2']);
+    expect(useChannelStore.getState().channelCount).toBe(28560);
+  });
+
   it('reports failure and leaves commercial auto-skip unchanged when persistence fails', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('nope', { status: 500, statusText: 'Broken' }));
 

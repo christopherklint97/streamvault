@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { getRecordingPlaybackUrl } from './recordingPlayback';
+import { getRecordingPlaybackUrl, getRecordingVodStatus } from './recordingPlayback';
 
 function json(body: unknown, status = 200, statusText = ''): Response {
   return new Response(JSON.stringify(body), {
@@ -48,6 +48,14 @@ describe('authenticated recording playback tickets', () => {
       directUrl: '/api/recordings/r1/play',
       pageOrigin: 'https://app.example.test',
     })).resolves.toBe('/api/recordings/r1/play?ticket=one-time');
+  });
+
+  it('reads a seekable recording status with the configured API credentials', async () => {
+    localStorage.setItem('streamvault_auth_token', JSON.stringify('secret'));
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ status: 'ready' }));
+    await expect(getRecordingVodStatus('https://dvr.example.test', 'r1')).resolves.toBe('ready');
+    expect(fetchMock.mock.calls[0][0]).toBe('https://dvr.example.test/api/recordings/r1/vod-status');
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('x-streamvault-token')).toBe('secret');
   });
 
   it('falls back only for an unavailable ticket endpoint when no authentication token is configured', async () => {
