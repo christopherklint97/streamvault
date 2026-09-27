@@ -744,6 +744,28 @@ export function usePlayer(): {
       let startupStarted = false;
       let canPlay = false;
       let playAttempted = false;
+      let pendingLiveEof = false;
+      let eofSettled = false;
+      const recoverDrainedLiveStream = (force = false) => {
+        // mpegts.js emits LOADING_COMPLETE before its final MSE append settles.
+        // Keep EOF pending through an intentional pause so resume can recover.
+        if (!pendingLiveEof || !eofSettled || !isCurrentPlayback() ||
+            liveStreamRecovery.isSuspended()) return;
+        if (!force) {
+          const position = video.currentTime;
+          let ahead = 0;
+          for (let i = 0; i < video.buffered.length; i++) {
+            if (video.buffered.start(i) <= position + 0.25 && video.buffered.end(i) > position) {
+              ahead = video.buffered.end(i) - position;
+              break;
+            }
+          }
+          if (ahead > 3) return;
+        }
+        pendingLiveEof = false;
+        setStatus('loading');
+        liveStreamRecovery.transportEnded('loading-complete');
+      };
       const updateHtml5Clock = () => {
         routePlaybackClock(
           playbackClock,
@@ -813,8 +835,12 @@ export function usePlayer(): {
           canPlay = true;
           attemptPlay();
         };
+        video.onplay = () => recoverDrainedLiveStream();
         video.onwaiting = () => {
           log.debug('HTML5 event: waiting');
+          // A completed transport can still have playable MSE data. Reconnect
+          // only when it is actually exhausted, not while it is buffered.
+          if (pendingLiveEof) recoverDrainedLiveStream();
           // Delay showing loading spinner to avoid flashing during brief rebuffers
           if (bgBufferTimer) clearTimeout(bgBufferTimer);
           bgBufferTimer = setTimeout(() => setStatus('loading'), 1500);
@@ -830,6 +856,7 @@ export function usePlayer(): {
           if (!isLiveTs || !isCurrentPlayback() || video.currentTime <= lastMediaTime) return;
           lastMediaTime = video.currentTime;
           liveStreamRecovery.progress();
+          recoverDrainedLiveStream();
         };
         video.onstalled = () => {
           log.warn('HTML5 event: stalled');
@@ -851,6 +878,7 @@ export function usePlayer(): {
         video.onended = () => {
           log.info('HTML5 event: ended');
           if (isLiveTs && isCurrentPlayback()) {
+            if (pendingLiveEof) { recoverDrainedLiveStream(true); return; }
             setStatus('loading');
             liveStreamRecovery.transportEnded('media-ended');
             return;
@@ -948,8 +976,14 @@ export function usePlayer(): {
             if (!isCurrentPlayback() || activeMpegtsPlayer !== player) return;
             log.info('mpegts: loading complete');
             if (isLiveTs) {
-              setStatus('loading');
-              liveStreamRecovery.transportEnded('loading-complete');
+              pendingLiveEof = true;
+              eofSettled = false;
+              // The final SourceBuffer update can land after LOADING_COMPLETE.
+              setTimeout(() => {
+                if (!isCurrentPlayback() || activeMpegtsPlayer !== player) return;
+                eofSettled = true;
+                recoverDrainedLiveStream();
+              }, 750);
             }
           });
           player.on(mpegts.Events.MEDIA_INFO, (info: unknown) => {

@@ -85,6 +85,102 @@ describe('usePlayer manual seek integration', () => {
     await act(async () => hookRef.current?.stop());
   });
 
+  it('keeps playing buffered live media after upstream EOF until the buffer tail', async () => {
+    usePlayerStore.setState({ currentChannel: {
+      id: 'live_71984', name: 'NFL Redzone', url: '/api/stream/live_71984',
+      logo: '', group: '', region: '', contentType: 'livetv',
+    } });
+    Object.defineProperty(video, 'buffered', { configurable: true, value: {
+      length: 1, start: () => 0, end: () => 90,
+    } });
+    video.currentTime = 40;
+    try {
+      await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
+      await vi.waitFor(() => expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(1));
+      const player = mpegtsMock.createPlayer.mock.results[0].value;
+      const complete = (player.on.mock.calls as unknown as Array<[string, () => void]>)
+        .find(([event]) => event === 'complete')?.[1];
+      expect(complete).toBeDefined();
+      usePlayerStore.setState({ status: 'playing' });
+
+      await act(async () => { complete?.(); await Promise.resolve(); });
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 350)); });
+      expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(1);
+      expect(usePlayerStore.getState().status).toBe('playing');
+      await act(async () => video.dispatchEvent(new Event('waiting')));
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 500)); });
+      expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(1);
+
+      video.currentTime = 88;
+      await act(async () => video.dispatchEvent(new Event('timeupdate')));
+      await vi.waitFor(() => expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(2));
+    } finally {
+      await act(async () => hookRef.current?.stop());
+    }
+  });
+
+  it('waits for final MSE append before treating live EOF as an empty buffer', async () => {
+    usePlayerStore.setState({ currentChannel: {
+      id: 'live_71984', name: 'NFL Redzone', url: '/api/stream/live_71984',
+      logo: '', group: '', region: '', contentType: 'livetv',
+    } });
+    let bufferEnd = 0;
+    Object.defineProperty(video, 'buffered', { configurable: true, get: () => ({
+      length: bufferEnd ? 1 : 0, start: () => 0, end: () => bufferEnd,
+    }) });
+    video.currentTime = 40;
+    try {
+      await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
+      await vi.waitFor(() => expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(1));
+      const player = mpegtsMock.createPlayer.mock.results[0].value;
+      const complete = (player.on.mock.calls as unknown as Array<[string, () => void]>)
+        .find(([event]) => event === 'complete')?.[1];
+      expect(complete).toBeDefined();
+      usePlayerStore.setState({ status: 'playing' });
+      await act(async () => { complete?.(); await Promise.resolve(); });
+      bufferEnd = 90; // final SourceBuffer update becomes visible after LOADING_COMPLETE
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 900)); });
+      expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(1);
+      expect(usePlayerStore.getState().status).not.toBe('loading');
+    } finally {
+      await act(async () => hookRef.current?.stop());
+    }
+  });
+
+  it('retains live EOF recovery while paused and reconnects on resume', async () => {
+    usePlayerStore.setState({ currentChannel: {
+      id: 'live_71984', name: 'NFL Redzone', url: '/api/stream/live_71984',
+      logo: '', group: '', region: '', contentType: 'livetv',
+    } });
+    let paused = false;
+    Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
+    vi.spyOn(video, 'pause').mockImplementation(() => { paused = true; });
+    vi.spyOn(video, 'play').mockImplementation(async () => { paused = false; });
+    Object.defineProperty(video, 'buffered', { configurable: true, value: {
+      length: 1, start: () => 0, end: () => 41,
+    } });
+    video.currentTime = 40;
+    try {
+      await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
+      await vi.waitFor(() => expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(1));
+      const player = mpegtsMock.createPlayer.mock.results[0].value;
+      const complete = (player.on.mock.calls as unknown as Array<[string, () => void]>)
+        .find(([event]) => event === 'complete')?.[1];
+      expect(complete).toBeDefined();
+      await act(async () => video.dispatchEvent(new Event('loadeddata')));
+      await act(async () => video.dispatchEvent(new Event('canplay')));
+      await act(async () => hookRef.current?.togglePlay());
+      expect(paused).toBe(true);
+      await act(async () => { complete?.(); await Promise.resolve(); });
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 350)); });
+      expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(1);
+      await act(async () => { hookRef.current?.togglePlay(); video.dispatchEvent(new Event('play')); });
+      await vi.waitFor(() => expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(2));
+    } finally {
+      await act(async () => hookRef.current?.stop());
+    }
+  });
+
   it('sends a TS-only iPhone recording through native HLS, not a whole-file MSE demux', async () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15');
     usePlayerStore.setState({ currentChannel: {
