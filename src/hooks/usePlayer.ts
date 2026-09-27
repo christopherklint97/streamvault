@@ -937,6 +937,17 @@ export function usePlayer(): {
         });
       } else if (channel.dvrHls) {
         setupEvents();
+        const syncDvrSubtitleTracks = () => {
+          if (!isCurrentPlayback()) return;
+          const tracks = getHtml5SubtitleTracks(video.textTracks,
+            textTrack => !browserProgrammaticTextTracks.has(textTrack));
+          const selectedIndex = selectPreferredSubtitleTrack(tracks, keepSubsRef.current, getSubtitleLanguage());
+          applyHtml5SubtitleSelection(video, selectedIndex);
+          browserSubtitleSession.replace(channel.id, tracks, selectedIndex);
+        };
+        video.textTracks.onaddtrack = syncDvrSubtitleTracks;
+        video.textTracks.onremovetrack = syncDvrSubtitleTracks;
+        syncDvrSubtitleTracks();
         video.dataset.streamOffset = '0';
         void attachFiniteHls(video, playUrl, detail => {
           if (isCurrentPlayback()) setError(`DVR playback failed: ${detail}`);
