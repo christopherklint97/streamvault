@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { parsePublishedSegments, hlsCaptureArgs, hasArchiveReserve, hasArchiveCapacity, nextArchiveEpoch } from './archive-capture.js';
 import { ArchiveCapture } from './archive-capture.js';
 import { createArchiveStore, ensureArchiveSchema } from './archive-store.js';
@@ -7,6 +7,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 
 describe('stream-copy HLS capture', () => {
   it('recovers every committed entry from an interrupted session and deletes unindexed artifacts', () => {
@@ -106,4 +108,124 @@ describe('stream-copy HLS capture', () => {
       expect(store.overlap('c', 0, Date.now() + 1000)).toHaveLength(2);
     } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   }, 20_000);
+
+  it('terminates a silent archive writer once and forces it closed if SIGINT hangs', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-silent-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('c', 'C', true, 24);
+    vi.useFakeTimers();
+    try {
+      const capture = new ArchiveCapture(store, root, 3001);
+      const kill = vi.fn(() => true);
+      const writer = { process: { kill }, directory: root, epoch: Date.now(),
+        lastPublishedAt: Date.now() - 119_000, timer: setInterval(() => {}, 1_000_000) };
+      const internals = capture as unknown as { writers: Map<string, typeof writer>; poll: (id: string) => void };
+      internals.writers.set('c', writer);
+      internals.poll('c');
+      expect(kill).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(2_000);
+      internals.poll('c');
+      internals.poll('c');
+      expect(kill).toHaveBeenCalledTimes(1);
+      expect(kill).toHaveBeenCalledWith('SIGINT');
+      expect(store.getArchive('c')?.status).toBe('retrying');
+      vi.advanceTimersByTime(5_000);
+      expect(kill).toHaveBeenCalledTimes(2);
+      expect(kill).toHaveBeenLastCalledWith('SIGKILL');
+      clearInterval(writer.timer);
+    } finally { vi.useRealTimers(); db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('counts newly published segments as writer progress before checking for a stall', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-progress-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('c', 'C', true, 24);
+    const dir = path.join(root, 'archive', 'c', '11111111-1111-4111-8111-111111111111');
+    fs.mkdirSync(dir, { recursive: true });
+    const name = 'chunk-000000000.ts';
+    fs.writeFileSync(path.join(dir, name), 'complete');
+    fs.writeFileSync(path.join(dir, 'current.m3u8'), `#EXTM3U\n#EXTINF:20,\n${name}\n`);
+    try {
+      const capture = new ArchiveCapture(store, root, 3001);
+      const kill = vi.fn(() => true);
+      const writer = { process: { kill }, directory: dir, epoch: Date.now(),
+        lastPublishedAt: Date.now() - 130_000, timer: setInterval(() => {}, 1_000_000) };
+      const internals = capture as unknown as { writers: Map<string, typeof writer>; poll: (id: string) => void };
+      internals.writers.set('c', writer);
+      internals.poll('c');
+      expect(store.overlap('c', 0, Date.now() + 1_000)).toHaveLength(1);
+      expect(kill).not.toHaveBeenCalled();
+      expect(writer.lastPublishedAt).toBeGreaterThan(Date.now() - 2_000);
+      clearInterval(writer.timer);
+    } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('restarts a stuck FFmpeg child after forced close and the bounded retry delay', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-retry-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('c', 'C', true, 24);
+    vi.useFakeTimers();
+    const pinnedFile = path.join(root, 'archive', 'c', 'prior', 'chunk-000000000.ts');
+    fs.mkdirSync(path.dirname(pinnedFile), { recursive: true });
+    fs.writeFileSync(pinnedFile, 'saved media');
+    store.publish({ id: 'prior-chunk-000000000.ts', channelId: 'c', start: Date.now() - 20_000,
+      end: Date.now(), duration: 20, path: path.relative(root, pinnedFile), size: 11, epoch: 1 });
+    const snapshot = store.createSnapshot('c', Date.now() - 20_000, Date.now(), Date.now(), Date.now() + 3_600_000);
+    const child = () => Object.assign(new EventEmitter(), { stderr: new EventEmitter(), kill: vi.fn(() => true) });
+    const first = child(), second = child();
+    const spawnWriter = vi.fn().mockReturnValueOnce(first as unknown as ChildProcess)
+      .mockReturnValueOnce(second as unknown as ChildProcess);
+    try {
+      const capture = new ArchiveCapture(store, root, 3001, undefined,
+        spawnWriter as unknown as typeof import('node:child_process').spawn);
+      capture.start('c');
+      expect(spawnWriter).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(120_000);
+      expect(first.kill).toHaveBeenCalledWith('SIGINT');
+      vi.advanceTimersByTime(5_000);
+      expect(first.kill).toHaveBeenCalledWith('SIGKILL');
+      first.emit('close', null, 'SIGKILL');
+      expect(store.getArchive('c')?.status).toBe('retrying');
+      vi.advanceTimersByTime(9_999);
+      expect(spawnWriter).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(1);
+      expect(spawnWriter).toHaveBeenCalledTimes(2);
+      expect(store.snapshot(snapshot.id)?.chunks).toHaveLength(1);
+      expect(fs.existsSync(pinnedFile)).toBe(true);
+      const stopped = capture.stopAll();
+      second.emit('close', null, 'SIGINT');
+      await stopped;
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('keeps a capacity outage in storage_low with a slower retry after child exit', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-capacity-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('c', 'C', true, 24);
+    const prior = process.env.STREAMVAULT_ARCHIVE_RESERVE_GB;
+    delete process.env.STREAMVAULT_ARCHIVE_RESERVE_GB;
+    vi.useFakeTimers();
+    const first = Object.assign(new EventEmitter(), { stderr: new EventEmitter(), kill: vi.fn(() => true) });
+    const spawnWriter = vi.fn(() => first as unknown as ChildProcess);
+    try {
+      const capture = new ArchiveCapture(store, root, 3001, undefined,
+        spawnWriter as unknown as typeof import('node:child_process').spawn);
+      capture.start('c');
+      process.env.STREAMVAULT_ARCHIVE_RESERVE_GB = '10000';
+      vi.advanceTimersByTime(2_000);
+      expect(first.kill).toHaveBeenCalledWith('SIGINT');
+      first.emit('close', null, 'SIGINT');
+      expect(store.getArchive('c')?.status).toBe('storage_low');
+      vi.advanceTimersByTime(10_000);
+      expect(spawnWriter).toHaveBeenCalledTimes(1);
+      await capture.stopAll();
+      expect((capture as unknown as { retry: Map<string, unknown> }).retry.size).toBe(0);
+      vi.advanceTimersByTime(60_000);
+      expect(spawnWriter).toHaveBeenCalledTimes(1);
+    } finally {
+      if (prior === undefined) delete process.env.STREAMVAULT_ARCHIVE_RESERVE_GB;
+      else process.env.STREAMVAULT_ARCHIVE_RESERVE_GB = prior;
+      vi.clearAllTimers(); vi.useRealTimers(); db.close(); fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

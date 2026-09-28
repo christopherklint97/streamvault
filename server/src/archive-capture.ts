@@ -8,6 +8,21 @@ import type { ArchiveStore } from './archive-store.js';
 const GIB = 1024 * 1024 * 1024;
 const RESERVE_BYTES = 20 * GIB;
 const MAX_ARCHIVE_BYTES = 400 * GIB;
+// A live ESPN HLS writer should commit a segment about every twenty seconds.
+// A stalled proxy connection can leave FFmpeg alive indefinitely without output.
+const WRITER_STALE_MS = 120_000;
+const WRITER_KILL_GRACE_MS = 5_000;
+type ArchiveWriter = {
+  process: ChildProcess;
+  timer: ReturnType<typeof setInterval>;
+  directory: string;
+  epoch: number;
+  lastPublishedAt: number;
+  terminationRequested?: boolean;
+  forceKillTimer?: ReturnType<typeof setTimeout>;
+  stale?: boolean;
+  capacityError?: string;
+};
 export function hasArchiveReserve(freeBytes: number, reserveBytes = RESERVE_BYTES): boolean {
   return Number.isFinite(freeBytes) && freeBytes > reserveBytes;
 }
@@ -55,11 +70,12 @@ export function parsePublishedSegments(manifest: string) {
 /** A writer is unique per channel. FFmpeg atomically renames .tmp files and
  * playlists. Rollover recovery probes only older, finalized unlisted files. */
 export class ArchiveCapture {
-  private readonly writers = new Map<string, { process: ChildProcess; timer: ReturnType<typeof setInterval>; directory: string; epoch: number }>();
+  private readonly writers = new Map<string, ArchiveWriter>();
   private retry = new Map<string, ReturnType<typeof setTimeout>>();
   private stopping = false;
   constructor(private readonly store: ArchiveStore, private readonly root: string, private readonly port: number,
-    private readonly onPublished: (channelId: string) => void = () => {}) {}
+    private readonly onPublished: (channelId: string) => void = () => {},
+    private readonly spawnWriter: typeof spawn = spawn) {}
 
   private capacityError(): string | null {
     const reserve = gigabytes(process.env.STREAMVAULT_ARCHIVE_RESERVE_GB, 20);
@@ -89,20 +105,24 @@ export class ArchiveCapture {
     const directory = path.join(this.root, 'archive', encodeURIComponent(channelId), session);
     fs.mkdirSync(directory, { recursive: true });
     const url = `http://127.0.0.1:${this.port}/api/stream/${encodeURIComponent(channelId)}?subs=1`;
-    const proc = spawn('ffmpeg', hlsCaptureArgs(url, directory, process.env.STREAMVAULT_AUTH_TOKEN), { stdio: ['ignore', 'ignore', 'pipe'] });
-    const writer = { process: proc, directory, epoch: Date.now(), timer: setInterval(() => this.poll(channelId), 2_000) };
+    const proc = this.spawnWriter('ffmpeg', hlsCaptureArgs(url, directory, process.env.STREAMVAULT_AUTH_TOKEN), { stdio: ['ignore', 'ignore', 'pipe'] });
+    const writer: ArchiveWriter = { process: proc, directory, epoch: Date.now(),
+      lastPublishedAt: Date.now(), timer: setInterval(() => this.poll(channelId), 2_000) };
     this.writers.set(channelId, writer);
     let stderr = '';
     proc.stderr?.on('data', (data: Buffer) => { stderr = (stderr + String(data)).slice(-2048); });
     proc.once('error', error => { logger.warn(`Archive ${channelId} spawn: ${error.message}`); });
     proc.once('close', () => {
+      if (writer.forceKillTimer) clearTimeout(writer.forceKillTimer);
       this.poll(channelId);
       clearInterval(writer.timer);
       if (this.writers.get(channelId) !== writer) return;
       this.writers.delete(channelId);
       if (this.stopping || (!this.store.getArchive(channelId)?.enabled && !this.showChannels.has(channelId))) return;
-      this.store.setStatus(channelId, 'retrying', stderr.replaceAll(process.env.STREAMVAULT_AUTH_TOKEN || '\0', '[redacted]').slice(-500) || 'Source disconnected');
-      const timer = setTimeout(() => { this.retry.delete(channelId); this.start(channelId); }, 10_000);
+      const reason = writer.capacityError ?? (writer.stale ? 'No archive segment published for two minutes' :
+        stderr.replaceAll(process.env.STREAMVAULT_AUTH_TOKEN || '\0', '[redacted]').slice(-500) || 'Source disconnected');
+      this.store.setStatus(channelId, writer.capacityError ? 'storage_low' : 'retrying', reason);
+      const timer = setTimeout(() => { this.retry.delete(channelId); this.start(channelId); }, writer.capacityError ? 60_000 : 10_000);
       this.retry.set(channelId, timer);
     });
   }
@@ -110,12 +130,30 @@ export class ArchiveCapture {
   private poll(channelId: string): void {
     const writer = this.writers.get(channelId);
     if (!writer) return;
+    this.importSession(channelId, writer.directory, writer);
     const capacityError = this.capacityError();
     if (capacityError) {
+      writer.capacityError = capacityError;
       this.store.setStatus(channelId, 'storage_low', capacityError);
-      writer.process.kill('SIGINT');
+      this.terminateWriter(channelId, writer);
+      return;
     }
-    this.importSession(channelId, writer.directory, writer);
+    if (!writer.terminationRequested && Date.now() - writer.lastPublishedAt >= WRITER_STALE_MS) {
+      writer.stale = true;
+      this.store.setStatus(channelId, 'retrying', 'No archive segment published for two minutes');
+      logger.warn(`Archive ${channelId}: writer stopped publishing; reconnecting`);
+      this.terminateWriter(channelId, writer);
+    }
+  }
+
+  private terminateWriter(channelId: string, writer: ArchiveWriter): void {
+    if (writer.terminationRequested) return;
+    writer.terminationRequested = true;
+    writer.process.kill('SIGINT');
+    writer.forceKillTimer = setTimeout(() => {
+      if (this.writers.get(channelId) === writer) writer.process.kill('SIGKILL');
+    }, WRITER_KILL_GRACE_MS);
+    writer.forceKillTimer.unref();
   }
 
   /** Reconcile the durable index first; then recover finalized TS files older than
@@ -159,7 +197,7 @@ export class ArchiveCapture {
     }
   }
 
-  private importSession(channelId: string, directory: string, writer?: { epoch: number }, recovering = false): Set<string> {
+  private importSession(channelId: string, directory: string, writer?: ArchiveWriter, recovering = false): Set<string> {
     const admitted = new Set<string>();
     let manifest: string;
     try { manifest = fs.readFileSync(path.join(directory, 'current.m3u8'), 'utf8'); } catch { return admitted; }
@@ -202,7 +240,7 @@ export class ArchiveCapture {
   }
 
   private publishFile(channelId: string, directory: string, name: string, duration: number,
-    discontinuity: boolean, writer?: { epoch: number }): void {
+    discontinuity: boolean, writer?: ArchiveWriter): void {
     const absolute = path.join(directory, name);
     const stat = fs.statSync(absolute);
     if (!stat.isFile() || stat.size <= 0) return;
@@ -218,7 +256,7 @@ export class ArchiveCapture {
     const epoch = nextArchiveEpoch(previous?.epoch ?? writer?.epoch ?? 0, discontinuity || Boolean(gap));
     this.store.publish({ id: `${session}-${name}`, channelId, start, end, duration,
       path: path.relative(this.root, absolute), size: stat.size, epoch });
-    if (writer) writer.epoch = epoch;
+    if (writer) { writer.epoch = epoch; writer.lastPublishedAt = Date.now(); }
     this.onPublished(channelId);
   }
 
@@ -242,5 +280,9 @@ export class ArchiveCapture {
     if (!this.store.getArchive(channelId)?.enabled) await this.stop(channelId);
   }
   startAll(): void { for (const archive of this.store.archives()) if (archive.enabled) this.start(archive.channelId); }
-  async stopAll(): Promise<void> { this.stopping = true; await Promise.all([...this.writers.keys()].map(id => this.stop(id))); }
+  async stopAll(): Promise<void> {
+    this.stopping = true;
+    const channels = new Set([...this.writers.keys(), ...this.retry.keys()]);
+    await Promise.all([...channels].map(id => this.stop(id)));
+  }
 }
