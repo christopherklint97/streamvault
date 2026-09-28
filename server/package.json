@@ -15,8 +15,8 @@
     "express": "^5.2.1",
     "path-to-regexp": "^8.4.2",
     "qs": "6.16.0",
-    "tsx": "^4.23.13",
-    "undici": "^8.10.2"
+    "tsx": "^4.23.15",
+    "undici": "^8.11.2"
   },
   "devDependencies": {
     "@types/better-sqlite3": "9.6.0",
