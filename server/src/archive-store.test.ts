@@ -7,6 +7,46 @@ import os from 'node:os';
 import path from 'node:path';
 
 describe('durable archive index', () => {
+  it('adds restart metrics to an existing archive row without resetting capture state', () => {
+    const db = new Database(':memory:');
+    try {
+      db.exec(`CREATE TABLE channel_archives (
+        channelId TEXT PRIMARY KEY, channelName TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0,
+        retentionHours INTEGER NOT NULL DEFAULT 24, status TEXT NOT NULL DEFAULT 'stopped',
+        error TEXT, lastPublishedAt INTEGER);
+        INSERT INTO channel_archives VALUES ('one','One',1,24,'capturing',NULL,12345);`);
+      ensureArchiveSchema(db); ensureArchiveSchema(db);
+      expect(createArchiveStore(db).getArchive('one')).toMatchObject({ status: 'capturing',
+        enabled: 1, lastPublishedAt: 12345, autoRestartCount: 0,
+        stalledRestartCount: 0, lastAutoRestartAt: null, lastStalledRestartAt: null,
+        lastRecoveredRestartCount: 0, lastRecoveredAt: null });
+    } finally { db.close(); }
+  });
+
+  it('persists restart counts and the latest stalled recovery across a database reopen', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-restarts-'));
+    const filename = path.join(root, 'index.sqlite');
+    let db = new Database(filename); ensureArchiveSchema(db);
+    try {
+      let store = createArchiveStore(db);
+      store.configure('one', 'One', true, 24);
+      store.noteAutoRestart('one', 'source_exit', 1_000);
+      store.noteAutoRestart('one', 'stalled', 2_000);
+      expect(store.getArchive('one')).toMatchObject({ autoRestartCount: 2,
+        stalledRestartCount: 1, lastAutoRestartAt: 2_000,
+        lastStalledRestartAt: 2_000, lastAutoRestartReason: 'stalled',
+        lastRecoveredRestartCount: 0 });
+      store.noteRecovery('one', 3_000);
+      store.noteRecovery('one', 4_000);
+      expect(store.getArchive('one')).toMatchObject({ lastRecoveredRestartCount: 2, lastRecoveredAt: 3_000 });
+      db.close();
+      db = new Database(filename); ensureArchiveSchema(db);
+      store = createArchiveStore(db);
+      expect(store.getArchive('one')).toMatchObject({ autoRestartCount: 2, stalledRestartCount: 1,
+        lastRecoveredRestartCount: 2, lastRecoveredAt: 3_000 });
+    } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  }, 20_000);
+
   it('migrates twice, publishes idempotently and selects UTC overlap in order', () => {
     const db = new Database(':memory:');
     ensureArchiveSchema(db); ensureArchiveSchema(db);

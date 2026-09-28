@@ -25,6 +25,14 @@ it('issues finite scoped playback and denies cross-snapshot and forged segment r
     expect(put.status).toBe(200);
     const list = await fetch(`${base}/api/archives`).then(r => r.json()) as { archives: Array<{ channelId: string }> };
     expect(list.archives[0].channelId).toBe('c');
+    // Legacy rows may already have raw FFmpeg stderr persisted by an older build.
+    store.setStatus('c', 'retrying', 'https://user:synthetic-secret@provider.example/stream?token=synthetic-secret');
+    const safeList = await fetch(`${base}/api/archives`).then(r => r.json()) as { archives: Array<{ error: string | null }> };
+    expect(safeList.archives[0].error).toBe('Archive source disconnected; reconnecting');
+    expect(JSON.stringify(safeList)).not.toContain('synthetic-secret');
+    const safeUpdate = await fetch(`${base}/api/archives/c`, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true, retentionHours: 24 }) });
+    expect((await safeUpdate.text())).not.toContain('synthetic-secret');
     const guide = await fetch(`${base}/api/archives/c/programs?from=1000&to=21000`);
     expect(guide.status).toBe(200);
     expect(await guide.json()).toEqual({ programs: [{ title: 'Show', startTime: 1000, endTime: 21000 }] });

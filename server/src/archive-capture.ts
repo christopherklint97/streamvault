@@ -19,6 +19,7 @@ type ArchiveWriter = {
   epoch: number;
   lastPublishedAt: number;
   terminationRequested?: boolean;
+  intentionalStop?: boolean;
   forceKillTimer?: ReturnType<typeof setTimeout>;
   stale?: boolean;
   capacityError?: string;
@@ -109,18 +110,22 @@ export class ArchiveCapture {
     const writer: ArchiveWriter = { process: proc, directory, epoch: Date.now(),
       lastPublishedAt: Date.now(), timer: setInterval(() => this.poll(channelId), 2_000) };
     this.writers.set(channelId, writer);
-    let stderr = '';
-    proc.stderr?.on('data', (data: Buffer) => { stderr = (stderr + String(data)).slice(-2048); });
-    proc.once('error', error => { logger.warn(`Archive ${channelId} spawn: ${error.message}`); });
+    // FFmpeg diagnostics may contain credential-bearing provider URLs. Never
+    // persist or log raw stderr (or a raw spawn exception).
+    proc.stderr?.on('data', () => {});
+    proc.once('error', () => { logger.warn(`Archive ${channelId}: writer spawn failed`); });
     proc.once('close', () => {
       if (writer.forceKillTimer) clearTimeout(writer.forceKillTimer);
       this.poll(channelId);
       clearInterval(writer.timer);
       if (this.writers.get(channelId) !== writer) return;
       this.writers.delete(channelId);
-      if (this.stopping || (!this.store.getArchive(channelId)?.enabled && !this.showChannels.has(channelId))) return;
+      if (this.stopping || writer.intentionalStop ||
+        (!this.store.getArchive(channelId)?.enabled && !this.showChannels.has(channelId))) return;
+      const restartReason = writer.capacityError ? 'storage_low' : writer.stale ? 'stalled' : 'source_exit';
+      this.store.noteAutoRestart(channelId, restartReason, Date.now());
       const reason = writer.capacityError ?? (writer.stale ? 'No archive segment published for two minutes' :
-        stderr.replaceAll(process.env.STREAMVAULT_AUTH_TOKEN || '\0', '[redacted]').slice(-500) || 'Source disconnected');
+        'Source disconnected');
       this.store.setStatus(channelId, writer.capacityError ? 'storage_low' : 'retrying', reason);
       const timer = setTimeout(() => { this.retry.delete(channelId); this.start(channelId); }, writer.capacityError ? 60_000 : 10_000);
       this.retry.set(channelId, timer);
@@ -256,7 +261,11 @@ export class ArchiveCapture {
     const epoch = nextArchiveEpoch(previous?.epoch ?? writer?.epoch ?? 0, discontinuity || Boolean(gap));
     this.store.publish({ id: `${session}-${name}`, channelId, start, end, duration,
       path: path.relative(this.root, absolute), size: stat.size, epoch });
-    if (writer) { writer.epoch = epoch; writer.lastPublishedAt = Date.now(); }
+    if (writer) {
+      writer.epoch = epoch;
+      writer.lastPublishedAt = Date.now();
+      if (!writer.intentionalStop) this.store.noteRecovery(channelId, writer.lastPublishedAt);
+    }
     this.onPublished(channelId);
   }
 
@@ -265,6 +274,8 @@ export class ArchiveCapture {
     if (retry) { clearTimeout(retry); this.retry.delete(channelId); }
     const writer = this.writers.get(channelId);
     if (!writer) return;
+    writer.intentionalStop = true;
+    writer.terminationRequested = true;
     await new Promise<void>(resolve => {
       writer.process.once('close', () => resolve());
       writer.process.kill('SIGINT');

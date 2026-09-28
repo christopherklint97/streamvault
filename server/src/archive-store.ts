@@ -9,6 +9,12 @@ export interface ArchiveChunk {
 export interface ArchiveRow {
   channelId: string; channelName: string; enabled: number; retentionHours: number;
   status: string; error: string | null; lastPublishedAt: number | null;
+  // Counts are retry attempts, not proven successful restarts. A recovery is
+  // confirmed only when a replacement writer publishes a new indexed chunk.
+  autoRestartCount: number; stalledRestartCount: number;
+  lastAutoRestartAt: number | null; lastStalledRestartAt: number | null;
+  lastAutoRestartReason: string | null;
+  lastRecoveredRestartCount: number; lastRecoveredAt: number | null;
 }
 export interface ArchiveSnapshot {
   id: string; channelId: string; startTime: number; endTime: number;
@@ -21,7 +27,10 @@ export function ensureArchiveSchema(db: Db): void {
     CREATE TABLE IF NOT EXISTS channel_archives (
       channelId TEXT PRIMARY KEY, channelName TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0,
       retentionHours INTEGER NOT NULL DEFAULT 24, status TEXT NOT NULL DEFAULT 'stopped',
-      error TEXT, lastPublishedAt INTEGER
+      error TEXT, lastPublishedAt INTEGER,
+      autoRestartCount INTEGER NOT NULL DEFAULT 0, stalledRestartCount INTEGER NOT NULL DEFAULT 0,
+      lastAutoRestartAt INTEGER, lastStalledRestartAt INTEGER, lastAutoRestartReason TEXT,
+      lastRecoveredRestartCount INTEGER NOT NULL DEFAULT 0, lastRecoveredAt INTEGER
     );
     CREATE TABLE IF NOT EXISTS media_chunks (
       id TEXT PRIMARY KEY, channelId TEXT NOT NULL, start INTEGER NOT NULL,
@@ -60,6 +69,18 @@ export function ensureArchiveSchema(db: Db): void {
   }
   if (!(db.pragma('table_info(media_chunks)') as Array<{ name: string }>).some(c => c.name === 'unavailable')) {
     db.exec('ALTER TABLE media_chunks ADD COLUMN unavailable INTEGER NOT NULL DEFAULT 0');
+  }
+  const archiveColumns = new Set((db.pragma('table_info(channel_archives)') as Array<{ name: string }>).map(c => c.name));
+  for (const [name, definition] of [
+    ['autoRestartCount', 'INTEGER NOT NULL DEFAULT 0'],
+    ['stalledRestartCount', 'INTEGER NOT NULL DEFAULT 0'],
+    ['lastAutoRestartAt', 'INTEGER'],
+    ['lastStalledRestartAt', 'INTEGER'],
+    ['lastAutoRestartReason', 'TEXT'],
+    ['lastRecoveredRestartCount', 'INTEGER NOT NULL DEFAULT 0'],
+    ['lastRecoveredAt', 'INTEGER'],
+  ] as const) {
+    if (!archiveColumns.has(name)) db.exec(`ALTER TABLE channel_archives ADD COLUMN ${name} ${definition}`);
   }
   // Seed once during migration; triggers maintain the quota in O(1) per chunk
   // instead of scanning every indexed segment on each capture poll.
@@ -116,6 +137,18 @@ export function createArchiveStore(db: Db) {
     archives: () => db.prepare('SELECT * FROM channel_archives ORDER BY channelName').all() as ArchiveRow[],
     setStatus(channelId: string, status: string, error: string | null = null) {
       db.prepare('UPDATE channel_archives SET status = ?, error = ? WHERE channelId = ?').run(status, error, channelId);
+    },
+    noteAutoRestart(channelId: string, reason: 'stalled' | 'source_exit' | 'storage_low', at: number) {
+      db.prepare(`UPDATE channel_archives SET autoRestartCount = autoRestartCount + 1,
+        lastAutoRestartAt = ?, lastAutoRestartReason = ?,
+        stalledRestartCount = stalledRestartCount + CASE WHEN ? = 'stalled' THEN 1 ELSE 0 END,
+        lastStalledRestartAt = CASE WHEN ? = 'stalled' THEN ? ELSE lastStalledRestartAt END
+        WHERE channelId = ?`).run(at, reason, reason, reason, at, channelId);
+    },
+    noteRecovery(channelId: string, at: number) {
+      db.prepare(`UPDATE channel_archives SET lastRecoveredRestartCount = autoRestartCount,
+        lastRecoveredAt = ? WHERE channelId = ? AND autoRestartCount > lastRecoveredRestartCount`)
+        .run(at, channelId);
     },
     publish(chunk: ArchiveChunk): ArchiveChunk {
       db.transaction(() => {

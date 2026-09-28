@@ -24,7 +24,11 @@ export function createArchiveRouter(deps: {
   const view = (channelId: string) => {
     const row = store.getArchive(channelId);
     if (!row) return undefined;
-    return { ...row, enabled: row.enabled === 1, ...store.coverage(channelId) };
+    // Legacy rows may still contain credential-bearing FFmpeg stderr. The
+    // database error is diagnostic-only and must never be returned to clients.
+    const error = row.status === 'storage_low' ? 'Archive storage low or unavailable' :
+      row.status === 'retrying' ? 'Archive source disconnected; reconnecting' : null;
+    return { ...row, error, enabled: row.enabled === 1, ...store.coverage(channelId) };
   };
   router.get('/api/archives', requireAuth, (_req, res) => {
     res.json({ archives: store.archives().map(row => view(row.channelId)) });

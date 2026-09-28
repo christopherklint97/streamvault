@@ -185,16 +185,26 @@ describe('stream-copy HLS capture', () => {
       vi.advanceTimersByTime(5_000);
       expect(first.kill).toHaveBeenCalledWith('SIGKILL');
       first.emit('close', null, 'SIGKILL');
-      expect(store.getArchive('c')?.status).toBe('retrying');
+      expect(store.getArchive('c')).toMatchObject({ status: 'retrying', autoRestartCount: 1,
+        stalledRestartCount: 1, lastAutoRestartReason: 'stalled', lastRecoveredRestartCount: 0 });
       vi.advanceTimersByTime(9_999);
       expect(spawnWriter).toHaveBeenCalledTimes(1);
       vi.advanceTimersByTime(1);
       expect(spawnWriter).toHaveBeenCalledTimes(2);
+      expect(store.getArchive('c')?.lastRecoveredRestartCount).toBe(0);
+      const active = (capture as unknown as { writers: Map<string, { directory: string }> }).writers.get('c')!;
+      const chunkName = 'chunk-000000000.ts';
+      fs.writeFileSync(path.join(active.directory, chunkName), 'new writer media');
+      fs.writeFileSync(path.join(active.directory, 'current.m3u8'), `#EXTM3U\n#EXTINF:20,\n${chunkName}\n`);
+      vi.advanceTimersByTime(2_000);
+      expect(store.getArchive('c')).toMatchObject({ status: 'capturing',
+        lastRecoveredRestartCount: 1, lastRecoveredAt: expect.any(Number) });
       expect(store.snapshot(snapshot.id)?.chunks).toHaveLength(1);
       expect(fs.existsSync(pinnedFile)).toBe(true);
       const stopped = capture.stopAll();
       second.emit('close', null, 'SIGINT');
       await stopped;
+      expect(store.getArchive('c')?.autoRestartCount).toBe(1);
     } finally { vi.clearAllTimers(); vi.useRealTimers(); db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -215,7 +225,8 @@ describe('stream-copy HLS capture', () => {
       vi.advanceTimersByTime(2_000);
       expect(first.kill).toHaveBeenCalledWith('SIGINT');
       first.emit('close', null, 'SIGINT');
-      expect(store.getArchive('c')?.status).toBe('storage_low');
+      expect(store.getArchive('c')).toMatchObject({ status: 'storage_low', autoRestartCount: 1,
+        stalledRestartCount: 0, lastAutoRestartReason: 'storage_low' });
       vi.advanceTimersByTime(10_000);
       expect(spawnWriter).toHaveBeenCalledTimes(1);
       await capture.stopAll();
@@ -227,5 +238,44 @@ describe('stream-copy HLS capture', () => {
       else process.env.STREAMVAULT_ARCHIVE_RESERVE_GB = prior;
       vi.clearAllTimers(); vi.useRealTimers(); db.close(); fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('does not count or retry a writer intentionally stopped while the archive row is enabled', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-manual-stop-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('c', 'C', true, 24);
+    vi.useFakeTimers();
+    const child = Object.assign(new EventEmitter(), { stderr: new EventEmitter(), kill: vi.fn(() => true) });
+    const spawnWriter = vi.fn(() => child as unknown as ChildProcess);
+    try {
+      const capture = new ArchiveCapture(store, root, 3001, undefined,
+        spawnWriter as unknown as typeof import('node:child_process').spawn);
+      capture.start('c');
+      const stopped = capture.stop('c');
+      child.emit('close', null, 'SIGINT');
+      await stopped;
+      vi.advanceTimersByTime(60_000);
+      expect(store.getArchive('c')).toMatchObject({ status: 'stopped', autoRestartCount: 0,
+        stalledRestartCount: 0 });
+      expect(spawnWriter).toHaveBeenCalledTimes(1);
+      expect((capture as unknown as { retry: Map<string, unknown> }).retry.size).toBe(0);
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('never stores a credential-bearing FFmpeg diagnostic on source exit', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-safe-error-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('c', 'C', true, 24);
+    vi.useFakeTimers();
+    const child = Object.assign(new EventEmitter(), { stderr: new EventEmitter(), kill: vi.fn(() => true) });
+    const spawnWriter = vi.fn(() => child as unknown as ChildProcess);
+    try {
+      const capture = new ArchiveCapture(store, root, 3001, undefined,
+        spawnWriter as unknown as typeof import('node:child_process').spawn);
+      capture.start('c');
+      child.stderr.emit('data', Buffer.from('https://user:synthetic-secret@provider.example/stream?token=synthetic-secret'));
+      child.emit('close', 1, null);
+      expect(store.getArchive('c')).toMatchObject({ status: 'retrying', error: 'Source disconnected' });
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 });
