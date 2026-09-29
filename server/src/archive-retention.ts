@@ -14,13 +14,21 @@ export function pruneArchive(store: ArchiveStore, root: string, channelId: strin
   for (const candidate of store.prunable(channelId, cutoff, now)) {
     try {
       if (store.pruneChunk(channelId, candidate.id, now, chunk => {
-        const absolute = path.resolve(root, chunk.path);
-        if (!absolute.startsWith(path.resolve(root) + path.sep) || !chunk.path.endsWith('.ts') ||
-          !fs.realpathSync(absolute).startsWith(fs.realpathSync(root) + path.sep) || !fs.statSync(absolute).isFile()) {
-          throw new Error('Unsafe or missing chunk file');
+        const paths = [chunk.path, ...(chunk.playbackPath ? [chunk.playbackPath] : [])];
+        const absolute = paths.map(relative => {
+          const resolved = path.resolve(root, relative);
+          if (!resolved.startsWith(path.resolve(root) + path.sep) || !relative.endsWith('.ts') ||
+            !fs.realpathSync(resolved).startsWith(fs.realpathSync(root) + path.sep) || !fs.statSync(resolved).isFile()) {
+            throw new Error('Unsafe or missing chunk file');
+          }
+          return resolved;
+        });
+        // Preflight both paths before removing either. A crash between unlinks
+        // is reconciled on restart; an active pin never reaches this callback.
+        for (const file of absolute.reverse()) {
+          fs.unlinkSync(file);
+          if (fs.existsSync(file)) throw new Error('File still exists');
         }
-        fs.unlinkSync(absolute);
-        if (fs.existsSync(absolute)) throw new Error('File still exists');
       })) removed++;
     } catch (error) { logger.warn(`Archive ${channelId}: retaining index for failed removal ${candidate.id}: ${error}`); }
   }

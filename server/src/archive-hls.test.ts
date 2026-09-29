@@ -18,6 +18,16 @@ describe('finite private HLS', () => {
       expect(fs.statSync(path.join(directory, 'archive-signing.key')).mode & 0o777).toBe(0o600);
     } finally { fs.rmSync(directory, { recursive: true, force: true }); }
   });
+  it('uses derived duration and chronology at a writer seam but keeps a finite playlist', () => {
+    const clipped = { ...chunks[1], start: 19_000, end: 39_000, epoch: 1,
+      playbackPath: 'archive/two.playback.ts', playbackOffset: 3, playbackDuration: 17 };
+    const playlist = buildArchiveVod([chunks[0], clipped], id => `${id}.ts`);
+    expect(playlist).toContain('#EXTINF:17.000,');
+    expect(playlist).toContain('#EXT-X-PROGRAM-DATE-TIME:1970-01-01T00:00:22.000Z');
+    expect(playlist).toContain('#EXT-X-DISCONTINUITY');
+    expect(playlist).toContain('#EXT-X-ENDLIST');
+  });
+
   it('produces finite seekable VOD with real gaps and scoped chunk tickets', () => {
     const secret = Buffer.alloc(32, 1);
     const expiresAt = 100000;

@@ -466,7 +466,7 @@ export function usePlayer(): {
   // that the media element actually detects, with Off enforced by track mode.
   const keepSubsRef = useRef(getSubtitlesEnabled());
 
-  const play = useCallback(function play() {
+  const play = useCallback(function play(finiteRetryPosition?: number) {
     const channel = usePlayerStore.getState().currentChannel;
     if (!channel) {
       log.warn('play() called but no currentChannel set');
@@ -485,7 +485,9 @@ export function usePlayer(): {
       ? getWatchProgress(channel.id)
       : null;
     const resumePosition = normalizePlaybackStart(
-      savedProgress ? getResumePosition(savedProgress) : (channel.initialSeekSeconds ?? 0),
+      channel.dvrHls && Number.isFinite(finiteRetryPosition)
+        ? finiteRetryPosition!
+        : savedProgress ? getResumePosition(savedProgress) : (channel.initialSeekSeconds ?? 0),
     );
     if (resumePosition > 0) {
       log.info(`Resuming from position ${resumePosition.toFixed(1)}s`);
@@ -557,7 +559,21 @@ export function usePlayer(): {
           avplayLastRetryAt = now;
           log.warn(`AVPlay: ${reason} — auto-retrying`);
           clearAvplayStallTimer();
-          play();
+          // A finite snapshot is stable across retries. Its persisted watch
+          // checkpoint is only updated every ten seconds; using it here turns
+          // a segment-boundary stall into a visible replay of those seconds.
+          let finiteRetryPosition: number | undefined;
+          if (channel.dvrHls && startupReady) {
+            try {
+              const position = avplay.getCurrentTime() / 1000;
+              if (Number.isFinite(position) && position > 0) finiteRetryPosition = position;
+            } catch { /* fall back to the last published clock reading */ }
+            if (finiteRetryPosition === undefined && playbackClock.getSnapshot().generation === clockGeneration) {
+              const position = playbackClock.getSnapshot().position;
+              if (position > 0) finiteRetryPosition = position;
+            }
+          }
+          play(finiteRetryPosition);
           return true;
         };
 

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { logger } from './logger.js';
+import { processArchiveSeam } from './archive-seam.js';
 import type { ArchiveStore } from './archive-store.js';
 
 const GIB = 1024 * 1024 * 1024;
@@ -74,9 +75,55 @@ export class ArchiveCapture {
   private readonly writers = new Map<string, ArchiveWriter>();
   private retry = new Map<string, ReturnType<typeof setTimeout>>();
   private stopping = false;
+  private seamQueue: string[] = [];
+  private seamQueued = new Set<string>();
+  private seamUrgent = new Set<string>();
+  private seamTimer: ReturnType<typeof setTimeout> | null = null;
+  private seamWork: Promise<void> | null = null;
+  private readonly seamAbort = new AbortController();
   constructor(private readonly store: ArchiveStore, private readonly root: string, private readonly port: number,
     private readonly onPublished: (channelId: string) => void = () => {},
-    private readonly spawnWriter: typeof spawn = spawn) {}
+    private readonly spawnWriter: typeof spawn = spawn,
+    private readonly processSeam: typeof processArchiveSeam = processArchiveSeam) {}
+
+  /** Keep FFprobe/stream-copy work off the synchronous two-second capture poll.
+   * New TV4 segments jump ahead of historical backfill; one job runs at a time. */
+  private enqueueSeam(id: string, urgent = false): void {
+    if (this.stopping || !id.endsWith('-chunk-000000000.ts') || this.seamQueued.has(id)) return;
+    if (this.seamQueue.length >= 2_000) return;
+    this.seamQueued.add(id);
+    if (urgent) {
+      this.seamUrgent.add(id);
+      this.seamQueue.unshift(id);
+      // Do not make an active viewer wait through the historical backfill delay.
+      if (this.seamTimer) { clearTimeout(this.seamTimer); this.seamTimer = null; }
+    }
+    else this.seamQueue.push(id);
+    this.scheduleSeam();
+  }
+
+  private scheduleSeam(delay = 0): void {
+    if (this.stopping || this.seamWork || this.seamTimer || !this.seamQueue.length) return;
+    this.seamTimer = setTimeout(() => {
+      this.seamTimer = null;
+      const id = this.seamQueue.shift();
+      if (!id || this.stopping) return;
+      const reserve = gigabytes(process.env.STREAMVAULT_ARCHIVE_RESERVE_GB, 20) * GIB;
+      const maximum = gigabytes(process.env.STREAMVAULT_ARCHIVE_MAX_DISK_GB, 400) * GIB;
+      const work = this.processSeam(this.store, this.root, id, Date.now(), reserve, maximum, this.seamAbort.signal)
+        .then(() => {}, () => {
+          if (!this.stopping) logger.warn('Archive seam check failed; captured media preserved');
+        })
+        .finally(() => {
+          this.seamQueued.delete(id);
+          this.seamUrgent.delete(id);
+          if (this.seamWork === work) this.seamWork = null;
+          this.scheduleSeam(this.seamUrgent.has(this.seamQueue[0]) ? 0 : 10_000);
+        });
+      this.seamWork = work;
+    }, delay);
+    this.seamTimer.unref();
+  }
 
   private capacityError(): string | null {
     const reserve = gigabytes(process.env.STREAMVAULT_ARCHIVE_RESERVE_GB, 20);
@@ -166,15 +213,18 @@ export class ArchiveCapture {
   recover(): void {
     this.store.clearExpired(Date.now());
     for (const chunk of this.store.indexedChunks()) {
-      const absolute = path.resolve(this.root, chunk.path);
-      let valid = false;
-      try {
-        valid = absolute.startsWith(path.resolve(this.root) + path.sep) && chunk.path.endsWith('.ts') &&
-          fs.realpathSync(absolute).startsWith(fs.realpathSync(this.root) + path.sep) &&
-          fs.statSync(absolute).isFile() && fs.statSync(absolute).size > 0;
-      } catch { /* absent or unsafe */ }
-      if (!valid) {
-        const result = this.store.reconcileMissing(chunk.id);
+      const validFile = (relative: string): boolean => {
+        try {
+          const file = path.resolve(this.root, relative);
+          return file.startsWith(path.resolve(this.root) + path.sep) && relative.endsWith('.ts') &&
+            fs.realpathSync(file).startsWith(fs.realpathSync(this.root) + path.sep) &&
+            fs.statSync(file).isFile() && fs.statSync(file).size > 0;
+        } catch { return false; }
+      };
+      const rawValid = validFile(chunk.path);
+      const playbackValid = !chunk.playbackPath || validFile(chunk.playbackPath);
+      if (!rawValid || !playbackValid) {
+        const result = rawValid ? this.store.reconcilePlaybackMissing(chunk.id) : this.store.reconcileMissing(chunk.id);
         logger.warn(`Archive ${chunk.channelId}: missing indexed segment ${chunk.id} (${result})`);
       } else if (chunk.unavailable) this.store.markAvailable(chunk.id);
     }
@@ -191,8 +241,13 @@ export class ArchiveCapture {
         if (this.writers.get(channelId)?.directory === directory) continue;
         const admitted = this.importSession(channelId, directory, undefined, true);
         for (const name of fs.readdirSync(directory)) {
+          const playbackMaster = /^chunk-(\d{9})\.playback\.ts$/.exec(name);
+          const indexedPlayback = playbackMaster && this.store.getChunk(
+            `${session.name}-chunk-${playbackMaster[1]}.ts`)?.playbackPath ===
+            path.relative(this.root, path.join(directory, name));
           if (((/^chunk-\d{9}\.ts(?:\.tmp)?$/.test(name) && !admitted.has(name) &&
-            !this.store.getChunk(`${session.name}-${name}`)) || name.endsWith('.part')) && !fs.lstatSync(path.join(directory, name)).isSymbolicLink()) {
+            !this.store.getChunk(`${session.name}-${name}`)) || name.endsWith('.part') ||
+            (playbackMaster && !indexedPlayback)) && !fs.lstatSync(path.join(directory, name)).isSymbolicLink()) {
             try { fs.unlinkSync(path.join(directory, name)); } catch (error) {
               logger.warn(`Archive recovery could not clean ${channelId}/${session.name}/${name}: ${error}`);
             }
@@ -259,8 +314,10 @@ export class ArchiveCapture {
     const start = end - length;
     const gap = previous && start > previous.end + 5_000;
     const epoch = nextArchiveEpoch(previous?.epoch ?? writer?.epoch ?? 0, discontinuity || Boolean(gap));
-    this.store.publish({ id: `${session}-${name}`, channelId, start, end, duration,
+    const id = `${session}-${name}`;
+    this.store.publish({ id, channelId, start, end, duration,
       path: path.relative(this.root, absolute), size: stat.size, epoch });
+    if (channelId === 'live_44115') this.enqueueSeam(id, true);
     if (writer) {
       writer.epoch = epoch;
       writer.lastPublishedAt = Date.now();
@@ -290,10 +347,26 @@ export class ArchiveCapture {
     this.showChannels.delete(channelId);
     if (!this.store.getArchive(channelId)?.enabled) await this.stop(channelId);
   }
-  startAll(): void { for (const archive of this.store.archives()) if (archive.enabled) this.start(archive.channelId); }
+  startAll(): void {
+    for (const archive of this.store.archives()) if (archive.enabled) this.start(archive.channelId);
+    // Backfill TV4 conservatively while prioritizing newly captured seams.
+    // Derived copies never overwrite the masters or an existing snapshot pin.
+    for (const chunk of this.store.seamCandidates('live_44115', Date.now() - 24 * 3_600_000).reverse()) {
+      this.enqueueSeam(chunk.id);
+    }
+  }
   async stopAll(): Promise<void> {
     this.stopping = true;
+    this.seamAbort.abort();
+    if (this.seamTimer) clearTimeout(this.seamTimer);
+    this.seamTimer = null;
+    this.seamQueue = [];
+    this.seamQueued.clear();
+    this.seamUrgent.clear();
     const channels = new Set([...this.writers.keys(), ...this.retry.keys()]);
     await Promise.all([...channels].map(id => this.stop(id)));
+    // Wait for the abortable child and its staged-file cleanup before the
+    // caller closes SQLite. The process-wide shutdown deadline remains armed.
+    if (this.seamWork) await this.seamWork;
   }
 }

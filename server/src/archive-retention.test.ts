@@ -6,6 +6,27 @@ import path from 'node:path';
 import { createArchiveStore, ensureArchiveSchema } from './archive-store.js';
 import { pruneArchive } from './archive-retention.js';
 
+it('pins both raw and derived files, and removes both before deleting the index', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-derived-retention-'));
+  const db = new Database(':memory:'); ensureArchiveSchema(db);
+  const store = createArchiveStore(db); store.configure('c', 'C', true, 1);
+  try {
+    for (const file of ['raw.ts', 'raw.playback.ts']) fs.writeFileSync(path.join(root, file), 'TS DATA');
+    store.publish({ id: 'raw', channelId: 'c', start: 100, end: 10_100,
+      duration: 10, path: 'raw.ts', size: 7, epoch: 1 });
+    expect(store.setPlaybackMedia('raw', 'raw.playback.ts', 7, 3, 7, 1)).toBe(true);
+    store.createSnapshot('c', 100, 10_100, 2, 4_000_000);
+    expect(pruneArchive(store, root, 'c', 3_620_000)).toBe(0);
+    expect(fs.existsSync(path.join(root, 'raw.ts'))).toBe(true);
+    expect(fs.existsSync(path.join(root, 'raw.playback.ts'))).toBe(true);
+    expect(pruneArchive(store, root, 'c', 4_000_000)).toBe(1);
+    expect(store.getChunk('raw')).toBeUndefined();
+    expect(fs.existsSync(path.join(root, 'raw.ts'))).toBe(false);
+    expect(fs.existsSync(path.join(root, 'raw.playback.ts'))).toBe(false);
+    expect(store.totalUsageBytes()).toBe(0);
+  } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 it('prunes only expired unpinned complete files and retains metadata after unlink failure', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-retention-'));
   const db = new Database(':memory:'); ensureArchiveSchema(db);

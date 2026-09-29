@@ -60,6 +60,19 @@ describe('durable archive index', () => {
     db.close();
   });
 
+  it('orders playback by segment publication time when start times overlap or recovery inserts late', () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('one', 'One', true, 24);
+    for (const [id, start] of [['before', 10_000], ['recovered', 8_000], ['tail', 18_000]] as const) {
+      store.publish({ id, channelId: 'one', start, end: start + 10_000, duration: 10,
+        path: `archive/${id}.ts`, size: 100, epoch: 1 });
+    }
+    expect(store.overlap('one', 0, 30_000).map(c => c.id)).toEqual(['recovered', 'before', 'tail']);
+    expect(store.createSnapshot('one', 0, 30_000, 1, 100).chunks.map(c => c.id))
+      .toEqual(['recovered', 'before', 'tail']);
+    db.close();
+  });
+
   it('tracks storage in a durable constant-time counter across publication and deletion', () => {
     const db = new Database(':memory:'); ensureArchiveSchema(db);
     const store = createArchiveStore(db); store.configure('one', 'One', true, 24);
@@ -70,6 +83,50 @@ describe('durable archive index', () => {
     expect(store.totalUsageBytes()).toBe(77);
     ensureArchiveSchema(db);
     expect(store.totalUsageBytes()).toBe(77);
+    db.close();
+  });
+
+  it('pins the original snapshot media while new snapshots use a verified derivative', () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('one', 'One', true, 24);
+    store.publish({ id: 'a', channelId: 'one', start: 1000, end: 11_000, duration: 10,
+      path: 'archive/a.ts', size: 100, epoch: 1 });
+    store.publish({ id: 'b', channelId: 'one', start: 11_000, end: 21_000, duration: 10,
+      path: 'archive/b.ts', size: 100, epoch: 2 });
+    const pinned = store.createSnapshot('one', 0, 22_000, 1, 100);
+    store.addRecordingRef('show', 'b');
+    const savedShow = store.createRecordingSnapshot('show', 'one', 11_000, 21_000, 2, 100);
+    expect(store.setPlaybackMedia('b', 'archive/b.playback.ts', 80, 3, 7, 3)).toBe(true);
+    const corrected = store.createSnapshot('one', 0, 22_000, 4, 100);
+    expect(store.snapshot(pinned.id)?.chunks[1]).toMatchObject({ path: 'archive/b.ts', playbackPath: null });
+    expect(store.snapshot(savedShow.id)?.chunks[0]).toMatchObject({ path: 'archive/b.ts', playbackPath: null });
+    expect(store.snapshot(corrected.id)?.chunks[1]).toMatchObject({
+      path: 'archive/b.ts', playbackPath: 'archive/b.playback.ts', playbackOffset: 3, playbackDuration: 7 });
+    expect(store.totalUsageBytes()).toBe(280);
+    expect(store.prunable('one', 21_000, 4)).toEqual([]);
+    ensureArchiveSchema(db);
+    expect(store.snapshot(pinned.id)?.chunks[1].playbackPath).toBeNull();
+    expect(store.snapshot(corrected.id)?.chunks[1].playbackPath).toBe('archive/b.playback.ts');
+    db.close();
+  });
+
+  it('omits a byte-identical full duplicate only from new archive snapshots', () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('live_44115', 'TV4', true, 24);
+    for (const [id, start] of [['original', 0], ['repeated', 20_000], ['tail', 40_000]] as const) {
+      store.publish({ id, channelId: 'live_44115', start, end: start + 20_000,
+        duration: 20, path: `${id}.ts`, size: 188, epoch: 1 });
+    }
+    const old = store.createSnapshot('live_44115', 0, 60_000, 1, 100);
+    store.addRecordingRef('show', 'repeated');
+    expect(store.hidePlaybackDuplicate('repeated')).toBe(true);
+    expect(store.createSnapshot('live_44115', 0, 60_000, 2, 100).chunks.map(x => x.id))
+      .toEqual(['original', 'tail']);
+    expect(store.snapshot(old.id)?.chunks.map(x => x.id)).toEqual(['original', 'repeated', 'tail']);
+    expect(store.createRecordingSnapshot('show', 'live_44115', 20_000, 40_000, 3, 100).chunks.map(x => x.id))
+      .toEqual(['repeated']);
+    expect(store.coverage('live_44115')).toMatchObject({ availableFrom: 0, availableTo: 60_000,
+      diskUsageBytes: 3 * 188 });
     db.close();
   });
 
@@ -115,9 +172,58 @@ describe('durable archive index', () => {
       fs.writeFileSync(path.join(dir, 'pinned.ts'), 'restored');
       new ArchiveCapture(store, root, 1).recover();
       expect(store.recordingChunks('recording').map(c => c.id)).toEqual(['saved']);
-      expect(store.snapshot(pinned.id)?.chunks.map(c => c.id)).toEqual(['pinned', 'saved'].sort());
+      expect(store.snapshot(pinned.id)?.chunks.map(c => c.id)).toEqual(['saved', 'pinned']);
     } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
+  it('expires a pinned derivative missing after restart while restoring raw for new tickets', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-missing-derivative-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('one', 'One', true, 24);
+    try {
+      fs.writeFileSync(path.join(root, 'raw.ts'), 'original');
+      fs.writeFileSync(path.join(root, 'raw.playback.ts'), 'derived');
+      store.publish({ id: 'raw', channelId: 'one', start: 1000, end: 11_000, duration: 10,
+        path: 'raw.ts', size: 8, epoch: 1 });
+      expect(store.setPlaybackMedia('raw', 'raw.playback.ts', 7, 3, 7, Date.now())).toBe(true);
+      const snapshot = store.createSnapshot('one', 0, 12_000, Date.now(), Date.now() + 60_000);
+      fs.unlinkSync(path.join(root, 'raw.playback.ts'));
+      new ArchiveCapture(store, root, 1).recover();
+      expect(store.snapshot(snapshot.id)).toBeUndefined();
+      expect(store.getChunk('raw')).toMatchObject({ unavailable: 0, playbackPath: null, playbackSize: 0 });
+      expect(store.createSnapshot('one', 0, 12_000, Date.now(), Date.now() + 60_000).chunks[0].playbackPath).toBeNull();
+      expect(fs.existsSync(path.join(root, 'raw.ts'))).toBe(true);
+    } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('restores an unpinned raw row when its derivative is missing on recovery', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-fallback-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('one', 'One', true, 24);
+    try {
+      fs.writeFileSync(path.join(root, 'raw.ts'), 'original');
+      store.publish({ id: 'raw', channelId: 'one', start: 1000, end: 11_000, duration: 10,
+        path: 'raw.ts', size: 8, epoch: 1 });
+      expect(store.setPlaybackMedia('raw', 'raw.playback.ts', 7, 3, 7, Date.now())).toBe(true);
+      new ArchiveCapture(store, root, 1).recover();
+      expect(store.getChunk('raw')).toMatchObject({ unavailable: 0, playbackPath: null, playbackSize: 0 });
+      expect(store.totalUsageBytes()).toBe(8);
+    } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('removes a derived file orphaned between rename and index commit', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-orphan-playback-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('live_44115', 'TV4', true, 24);
+    try {
+      const dir = path.join(root, 'archive', 'live_44115', '11111111-1111-4111-8111-111111111111');
+      fs.mkdirSync(dir, { recursive: true });
+      const orphan = path.join(dir, 'chunk-000000000.playback.ts');
+      fs.writeFileSync(orphan, 'unindexed copy');
+      new ArchiveCapture(store, root, 1).recover();
+      expect(fs.existsSync(orphan)).toBe(false);
+    } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('rejects a saved-show snapshot rather than serving a silently truncated recording', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-partial-'));
     const db = new Database(':memory:'); ensureArchiveSchema(db);

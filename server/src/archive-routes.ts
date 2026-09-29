@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import type { ArchiveStore } from './archive-store.js';
 import type { DBRecording } from './db.js';
-import { createArchiveTicket, verifyArchiveTicket, buildArchiveVod, archiveGaps } from './archive-hls.js';
+import { createArchiveTicket, verifyArchiveTicket, buildArchiveVod, archiveGaps,
+  playableStart, playableEnd, playableDuration } from './archive-hls.js';
 import { requireAuth } from './security.js';
 import { pruneArchive } from './archive-retention.js';
 import fs from 'node:fs';
@@ -72,16 +73,16 @@ export function createArchiveRouter(deps: {
     const now = Date.now();
     const selected = store.overlap(channelId, startTime, endTime);
     if (!selected.length) { res.status(404).json({ error: 'No published archive coverage' }); return; }
-    const effectiveStart = selected[0].start;
-    const effectiveEnd = selected.at(-1)!.end;
+    const effectiveStart = playableStart(selected[0]);
+    const effectiveEnd = playableEnd(selected.at(-1)!);
     const expiresAt = now + LEASE_MS;
     const snapshot = store.createSnapshot(channelId, startTime, endTime, now, expiresAt);
     const ticket = createArchiveTicket(snapshot.id, secret, expiresAt);
     res.set('Cache-Control', 'no-store').json({ url: `/api/archive/snapshots/${snapshot.id}/index.m3u8?ticket=${ticket}`,
       snapshotId: snapshot.id, expiresAt, startTime: effectiveStart, endTime: effectiveEnd,
-      startOffsetSeconds: Math.max(0, Math.min(snapshot.chunks[0].duration, (startTime - effectiveStart) / 1000)),
+      startOffsetSeconds: Math.max(0, Math.min(playableDuration(snapshot.chunks[0]), (startTime - effectiveStart) / 1000)),
       renewUrl: `/api/archive/snapshots/${snapshot.id}/renew`, maxExpiresAt: now + MAX_LEASE_MS,
-      duration: snapshot.chunks.reduce((sum, chunk) => sum + chunk.duration, 0),
+      duration: snapshot.chunks.reduce((sum, chunk) => sum + playableDuration(chunk), 0),
       gaps: archiveGaps(snapshot.chunks, effectiveStart, effectiveEnd) });
   });
   router.post('/api/archive/snapshots/:snapshotId/renew', requireAuth, (req, res) => {
@@ -108,9 +109,10 @@ export function createArchiveRouter(deps: {
     if (!snapshot || snapshot.expiresAt <= Date.now()) { res.status(410).end(); return; }
     const chunk = snapshot.chunks.find(c => c.id === req.params.chunkId);
     if (!chunk) { res.status(404).end(); return; }
-    const absolute = path.resolve(root, chunk.path);
+    const absolute = path.resolve(root, chunk.playbackPath ?? chunk.path);
     try {
-      if (!absolute.startsWith(path.resolve(root) + path.sep) || !chunk.path.endsWith('.ts') ||
+      if (!absolute.startsWith(path.resolve(root) + path.sep) ||
+        !(chunk.playbackPath ?? chunk.path).endsWith('.ts') ||
         !fs.realpathSync(absolute).startsWith(fs.realpathSync(root) + path.sep) || !fs.statSync(absolute).isFile()) {
         res.status(404).end(); return;
       }
@@ -135,10 +137,10 @@ export function createArchiveRouter(deps: {
     res.set('Cache-Control', 'no-store').json({ url: `/api/archive/snapshots/${snapshot.id}/index.m3u8?ticket=${ticket}`,
       snapshotId: snapshot.id, expiresAt, maxExpiresAt: now + MAX_LEASE_MS,
       renewUrl: `/api/archive/snapshots/${snapshot.id}/renew`,
-      startTime: first.start, endTime: snapshot.chunks.at(-1)!.end,
-      startOffsetSeconds: Math.max(0, Math.min(first.duration, (recording.start_time - first.start) / 1000)),
-      duration: snapshot.chunks.reduce((sum, chunk) => sum + chunk.duration, 0),
-      gaps: archiveGaps(snapshot.chunks, first.start, snapshot.chunks.at(-1)!.end) });
+      startTime: playableStart(first), endTime: playableEnd(snapshot.chunks.at(-1)!),
+      startOffsetSeconds: Math.max(0, Math.min(playableDuration(first), (recording.start_time - playableStart(first)) / 1000)),
+      duration: snapshot.chunks.reduce((sum, chunk) => sum + playableDuration(chunk), 0),
+      gaps: archiveGaps(snapshot.chunks, playableStart(first), playableEnd(snapshot.chunks.at(-1)!)) });
   });
   return router;
 }

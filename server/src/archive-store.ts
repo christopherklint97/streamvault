@@ -5,6 +5,8 @@ type Db = InstanceType<typeof Database>;
 export interface ArchiveChunk {
   id: string; channelId: string; start: number; end: number; duration: number;
   path: string; size: number; epoch: number; unavailable?: number;
+  playbackPath?: string | null; playbackSize?: number; playbackOffset?: number;
+  playbackDuration?: number | null; playbackHidden?: number;
 }
 export interface ArchiveRow {
   channelId: string; channelName: string; enabled: number; retentionHours: number;
@@ -55,6 +57,8 @@ export function ensureArchiveSchema(db: Db): void {
     CREATE TABLE IF NOT EXISTS archive_snapshot_chunks (
       snapshotId TEXT NOT NULL REFERENCES archive_snapshots(id),
       chunkId TEXT NOT NULL REFERENCES media_chunks(id), ordinal INTEGER NOT NULL,
+      playbackPath TEXT, playbackSize INTEGER NOT NULL DEFAULT 0,
+      playbackOffset REAL NOT NULL DEFAULT 0, playbackDuration REAL,
       PRIMARY KEY(snapshotId,chunkId)
     );
     CREATE INDEX IF NOT EXISTS idx_archive_snapshot_chunks_chunk ON archive_snapshot_chunks(chunkId);
@@ -70,6 +74,17 @@ export function ensureArchiveSchema(db: Db): void {
   if (!(db.pragma('table_info(media_chunks)') as Array<{ name: string }>).some(c => c.name === 'unavailable')) {
     db.exec('ALTER TABLE media_chunks ADD COLUMN unavailable INTEGER NOT NULL DEFAULT 0');
   }
+  const mediaColumns = new Set((db.pragma('table_info(media_chunks)') as Array<{ name: string }>).map(c => c.name));
+  for (const [name, definition] of [
+    ['playbackPath', 'TEXT'], ['playbackSize', 'INTEGER NOT NULL DEFAULT 0'],
+    ['playbackOffset', 'REAL NOT NULL DEFAULT 0'], ['playbackDuration', 'REAL'],
+    ['playbackHidden', 'INTEGER NOT NULL DEFAULT 0'],
+  ] as const) if (!mediaColumns.has(name)) db.exec(`ALTER TABLE media_chunks ADD COLUMN ${name} ${definition}`);
+  const snapshotColumns = new Set((db.pragma('table_info(archive_snapshot_chunks)') as Array<{ name: string }>).map(c => c.name));
+  for (const [name, definition] of [
+    ['playbackPath', 'TEXT'], ['playbackSize', 'INTEGER NOT NULL DEFAULT 0'],
+    ['playbackOffset', 'REAL NOT NULL DEFAULT 0'], ['playbackDuration', 'REAL'],
+  ] as const) if (!snapshotColumns.has(name)) db.exec(`ALTER TABLE archive_snapshot_chunks ADD COLUMN ${name} ${definition}`);
   const archiveColumns = new Set((db.pragma('table_info(channel_archives)') as Array<{ name: string }>).map(c => c.name));
   for (const [name, definition] of [
     ['autoRestartCount', 'INTEGER NOT NULL DEFAULT 0'],
@@ -89,18 +104,21 @@ export function ensureArchiveSchema(db: Db): void {
       singleton INTEGER PRIMARY KEY CHECK(singleton = 1), bytes INTEGER NOT NULL DEFAULT 0
     );
     INSERT OR IGNORE INTO archive_storage_usage(singleton,bytes)
-      SELECT 1, COALESCE(SUM(size),0) FROM media_chunks WHERE unavailable = 0;
-    CREATE TRIGGER IF NOT EXISTS archive_usage_insert AFTER INSERT ON media_chunks
+      SELECT 1, COALESCE(SUM(size + playbackSize),0) FROM media_chunks WHERE unavailable = 0;
+    DROP TRIGGER IF EXISTS archive_usage_insert;
+    DROP TRIGGER IF EXISTS archive_usage_delete;
+    DROP TRIGGER IF EXISTS archive_usage_update;
+    CREATE TRIGGER archive_usage_insert AFTER INSERT ON media_chunks
       WHEN NEW.unavailable = 0 BEGIN
-      UPDATE archive_storage_usage SET bytes = bytes + NEW.size WHERE singleton = 1;
+      UPDATE archive_storage_usage SET bytes = bytes + NEW.size + NEW.playbackSize WHERE singleton = 1;
     END;
-    CREATE TRIGGER IF NOT EXISTS archive_usage_delete AFTER DELETE ON media_chunks
+    CREATE TRIGGER archive_usage_delete AFTER DELETE ON media_chunks
       WHEN OLD.unavailable = 0 BEGIN
-      UPDATE archive_storage_usage SET bytes = bytes - OLD.size WHERE singleton = 1;
+      UPDATE archive_storage_usage SET bytes = bytes - OLD.size - OLD.playbackSize WHERE singleton = 1;
     END;
-    CREATE TRIGGER IF NOT EXISTS archive_usage_update AFTER UPDATE OF size,unavailable ON media_chunks BEGIN
-      UPDATE archive_storage_usage SET bytes = bytes - CASE WHEN OLD.unavailable = 0 THEN OLD.size ELSE 0 END
-        + CASE WHEN NEW.unavailable = 0 THEN NEW.size ELSE 0 END WHERE singleton = 1;
+    CREATE TRIGGER archive_usage_update AFTER UPDATE OF size,unavailable,playbackSize ON media_chunks BEGIN
+      UPDATE archive_storage_usage SET bytes = bytes - CASE WHEN OLD.unavailable = 0 THEN OLD.size + OLD.playbackSize ELSE 0 END
+        + CASE WHEN NEW.unavailable = 0 THEN NEW.size + NEW.playbackSize ELSE 0 END WHERE singleton = 1;
     END;
   `);
 }
@@ -110,13 +128,21 @@ export function createArchiveStore(db: Db) {
   const getChunk = (id: string) => db.prepare('SELECT * FROM media_chunks WHERE id = ?').get(id) as ArchiveChunk | undefined;
   const getArchive = (channelId: string) => db.prepare('SELECT * FROM channel_archives WHERE channelId = ?').get(channelId) as ArchiveRow | undefined;
   const overlap = (channelId: string, start: number, end: number) => chunks(
-    'SELECT * FROM media_chunks WHERE channelId = ? AND unavailable = 0 AND end > ? AND start < ? ORDER BY start,id', channelId, start, end,
-  );
+    'SELECT * FROM media_chunks WHERE channelId = ? AND unavailable = 0 AND playbackHidden = 0 AND end > ? AND start < ? ORDER BY end,rowid', channelId, start - 1000, end + 1000,
+  ).filter(chunk => {
+    const playableStart = chunk.start + (chunk.playbackPath ? (chunk.playbackOffset ?? 0) * 1000 : 0);
+    const playableEnd = playableStart + (chunk.playbackPath ? (chunk.playbackDuration ?? chunk.duration) : chunk.duration) * 1000;
+    return playableEnd > start && playableStart < end;
+  });
   const snapshot = (id: string): ArchiveSnapshot | undefined => {
     const row = db.prepare('SELECT * FROM archive_snapshots WHERE id = ?').get(id) as Omit<ArchiveSnapshot, 'chunks'> | undefined;
     if (!row) return undefined;
-    const selected = chunks(`SELECT c.* FROM media_chunks c JOIN archive_snapshot_chunks s ON s.chunkId = c.id
-      WHERE s.snapshotId = ? AND c.unavailable = 0 ORDER BY s.ordinal`, id);
+    const selected = chunks(`SELECT c.id,c.channelId,c.start,c.end,c.duration,c.path,c.size,c.epoch,c.unavailable,
+      s.playbackPath,s.playbackSize,s.playbackOffset,s.playbackDuration
+      FROM media_chunks c JOIN archive_snapshot_chunks s ON s.chunkId = c.id
+      WHERE s.snapshotId = ? AND c.unavailable = 0
+      AND (s.playbackPath IS NULL OR s.playbackPath = c.playbackPath)
+      ORDER BY s.ordinal`, id);
     const expected = (db.prepare('SELECT COUNT(*) AS count FROM archive_snapshot_chunks WHERE snapshotId = ?')
       .get(id) as { count: number }).count;
     return selected.length === expected && selected.length > 0 ? { ...row, chunks: selected } : undefined;
@@ -165,7 +191,53 @@ export function createArchiveStore(db: Db) {
       return getChunk(chunk.id)!;
     },
     getChunk,
+    /** Publish a verified copy without replacing the immutable capture master.
+     * A previously issued snapshot or saved show keeps its original media. */
+    setPlaybackMedia(id: string, relative: string, size: number, offset: number, duration: number, _now: number): boolean {
+      if (!relative.endsWith('.playback.ts') || !Number.isSafeInteger(size) || size <= 0 ||
+        !Number.isFinite(offset) || offset <= 0 || !Number.isFinite(duration) || duration <= 0) return false;
+      return db.transaction(() => {
+        const original = getChunk(id);
+        // Each snapshot pins the media choice made at creation. Older archive
+        // snapshots and saved recordings retain the raw file while future
+        // archive snapshots can use this verified copy.
+        if (!original || original.unavailable || original.playbackHidden || original.playbackPath ||
+          offset + duration > original.duration + 0.75) return false;
+        return db.prepare(`UPDATE media_chunks SET playbackPath = ?, playbackSize = ?, playbackOffset = ?, playbackDuration = ?
+          WHERE id = ? AND playbackPath IS NULL AND playbackHidden = 0`).run(relative, size, offset, duration, id).changes === 1;
+      }).immediate();
+    },
+    hidePlaybackDuplicate(id: string): boolean {
+      return db.prepare(`UPDATE media_chunks SET playbackHidden = 1 WHERE id = ?
+        AND unavailable = 0 AND playbackHidden = 0 AND playbackPath IS NULL`).run(id).changes === 1;
+    },
+    /** Select previous media by publication end, even when an older chunk
+     * was re-indexed after a recovery scan. */
+    previousChunk(id: string): ArchiveChunk | undefined {
+      return db.prepare(`SELECT p.* FROM media_chunks p JOIN media_chunks c ON c.id = ?
+        WHERE p.channelId = c.channelId AND p.unavailable = 0 AND p.playbackHidden = 0
+        AND (p.end < c.end OR (p.end = c.end AND p.rowid < c.rowid))
+        ORDER BY p.end DESC,p.rowid DESC LIMIT 1`).get(id) as ArchiveChunk | undefined;
+    },
+    seamCandidates(channelId: string, since: number): ArchiveChunk[] {
+      return chunks(`SELECT c.* FROM media_chunks c WHERE c.channelId = ? AND c.end > ?
+        AND c.unavailable = 0 AND c.playbackHidden = 0 AND c.playbackPath IS NULL
+        AND c.id LIKE '%-chunk-000000000.ts'
+        ORDER BY c.end,c.rowid`, channelId, since);
+    },
     markAvailable(id: string) { db.prepare('UPDATE media_chunks SET unavailable = 0 WHERE id = ? AND unavailable != 0').run(id); },
+    reconcilePlaybackMissing(id: string): 'restored_raw' | 'absent' {
+      return db.transaction(() => {
+        const chunk = getChunk(id);
+        if (!chunk?.playbackPath) return 'absent';
+        // The captured master is intact. New archive tickets can use it;
+        // snapshots bound to the lost derived path become unavailable rather
+        // than silently serving mismatched media. Saved shows stay playable.
+        db.prepare(`UPDATE media_chunks SET playbackPath = NULL, playbackSize = 0,
+          playbackOffset = 0, playbackDuration = NULL, unavailable = 0 WHERE id = ?`).run(id);
+        return 'restored_raw';
+      }).immediate();
+    },
     indexedChunks() { return chunks('SELECT * FROM media_chunks ORDER BY channelId,id'); },
     reconcileMissing(id: string): 'removed' | 'quarantined' | 'absent' {
       return db.transaction(() => {
@@ -182,7 +254,14 @@ export function createArchiveStore(db: Db) {
     },
     overlap,
     coverage(channelId: string) {
-      return db.prepare('SELECT MIN(start) availableFrom, MAX(end) availableTo, COALESCE(SUM(size),0) diskUsageBytes FROM media_chunks WHERE channelId = ? AND unavailable = 0')
+      return db.prepare(`SELECT
+        MIN(CASE WHEN playbackHidden = 0 THEN start +
+          CASE WHEN playbackPath IS NOT NULL THEN playbackOffset * 1000 ELSE 0 END END) availableFrom,
+        MAX(CASE WHEN playbackHidden = 0 THEN
+          CASE WHEN playbackPath IS NOT NULL THEN start + playbackOffset * 1000 +
+            COALESCE(playbackDuration, duration) * 1000 ELSE end END END) availableTo,
+        COALESCE(SUM(size + playbackSize),0) diskUsageBytes
+        FROM media_chunks WHERE channelId = ? AND unavailable = 0`)
         .get(channelId) as { availableFrom: number | null; availableTo: number | null; diskUsageBytes: number };
     },
     totalUsageBytes(): number {
@@ -196,7 +275,7 @@ export function createArchiveStore(db: Db) {
     },
     recordingChunks(recordingId: string) {
       return chunks(`SELECT c.* FROM media_chunks c JOIN recording_chunk_refs r ON r.chunkId = c.id
-        WHERE r.recordingId = ? AND c.unavailable = 0 ORDER BY c.start,c.id`, recordingId);
+        WHERE r.recordingId = ? AND c.unavailable = 0 ORDER BY c.end,c.rowid`, recordingId);
     },
     createSnapshot(channelId: string, startTime: number, endTime: number, now: number, expiresAt: number): ArchiveSnapshot {
       const id = randomUUID();
@@ -204,8 +283,11 @@ export function createArchiveStore(db: Db) {
         const selected = overlap(channelId, startTime, endTime);
         if (!selected.length) throw new Error('No published chunks in this interval');
         db.prepare('INSERT INTO archive_snapshots(id,channelId,startTime,endTime,expiresAt,createdAt) VALUES(?,?,?,?,?,?)').run(id, channelId, startTime, endTime, expiresAt, now);
-        const add = db.prepare('INSERT INTO archive_snapshot_chunks VALUES(?,?,?)');
-        selected.forEach((c, ordinal) => add.run(id, c.id, ordinal));
+        const add = db.prepare(`INSERT INTO archive_snapshot_chunks
+          (snapshotId,chunkId,ordinal,playbackPath,playbackSize,playbackOffset,playbackDuration)
+          VALUES(?,?,?,?,?,?,?)`);
+        selected.forEach((c, ordinal) => add.run(id, c.id, ordinal,
+          c.playbackPath ?? null, c.playbackSize ?? 0, c.playbackOffset ?? 0, c.playbackDuration ?? null));
       }).immediate();
       return snapshot(id)!;
     },
@@ -213,13 +295,17 @@ export function createArchiveStore(db: Db) {
       const id = randomUUID();
       db.transaction(() => {
         const selected = chunks(`SELECT c.* FROM media_chunks c JOIN recording_chunk_refs r ON r.chunkId = c.id
-          WHERE r.recordingId = ? AND c.channelId = ? AND c.unavailable = 0 ORDER BY c.start,c.id`, recordingId, channelId);
+          WHERE r.recordingId = ? AND c.channelId = ? AND c.unavailable = 0 ORDER BY c.end,c.rowid`, recordingId, channelId);
         const expected = (db.prepare('SELECT COUNT(*) AS count FROM recording_chunk_refs WHERE recordingId = ?')
           .get(recordingId) as { count: number }).count;
         if (!selected.length || selected.length !== expected) throw new Error('Saved segments are unavailable');
         db.prepare('INSERT INTO archive_snapshots(id,channelId,startTime,endTime,expiresAt,createdAt) VALUES(?,?,?,?,?,?)')
           .run(id, channelId, startTime, endTime, expiresAt, now);
-        const add = db.prepare('INSERT INTO archive_snapshot_chunks VALUES(?,?,?)');
+        // Saved shows keep the captured master, even if the archive has a
+        // trimmed presentation copy of the same indexed chunk.
+        const add = db.prepare(`INSERT INTO archive_snapshot_chunks
+          (snapshotId,chunkId,ordinal,playbackPath,playbackSize,playbackOffset,playbackDuration)
+          VALUES(?,?,?,NULL,0,0,NULL)`);
         selected.forEach((c, ordinal) => add.run(id, c.id, ordinal));
       }).immediate();
       return snapshot(id)!;

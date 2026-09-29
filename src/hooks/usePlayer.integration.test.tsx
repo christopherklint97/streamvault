@@ -436,4 +436,43 @@ describe('usePlayer manual seek integration', () => {
 
     await act(async () => hookRef.current?.stop());
   });
+
+  it('does not rewind a finite archive to an old bookmark when AVPlay buffers', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>(() => {}));
+    usePlayerStore.setState({ currentChannel: {
+      id: 'archive_live_44115', name: 'TV4 archive', url: '/api/archive/snapshots/t/index.m3u8',
+      logo: '', group: '', region: '', contentType: 'movies', dvrHls: true,
+      duration: 600, initialSeekSeconds: 20,
+    } });
+    let positionMs = 20_000;
+    const seekTo = vi.fn((targetMs: number, success?: () => void) => { positionMs = targetMs; success?.(); });
+    const listeners: Array<{ oncurrentplaytime: (ms: number) => void; onbufferingstart: () => void;
+      onbufferingcomplete: () => void }> = [];
+    const avplay = {
+      close: vi.fn(), open: vi.fn(), setDisplayRect: vi.fn(), setBufferingParam: vi.fn(),
+      setListener: vi.fn((listener: typeof listeners[number]) => { listeners.push(listener); }),
+      prepareAsync: vi.fn((success?: () => void) => success?.()),
+      getDuration: vi.fn(() => 600_000), getCurrentTime: vi.fn(() => positionMs),
+      seekTo, play: vi.fn(), stop: vi.fn(),
+    };
+    (globalThis as typeof globalThis & { webapis: WebApis }).webapis = { avplay } as unknown as WebApis;
+    await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
+    expect(avplay.open).toHaveBeenCalledTimes(1);
+    positionMs = 42_500;
+    await act(async () => { listeners[0].oncurrentplaytime(positionMs); });
+    saveWatchProgress('archive_live_44115', 35, 600, 'movies'); // stale ten-second checkpoint
+    await act(async () => { listeners[0].onbufferingstart(); await vi.advanceTimersByTimeAsync(8_000); });
+    expect(avplay.open).toHaveBeenCalledTimes(2);
+    expect(seekTo).toHaveBeenLastCalledWith(42_500, expect.any(Function), expect.any(Function));
+    positionMs = 0; // AVPlay can report zero while buffering even after prior progress.
+    await act(async () => { listeners[1].oncurrentplaytime(43_000); });
+    await act(async () => { listeners[1].onbufferingstart(); await vi.advanceTimersByTimeAsync(8_000); });
+    expect(avplay.open).toHaveBeenCalledTimes(3);
+    expect(seekTo).toHaveBeenLastCalledWith(43_000, expect.any(Function), expect.any(Function));
+    await act(async () => { listeners[2].onbufferingstart(); await vi.advanceTimersByTimeAsync(7_000);
+      listeners[2].onbufferingcomplete(); await vi.advanceTimersByTimeAsync(2_000); });
+    expect(avplay.open).toHaveBeenCalledTimes(3);
+    await act(async () => hookRef.current?.stop());
+  });
 });
