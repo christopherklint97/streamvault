@@ -104,7 +104,7 @@ function frameRate(value?: string): { rate: number; timeBase: string } | undefin
 async function decodedVideoFrames(file: string, signal?: AbortSignal): Promise<string[]> {
   const { stdout } = await exec('nice', ['-n', '15', 'ionice', '-c', '3', 'ffmpeg',
     '-hide_banner', '-loglevel', 'error', '-nostdin', '-threads', '1', '-filter_threads', '1',
-    '-i', file, '-map', '0:v:0', '-an', '-fps_mode', 'passthrough', '-pix_fmt', 'yuv420p',
+    '-i', file, '-map', '0:v:0', '-an', '-vsync', '0', '-pix_fmt', 'yuv420p',
     '-f', 'framemd5', 'pipe:1'], { timeout: 45_000, maxBuffer: 2 * 1024 * 1024, signal });
   const hashes = stdout.split('\n').filter(line => line && !line.startsWith('#'))
     .map(line => line.split(',').at(-1)?.trim() || '');
@@ -202,7 +202,7 @@ async function prepareFrameAccurateCopy(previousFiles: string[], nextFile: strin
     await exec('nice', ['-n', '15', 'ionice', '-c', '3', 'ffmpeg', '-hide_banner', '-loglevel', 'error',
       '-nostdin', '-threads', '1', '-filter_threads', '1', '-i', nextFile, '-i', audioTemporary,
       '-filter_complex', filter, '-map', '[v]', '-map', '1:a:0',
-      '-fps_mode:v', 'passthrough', '-enc_time_base:v', fps.timeBase,
+      '-vsync', '0', '-enc_time_base:v', fps.timeBase,
       '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '19', '-pix_fmt', 'yuv420p',
       '-profile:v', profile, '-level:v', (v.level! / 10).toFixed(1),
       ...(profile === 'baseline' ? ['-bf', '0'] : []), '-threads:v', '1',
