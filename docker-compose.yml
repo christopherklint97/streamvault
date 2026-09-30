@@ -18,6 +18,9 @@ services:
       # Stop archive capture before exhausting host disk or crowding other services.
       - STREAMVAULT_ARCHIVE_MAX_DISK_GB=${STREAMVAULT_ARCHIVE_MAX_DISK_GB:-400}
       - STREAMVAULT_ARCHIVE_RESERVE_GB=${STREAMVAULT_ARCHIVE_RESERVE_GB:-20}
+      # Opt-in bounded, low-priority frame-accurate repair for fresh reconnects only.
+      - STREAMVAULT_FRAME_ACCURATE_SEAMS=${STREAMVAULT_FRAME_ACCURATE_SEAMS:-0}
+      - STREAMVAULT_FRAME_ACCURATE_CHANNEL_IDS=${STREAMVAULT_FRAME_ACCURATE_CHANNEL_IDS:-}
       # Optional hardening. If set, browser clients must enter the same value
       # in Settings under Backend token.
       - STREAMVAULT_AUTH_TOKEN=${STREAMVAULT_AUTH_TOKEN:-}

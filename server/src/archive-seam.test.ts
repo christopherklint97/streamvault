@@ -4,13 +4,67 @@ import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { matchedPrefix, fullDuplicateInSameWindow, prepareSeamCopy, processArchiveSeam } from './archive-seam.js';
+import { matchedPrefix, fullDuplicateInSameWindow, prepareSeamCopy, processArchiveSeam,
+  frameAccurateEnabledFor } from './archive-seam.js';
 import Database from 'better-sqlite3';
 import { createArchiveStore, ensureArchiveSchema } from './archive-store.js';
 
 const run = (args: string[]) => execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', ...args], { timeout: 30_000 });
 
 describe('conservative TS seam copy', () => {
+  it('gates frame-accurate re-encoding to explicitly named fresh channels', () => {
+    const now = 10_000_000;
+    try {
+      vi.stubEnv('STREAMVAULT_FRAME_ACCURATE_SEAMS', '1');
+      vi.stubEnv('STREAMVAULT_FRAME_ACCURATE_CHANNEL_IDS', 'live_44115');
+      expect(frameAccurateEnabledFor('live_44115', now - 30_000, now)).toBe(true);
+      expect(frameAccurateEnabledFor('live_1015944', now - 30_000, now)).toBe(false);
+      expect(frameAccurateEnabledFor('live_44115', now - 300_001, now)).toBe(false);
+      expect(frameAccurateEnabledFor('live_44115', now + 1, now)).toBe(false);
+      vi.stubEnv('STREAMVAULT_FRAME_ACCURATE_CHANNEL_IDS', '');
+      expect(frameAccurateEnabledFor('live_44115', now - 1000, now)).toBe(false);
+      vi.stubEnv('STREAMVAULT_FRAME_ACCURATE_CHANNEL_IDS', 'live_44115');
+      vi.stubEnv('STREAMVAULT_FRAME_ACCURATE_SEAMS', '0');
+      expect(frameAccurateEnabledFor('live_44115', now - 1000, now)).toBe(false);
+    } finally { vi.unstubAllEnvs(); }
+  });
+  it('starts an opted-in seam at the first unique decoded picture rather than replaying a GOP', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-frame-seam-'));
+    vi.stubEnv('STREAMVAULT_FRAME_ACCURATE_SEAMS', '1');
+    try {
+      const master = path.join(dir, 'master.ts');
+      const previous = path.join(dir, 'previous.ts');
+      const next = path.join(dir, 'next.ts');
+      const output = path.join(dir, 'next.playback.ts');
+      run(['-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=12:duration=12',
+        '-f', 'lavfi', '-i', 'sine=frequency=523:sample_rate=48000:duration=12',
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '24', '-keyint_min', '24',
+        '-sc_threshold', '0', '-c:a', 'aac', '-b:a', '96k', '-f', 'mpegts', master]);
+      run(['-ss', '0', '-i', master, '-t', '7', '-c', 'copy', '-f', 'mpegts', previous]);
+      run(['-ss', '4', '-i', master, '-t', '8', '-c', 'copy', '-f', 'mpegts', next]);
+      const before = fs.statSync(next);
+      const result = await prepareSeamCopy([previous], next, output);
+      expect(result?.kind).toBe('trim');
+      if (result?.kind !== 'trim') return;
+      expect(result.offset).toBeGreaterThan(2.8);
+      expect(result.offset).toBeLessThan(3.2);
+      const count = (file: string) => Number((JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-count_frames',
+        '-select_streams', 'v:0', '-show_entries', 'stream=nb_read_frames', '-of',
+        'json', file]).toString()) as { streams: Array<{ nb_read_frames: string }> }).streams[0].nb_read_frames);
+      expect(count(output)).toBe(count(next) - count(previous) + 48);
+      const audioHashes = (file: string): string[] =>
+        (JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'a:0',
+          '-show_packets', '-show_data_hash', 'sha256', '-show_entries', 'packet=data_hash',
+          '-of', 'json', file]).toString()) as { packets: Array<{ data_hash: string }> })
+          .packets.map(packet => packet.data_hash);
+      const rawAudio = audioHashes(next); const copiedAudio = audioHashes(output);
+      const audioStart = rawAudio.indexOf(copiedAudio[0]);
+      expect(audioStart).toBeGreaterThan(0);
+      expect(copiedAudio).toEqual(rawAudio.slice(audioStart));
+      expect(fs.statSync(next).size).toBe(before.size);
+      expect(fs.statSync(next).mtimeMs).toBe(before.mtimeMs);
+    } finally { vi.unstubAllEnvs(); fs.rmSync(dir, { recursive: true, force: true }); }
+  }, 60_000);
   it('keeps a new snapshot raw when a predecessor is pruned during derivative publication', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-seam-prune-race-'));
     const db = new Database(':memory:'); ensureArchiveSchema(db);
