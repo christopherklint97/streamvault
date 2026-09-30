@@ -110,11 +110,41 @@ async function decodedVideoFrames(file: string, signal?: AbortSignal): Promise<{
     .map(line => line.split(',').at(-1)?.trim() || '');
   if (hashes.length < 20 || hashes.some(hash => !/^[a-f0-9]{32}$/i.test(hash)))
     throw new Error('Invalid decoded video frame inventory');
-  // A torn terminal H.264 picture can still decode to a corrupted frame.
-  // Classify the error without ever logging FFmpeg's file or provider input.
-  if (stderr && !/error while decoding MB|corrupt decoded frame|concealing \d+ DC/i.test(stderr))
+  const errors = stderr.trim().split(/\r?\n/).filter(Boolean);
+  if (errors.some(line => !/^\[h264 @ 0x[\da-f]+\] error while decoding MB \d+ \d+, bytestream -?\d+$/i.test(line)))
     throw new Error('Unclassified video decoder error');
-  return { hashes, decoderError: Boolean(stderr) };
+  return { hashes, decoderError: errors.length > 0 };
+}
+
+/** Inspect only decoded-frame timing; never surface FFmpeg diagnostics or paths. */
+export function localizedTerminalDecoderError(trace: string, terminalTime: number, fps: number): boolean {
+  const lines = trace.split(/\r?\n/);
+  const diagnostics = lines.map((line, index) => ({ line, index }))
+    .filter(({ line }) => /error|invalid|corrupt|conceal|missing reference/i.test(line));
+  const damage = diagnostics.filter(({ line }) =>
+    /^\[h264 @ 0x[\da-f]+\] error while decoding MB \d+ \d+, bytestream -?\d+$/i.test(line));
+  const conceal = diagnostics.filter(({ line }) =>
+    /^\[h264 @ 0x[\da-f]+\] concealing \d+ DC, \d+ AC, \d+ MV errors in [IPB] frame$/i.test(line));
+  const corrupt = diagnostics.filter(({ line }) =>
+    /^\[vist#\d+:\d+\/h264 @ 0x[\da-f]+\] \[dec:h264 @ 0x[\da-f]+\] corrupt decoded frame$/i.test(line));
+  if (damage.length !== 1 || conceal.length > 1 || corrupt.length > 1 ||
+      diagnostics.length !== damage.length + conceal.length + corrupt.length ||
+      diagnostics.some(({ index }) => index < damage[0].index)) return false;
+  const nextFrameIndex = lines.findIndex((line, index) =>
+    index > damage[0].index && line.includes('decoder -> pts:'));
+  if (nextFrameIndex < 0 || diagnostics.some(({ index }) => index > nextFrameIndex)) return false;
+  const parsed = /decoder -> pts:[^\n]*?pts_time:([\d.-]+)/.exec(lines[nextFrameIndex]);
+  return Boolean(parsed && Number.isFinite(Number(parsed[1])) &&
+    Math.abs(Number(parsed[1]) - terminalTime) <= 0.25 / fps);
+}
+
+async function terminalDecoderDamage(file: string, terminalTime: number, fps: number,
+  signal?: AbortSignal): Promise<boolean> {
+  const { stderr } = await exec('nice', ['-n', '15', 'ionice', '-c', '3', 'ffmpeg',
+    '-hide_banner', '-loglevel', 'info', '-debug_ts', '-nostdin', '-threads', '1',
+    '-i', file, '-map', '0:v:0', '-an', '-vsync', '0', '-f', 'null', '-'],
+  { timeout: 45_000, maxBuffer: 4 * 1024 * 1024, signal });
+  return localizedTerminalDecoderError(stderr, terminalTime, fps);
 }
 
 export function allowDamagedTerminalPicture(unmatched: number, decoderError: boolean): boolean {
@@ -156,10 +186,12 @@ async function prepareFrameAccurateCopy(previousFiles: string[], nextFile: strin
     return undefined;
   const previousFrames: string[] = [];
   let finalPredecessorDecoderError = false;
+  let finalPredecessorFrameCount = 0;
   for (const file of previousFiles) {
     const decoded = await decodedVideoFrames(file, signal);
     finalPredecessorDecoderError = decoded.decoderError;
     const frames = decoded.hashes;
+    finalPredecessorFrameCount = frames.length;
     let repeated = 0;
     for (let n = 1; n <= Math.min(20, previousFrames.length, frames.length); n++) {
       if (previousFrames.slice(-n).every((hash, i) => hash === frames[i])) repeated = n;
@@ -169,19 +201,24 @@ async function prepareFrameAccurateCopy(previousFiles: string[], nextFile: strin
   const nextInventory = await decodedVideoFrames(nextFile, signal);
   if (nextInventory.decoderError) return undefined;
   const nextFrames = nextInventory.hashes;
-  const matches: number[] = [];
+  const matches: Array<{ count: number; unmatched: number }> = [];
   for (let start = 0; start < previousFrames.length; start++) {
     if (previousFrames[start] !== nextFrames[0]) continue;
     let count = 0;
     while (start + count < previousFrames.length && count < nextFrames.length &&
       previousFrames[start + count] === nextFrames[count]) count++;
+    const unmatched = previousFrames.length - start - count;
     if (count >= 20 && count < nextFrames.length &&
-        allowDamagedTerminalPicture(previousFrames.length - start - count, finalPredecessorDecoderError) &&
-        Math.abs(count / fps.rate - videoDuration) <= 0.15) matches.push(count);
+        allowDamagedTerminalPicture(unmatched, finalPredecessorDecoderError) &&
+        Math.abs(count / fps.rate - videoDuration) <= 0.15) matches.push({ count, unmatched });
   }
 
   if (matches.length !== 1) return undefined;
-  const firstUnique = matches[0];
+  const { count: firstUnique, unmatched } = matches[0];
+  // The decoder can report an error earlier in the predecessor; never use
+  // that as permission to discard a genuinely unique final picture.
+  if (unmatched === 1 && !await terminalDecoderDamage(previousFiles.at(-1)!,
+    (finalPredecessorFrameCount - 1) / fps.rate, fps.rate, signal)) return undefined;
   const offset = firstUnique / fps.rate;
   const firstAudio = Number(current.audio[0].pts_time);
   const firstVideo = Number(current.video[0].pts_time);
