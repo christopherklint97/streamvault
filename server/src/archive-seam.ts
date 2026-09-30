@@ -6,9 +6,11 @@ import path from 'node:path';
 import type { ArchiveStore } from './archive-store.js';
 
 const exec = promisify(execFile);
-type Packet = { stream_index: number; pts_time: string; duration_time?: string; flags: string; data_hash: string };
+type Packet = { stream_index: number; pts_time: string; dts_time?: string; duration_time?: string; flags: string; data_hash: string };
 type PriorPacket = Packet & { priorTime?: number };
-type Probe = { streams: Array<{ index: number; codec_type: string; codec_name: string }>;
+type Probe = { streams: Array<{ index: number; codec_type: string; codec_name: string;
+  profile?: string; level?: number; width?: number; height?: number; pix_fmt?: string;
+  avg_frame_rate?: string; sample_rate?: string; channels?: number }>;
   packets: Packet[]; format?: { duration?: string } };
 
 async function probe(file: string, signal?: AbortSignal): Promise<Probe | undefined> {
@@ -16,7 +18,7 @@ async function probe(file: string, signal?: AbortSignal): Promise<Probe | undefi
   if (!stat.isFile() || stat.size <= 0 || stat.size > 64 * 1024 * 1024) return undefined;
   const { stdout } = await exec('ffprobe', ['-v', 'error', '-show_streams', '-show_packets',
     '-show_format', '-show_data_hash', 'sha256', '-show_entries',
-    'stream=index,codec_type,codec_name:packet=stream_index,pts_time,duration_time,flags,data_hash:format=duration',
+    'stream=index,codec_type,codec_name,profile,level,width,height,pix_fmt,avg_frame_rate,sample_rate,channels:packet=stream_index,pts_time,dts_time,duration_time,flags,data_hash:format=duration',
     '-of', 'json', file], { timeout: 15_000, maxBuffer: 5 * 1024 * 1024, signal });
   return JSON.parse(stdout) as Probe;
 }
@@ -90,9 +92,152 @@ export function fullDuplicateInSameWindow(prior: Array<{ video: Packet[]; audio:
   });
 }
 
+function frameRate(value?: string): { rate: number; timeBase: string } | undefined {
+  const match = /^(\d+)\/(\d+)$/.exec(value || '');
+  if (!match) return undefined;
+  const numerator = Number(match[1]); const denominator = Number(match[2]);
+  const rate = numerator / denominator;
+  return numerator > 0 && denominator > 0 && rate >= 12 && rate <= 60
+    ? { rate, timeBase: `${denominator}:${numerator}` } : undefined;
+}
+
+async function decodedVideoFrames(file: string, signal?: AbortSignal): Promise<string[]> {
+  const { stdout } = await exec('nice', ['-n', '15', 'ionice', '-c', '3', 'ffmpeg',
+    '-hide_banner', '-loglevel', 'error', '-nostdin', '-threads', '1', '-filter_threads', '1',
+    '-i', file, '-map', '0:v:0', '-an', '-vsync', '0', '-pix_fmt', 'yuv420p',
+    '-f', 'framemd5', 'pipe:1'], { timeout: 45_000, maxBuffer: 2 * 1024 * 1024, signal });
+  const hashes = stdout.split('\n').filter(line => line && !line.startsWith('#'))
+    .map(line => line.split(',').at(-1)?.trim() || '');
+  if (hashes.length < 20 || hashes.some(hash => !/^[a-f0-9]{32}$/i.test(hash)))
+    throw new Error('Invalid decoded video frame inventory');
+  return hashes;
+}
+
+function monotonicDts(packets: Packet[]): boolean {
+  let prior = -Infinity;
+  for (const packet of packets) {
+    const dts = Number(packet.dts_time);
+    if (!Number.isFinite(dts) || !Number.isFinite(Number(packet.pts_time)) || dts <= prior) return false;
+    prior = dts;
+  }
+  return true;
+}
+
+/** A bounded background-only alternative to keyframe copy. A timestamp-only
+ * cut is unsafe for B-frames: the first unique packet need not be the first
+ * unique picture in presentation order. Preserve every preceding picture and
+ * each decoded picture after the verified overlap. */
+async function prepareFrameAccurateCopy(previousFiles: string[], nextFile: string, output: string,
+  current: { video: Packet[]; audio: Packet[] }, videoDuration: number, audioDuration: number,
+  media: Probe, signal?: AbortSignal): Promise<{ kind: 'trim'; offset: number; duration: number; size: number } | undefined> {
+  const sourceDuration = Number(media.format?.duration);
+  const v = media.streams.find(s => s.codec_type === 'video');
+  const a = media.streams.find(s => s.codec_type === 'audio');
+  const fps = frameRate(v?.avg_frame_rate);
+  const sampleRate = Number(a?.sample_rate);
+
+  if (!fps || !v || !a || !['Baseline', 'Constrained Baseline', 'Main', 'High'].includes(v.profile || '') ||
+      !Number.isInteger(v.level) || v.level! < 10 || v.level! > 52 ||
+      v.pix_fmt !== 'yuv420p' || !v.width || !v.height || v.width > 1920 || v.height > 1080 ||
+      ![1, 2].includes(a.channels ?? 0) || sampleRate !== 48_000 ||
+      !Number.isFinite(sourceDuration) || sourceDuration - Math.min(videoDuration, audioDuration) > 9.5)
+    return undefined;
+  // AAC LC carries 1024 samples per packet here; reject layouts where a
+  // packet count cannot be converted to an exact decoded sample position.
+  if (!current.audio.every(packet => Math.abs(Number(packet.duration_time) - 1024 / sampleRate) < 0.00001))
+    return undefined;
+  const previousFrames: string[] = [];
+  for (const file of previousFiles) {
+    const frames = await decodedVideoFrames(file, signal);
+    let repeated = 0;
+    for (let n = 1; n <= Math.min(20, previousFrames.length, frames.length); n++) {
+      if (previousFrames.slice(-n).every((hash, i) => hash === frames[i])) repeated = n;
+    }
+    previousFrames.push(...frames.slice(repeated));
+  }
+  const nextFrames = await decodedVideoFrames(nextFile, signal);
+  const matches: number[] = [];
+  for (let start = 0; start < previousFrames.length; start++) {
+    if (previousFrames[start] !== nextFrames[0]) continue;
+    let count = 0;
+    while (start + count < previousFrames.length && count < nextFrames.length &&
+      previousFrames[start + count] === nextFrames[count]) count++;
+    if (count >= 20 && count < nextFrames.length && previousFrames.length - start - count === 0 &&
+        Math.abs(count / fps.rate - videoDuration) <= 0.15) matches.push(count);
+  }
+
+  if (matches.length !== 1) return undefined;
+  const firstUnique = matches[0];
+  const offset = firstUnique / fps.rate;
+  const firstAudio = Number(current.audio[0].pts_time);
+  const firstVideo = Number(current.video[0].pts_time);
+  // Every matching AAC packet was already verified against the predecessor.
+  const matchedAudio = current.audio.findIndex(packet =>
+    Number(packet.pts_time) - firstAudio >= audioDuration - 0.011);
+  if (matchedAudio < 40 || matchedAudio >= current.audio.length) return undefined;
+  const audioOffset = matchedAudio * 1024 / sampleRate;
+
+  if (Math.abs(audioOffset - audioDuration) > 0.03) return undefined;
+  const avDelay = firstVideo + offset - (firstAudio + audioOffset);
+
+  if (!Number.isFinite(avDelay) || avDelay < 0 || avDelay > 0.25 ||
+      sourceDuration - offset < 2 || sourceDuration - offset > 9.5) return undefined;
+  const profile = v.profile === 'Constrained Baseline' ? 'baseline' : v.profile!.toLowerCase();
+  // Copy the verified *unique* AAC packets. Re-encoding AAC introduces an
+  // additional priming packet (observed as a ~21 ms delay in the scratch seam).
+  const audioTemporary = `${output}.audio.part`;
+  try {
+    await exec('nice', ['-n', '15', 'ionice', '-c', '3', 'ffmpeg', '-hide_banner', '-loglevel', 'error',
+      '-nostdin', '-i', nextFile, '-ss', audioOffset.toFixed(6), '-map', '0:a:0',
+      '-c:a', 'copy', '-f', 'mpegts', '-y', audioTemporary],
+    { timeout: 15_000, maxBuffer: 64 * 1024, signal });
+    const audioProbe = await probe(audioTemporary, signal);
+    const audioStream = audioProbe?.streams.find(stream => stream.codec_type === 'audio');
+    const copiedAudio = audioProbe?.packets.filter(packet => packet.stream_index === audioStream?.index);
+    const expectedAudio = current.audio.slice(matchedAudio);
+    if (!copiedAudio || copiedAudio.length !== expectedAudio.length ||
+        !copiedAudio.every((packet, index) => packet.data_hash === expectedAudio[index].data_hash))
+      return undefined;
+    const filter = `[0:v:0]trim=start_frame=${firstUnique},setpts=PTS-STARTPTS+${avDelay.toFixed(6)}/TB[v]`;
+    await exec('nice', ['-n', '15', 'ionice', '-c', '3', 'ffmpeg', '-hide_banner', '-loglevel', 'error',
+      '-nostdin', '-threads', '1', '-filter_threads', '1', '-i', nextFile, '-i', audioTemporary,
+      '-filter_complex', filter, '-map', '[v]', '-map', '1:a:0',
+      '-vsync', '0', '-enc_time_base:v', fps.timeBase,
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '19', '-pix_fmt', 'yuv420p',
+      '-profile:v', profile, '-level:v', (v.level! / 10).toFixed(1),
+      ...(profile === 'baseline' ? ['-bf', '0'] : []), '-threads:v', '1',
+      '-c:a', 'copy', '-f', 'mpegts', '-y', output],
+    { timeout: 65_000, maxBuffer: 64 * 1024, signal });
+  } finally {
+    await fs.rm(audioTemporary, { force: true });
+  }
+  const result = await probe(output, signal);
+  const selected = result && streams(result);
+  const duration = Number(result?.format?.duration);
+  const size = (await fs.stat(output)).size;
+  const { stdout } = await exec('ffprobe', ['-v', 'error', '-count_frames', '-select_streams', 'v:0',
+    '-show_entries', 'stream=nb_read_frames', '-of', 'json', output],
+  { timeout: 15_000, maxBuffer: 2048, signal });
+  const actualFrames = Number((JSON.parse(stdout) as { streams?: Array<{ nb_read_frames?: string }> })
+    .streams?.[0]?.nb_read_frames);
+
+  if (!selected || !selected.video[0].flags.includes('K') ||
+      selected.audio.length !== current.audio.length - matchedAudio ||
+      !selected.audio.every((packet, index) => packet.data_hash === current.audio[matchedAudio + index].data_hash) ||
+      !monotonicDts(selected.video) || !monotonicDts(selected.audio) ||
+      Math.abs(Number(selected.video[0].pts_time) - Number(selected.audio[0].pts_time) - avDelay) > 0.06 ||
+      Math.abs(Number(selected.video.at(-1)!.pts_time) - Number(selected.audio.at(-1)!.pts_time)) > 0.3 ||
+      actualFrames !== nextFrames.length - firstUnique ||
+      !Number.isFinite(duration) || duration <= 0 ||
+      Math.abs(duration - (sourceDuration - offset)) > 0.5 ||
+      size <= 0 || size > (await fs.stat(nextFile)).size * 1.5) return undefined;
+  return { kind: 'trim', offset, duration, size };
+}
+
 /** Stage and validate a stream-copy TS rendition. Never writes to either master.
  * Returns undefined on uncertain evidence, missing keyframe, or invalid output. */
-export async function prepareSeamCopy(previousFiles: string[], nextFile: string, output: string, signal?: AbortSignal):
+export async function prepareSeamCopy(previousFiles: string[], nextFile: string, output: string, signal?: AbortSignal,
+  frameAccurate = process.env.STREAMVAULT_FRAME_ACCURATE_SEAMS === '1'):
   Promise<{ kind: 'trim'; offset: number; duration: number; size: number } | { kind: 'duplicate' } | undefined> {
   if (previousFiles.length < 1 || previousFiles.length > 2) return undefined;
   const probes = await Promise.all([...previousFiles, nextFile].map(file => probe(file, signal)));
@@ -136,12 +281,26 @@ export async function prepareSeamCopy(previousFiles: string[], nextFile: string,
   if (!video || !audio || Math.abs(video.duration - audio.duration) > 0.5 ||
       Math.abs(video.start - audio.start) > 0.5 || Math.abs(video.end - audio.end) > 0.5) return undefined;
   const firstVideo = Number(current.video[0].pts_time);
+  const sourceDuration = Number(probes.at(-1)!.format?.duration);
+  if (frameAccurate && Number.isFinite(sourceDuration) &&
+      sourceDuration - Math.min(video.duration, audio.duration) <= 9.5) {
+    try {
+      const precise = await prepareFrameAccurateCopy(previousFiles, nextFile, output, current,
+        video.duration, audio.duration, probes.at(-1)!, signal);
+      if (precise) return precise;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+
+      // Ineligible/corrupt media or an overloaded encoder must not change the
+      // raw capture. Fall back to the proven keyframe-aligned stream copy.
+    }
+    await fs.rm(output, { force: true });
+  }
   const keyframes = current.video.filter(p => p.flags.includes('K') &&
     Number(p.pts_time) - firstVideo >= 0.5 && Number(p.pts_time) - firstVideo <= Math.min(video.duration, audio.duration) - 0.15);
   const keyframe = keyframes.at(-1);
   if (!keyframe) return undefined;
   const offset = Number(keyframe.pts_time) - firstVideo;
-  const sourceDuration = Number(probes.at(-1)!.format?.duration);
   if (!Number.isFinite(sourceDuration) || sourceDuration - offset < 2) return undefined;
   try {
     await exec('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', '-threads', '1',
@@ -164,6 +323,12 @@ export async function prepareSeamCopy(previousFiles: string[], nextFile: string,
   } finally {
     // The caller removes a staged output unless it commits the verified copy.
   }
+}
+
+export function frameAccurateEnabledFor(channelId: string, end: number, now: number): boolean {
+  if (process.env.STREAMVAULT_FRAME_ACCURATE_SEAMS !== '1' || end > now || now - end >= 5 * 60_000) return false;
+  return (process.env.STREAMVAULT_FRAME_ACCURATE_CHANNEL_IDS || '').split(',')
+    .map(id => id.trim()).filter(Boolean).includes(channelId);
 }
 
 /** One background job per seam; unchanged capture files remain authoritative.
@@ -210,7 +375,8 @@ export async function processArchiveSeam(store: ArchiveStore, root: string, id: 
     try { await fs.stat(output); return false; } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
-    const result = await prepareSeamCopy(preceding, input, staged, signal);
+    const result = await prepareSeamCopy(preceding, input, staged, signal,
+      frameAccurateEnabledFor(current.channelId, current.end, now));
     if (signal?.aborted) return false;
     if (!result) return false;
     const after = await fs.stat(input);
