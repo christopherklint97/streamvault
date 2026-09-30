@@ -5,13 +5,36 @@ import fsPromises from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { matchedPrefix, fullDuplicateInSameWindow, prepareSeamCopy, processArchiveSeam,
-  frameAccurateEnabledFor } from './archive-seam.js';
+  frameAccurateEnabledFor, allowDamagedTerminalPicture } from './archive-seam.js';
 import Database from 'better-sqlite3';
 import { createArchiveStore, ensureArchiveSchema } from './archive-store.js';
 
 const run = (args: string[]) => execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', ...args], { timeout: 30_000 });
 
 describe('conservative TS seam copy', () => {
+  it('accepts at most one damaged terminal picture only with a decoder corruption signal', () => {
+    expect(allowDamagedTerminalPicture(0, false)).toBe(true);
+    expect(allowDamagedTerminalPicture(1, true)).toBe(true);
+    expect(allowDamagedTerminalPicture(1, false)).toBe(false);
+    expect(allowDamagedTerminalPicture(2, true)).toBe(false);
+    expect(allowDamagedTerminalPicture(-1, true)).toBe(false);
+  });
+  it.skipIf(!process.env.STREAMVAULT_TV4_TORN_SAMPLE)(
+    'removes the GOP replay after a real TV4 one-frame torn predecessor without losing raw media', async () => {
+      const base = process.env.STREAMVAULT_TV4_TORN_SAMPLE!;
+      const files = ['older.ts', 'prior.ts', 'raw.ts'].map(name => path.join(base, name));
+      for (const file of files) expect(fs.statSync(file).isFile()).toBe(true);
+      const initial = files.map(file => ({ size: fs.statSync(file).size, mtimeMs: fs.statSync(file).mtimeMs }));
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-tv4-torn-'));
+      try {
+        const result = await prepareSeamCopy(files.slice(0, 2), files[2], path.join(dir, 'playback.ts'), undefined, true);
+        expect(result?.kind).toBe('trim');
+        if (result?.kind !== 'trim') throw new Error('expected frame-accurate TV4 trim');
+        expect(result.offset).toBeCloseTo(15.6, 2);
+        expect(files.map(file => ({ size: fs.statSync(file).size, mtimeMs: fs.statSync(file).mtimeMs })))
+          .toEqual(initial);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }, 120_000);
   it('gates frame-accurate re-encoding to explicitly named fresh channels', () => {
     const now = 10_000_000;
     try {
