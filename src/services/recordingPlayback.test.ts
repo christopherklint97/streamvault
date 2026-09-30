@@ -50,6 +50,16 @@ describe('authenticated recording playback tickets', () => {
     })).resolves.toBe('/api/recordings/r1/play?ticket=one-time');
   });
 
+  it('resolves ticket URLs for a Tizen file-based widget against its configured backend', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({
+      url: '/api/archive/snapshots/s1/index.m3u8?ticket=x', expiresAt: Date.now() + 60_000,
+    }));
+    await expect(getRecordingPlaybackUrl({
+      apiBaseUrl: 'https://dvr.example.test', recordingId: 'r1', directUrl: '/raw',
+      pageOrigin: 'file://',
+    })).resolves.toBe('https://dvr.example.test/api/archive/snapshots/s1/index.m3u8?ticket=x');
+  });
+
   it('reads a seekable recording status with the configured API credentials', async () => {
     localStorage.setItem('streamvault_auth_token', JSON.stringify('secret'));
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ status: 'ready' }));

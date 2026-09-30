@@ -31,6 +31,7 @@ function overrideValue(value: number | null | undefined): boolean | null {
 export function mapRecordingForApi(recording: DBRecording, progress: FinalizationProgress | null = null) {
   return {
     ...recording,
+    playback_format: recording.capture_format === 'segmented' ? 'hls' as const : 'file' as const,
     finalization_progress: recording.status === 'finalizing' ? progress : null,
     master_path: recording.master_file_path ?? null,
     commercial_analysis_status: normalizeCommercialAnalysisStatus(recording.analysis_state),

@@ -11,6 +11,8 @@ import { cn } from '../utils/cn';
 import FocusZone from '../components/FocusZone';
 import { getRecordingAnalysisStatus, getRecordingCommercialSeconds } from '../utils/recording-commercial';
 import { getRecordingPlaybackUrl, getRecordingVodStatus } from '../services/recordingPlayback';
+import { getRecordingHlsPlayback } from '../services/archivePlayback';
+import ArchivePage from './ArchivePage';
 import { isAppleMobile } from '../utils/platform';
 import { recordingTransport } from '../utils/recording-transport';
 import {
@@ -160,12 +162,12 @@ function RecordingRow({ rec, onPlay, onCancel, onStop, onDelete, onAnalyze, onRe
         {rec.status === 'completed' && (
           <button data-focusable className={`${actionClass} bg-[#1d4ed8] text-white hover:bg-[#2563eb]`} onClick={onPlay}>Play</button>
         )}
-        {rec.status === 'completed' && (analysisStatus === 'not_analyzed' || analysisStatus === 'failed') && (
+        {rec.status === 'completed' && rec.playback_format !== 'hls' && (analysisStatus === 'not_analyzed' || analysisStatus === 'failed') && (
           <button data-focusable className={`${actionClass} bg-[#30364a] text-[#dbeafe] hover:bg-[#334155]`} onClick={onAnalyze}>
             {analysisStatus === 'failed' ? 'Retry' : 'Analyze'}
           </button>
         )}
-        {rec.status === 'completed' && (analysisStatus === 'review_needed' || analysisStatus === 'ready' || segmentCount > 0) && (
+        {rec.status === 'completed' && (rec.playback_format === 'hls' || analysisStatus === 'review_needed' || analysisStatus === 'ready' || segmentCount > 0) && (
           <button data-focusable className={`${actionClass} bg-[#78350f] text-[#fde68a] hover:bg-[#92400e]`} onClick={onReview}>Review</button>
         )}
         {rec.status === 'recording' && (
@@ -874,7 +876,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
   );
 }
 
-type Tab = 'recordings' | 'rules';
+type Tab = 'recordings' | 'rules' | 'archive';
 
 export default function Recordings() {
   const recordings = useRecordingStore((s) => s.recordings);
@@ -912,12 +914,11 @@ export default function Recordings() {
   const handlePlay = useCallback(async (rec: Recording) => {
     const directUrl = `/api/recordings/${encodeURIComponent(rec.id)}/stream`;
     try {
-      const playbackUrl = await getRecordingPlaybackUrl({
-        apiBaseUrl,
-        recordingId: rec.id,
-        directUrl,
-      });
-      const vodReady = recordingTransport(rec.file_path) === 'mpegts' && isAppleMobile()
+      const hls = rec.playback_format === 'hls';
+      const playbackUrl = hls
+        ? (await getRecordingHlsPlayback({ apiBaseUrl, recordingId: rec.id })).url
+        : await getRecordingPlaybackUrl({ apiBaseUrl, recordingId: rec.id, directUrl });
+      const vodReady = !hls && recordingTransport(rec.file_path) === 'mpegts' && isAppleMobile()
         ? await getRecordingVodStatus(apiBaseUrl, rec.id).then(status => status === 'ready').catch(() => false)
         : false;
       setChannel({
@@ -929,6 +930,7 @@ export default function Recordings() {
         region: '',
         contentType: 'movies',
         recordingId: rec.id,
+        dvrHls: hls,
         recordingTransport: recordingTransport(rec.file_path),
         recordingSize: rec.file_size,
         recordingVodReady: vodReady,
@@ -994,6 +996,10 @@ export default function Recordings() {
         >
           Rules ({rules.length})
         </button>
+        <button data-focusable className={cn(
+          'py-2 px-5 text-15 border-b-2 transition-colors duration-150 hover:text-[#e5e7eb]',
+          tab === 'archive' ? 'text-white border-[#3b82f6]' : 'text-[#9ca3af] border-transparent'
+        )} onClick={() => setTab('archive')}>24-hour archive</button>
       </div>
 
       {tab === 'recordings' && (
@@ -1054,6 +1060,7 @@ export default function Recordings() {
         </div>
       )}
 
+      {tab === 'archive' && <ArchivePage />}
       {tab === 'rules' && (
         <div className="pb-8">
           <RuleForm onCreated={() => { void fetchRules(); }} />

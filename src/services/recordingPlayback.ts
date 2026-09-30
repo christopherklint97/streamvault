@@ -21,22 +21,20 @@ interface RecordingPlaybackRequest {
   pageOrigin?: string;
 }
 
-function resolveMediaUrl(url: string, apiBaseUrl: string, pageOrigin: string): string {
+export function resolveMediaUrl(url: string, apiBaseUrl: string, pageOrigin: string): string {
   let parsed: URL;
   try {
-    parsed = new URL(url, pageOrigin);
+    const base = apiBaseUrl ? new URL(apiBaseUrl, pageOrigin) : new URL(pageOrigin);
+    parsed = new URL(url, base);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('unsupported protocol');
+    if (/^https?:\/\//i.test(url)) return parsed.toString();
+    // Signed media routes must remain on the configured backend, never a protocol-relative third-party host.
+    if (parsed.origin !== base.origin) throw new Error('cross-origin media route');
+    if (!apiBaseUrl || base.origin === new URL(pageOrigin).origin) return url;
+    return parsed.toString();
   } catch {
-    throw new Error('Playback endpoint returned an invalid URL');
+    throw new Error('Playback endpoint returned an invalid or unsupported URL');
   }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error('Playback endpoint returned an unsupported URL');
-  }
-  if (/^https?:\/\//i.test(url)) return parsed.toString();
-  if (!apiBaseUrl) return url;
-
-  const api = new URL(apiBaseUrl, pageOrigin);
-  if (api.origin === new URL(pageOrigin).origin) return url;
-  return `${apiBaseUrl.replace(/\/$/, '')}/${url.replace(/^\//, '')}`;
 }
 
 export async function getRecordingPlaybackUrl({

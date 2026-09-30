@@ -34,6 +34,7 @@ import {
   seekHtml5,
 } from '../services/playbackSeek';
 import { useRecordingStore } from '../stores/recordingStore';
+import { attachFiniteHls } from '../services/finiteHls';
 import {
   getAvPlayClockReading,
   getHtml5ClockReading,
@@ -102,6 +103,7 @@ function beginCommercialPlayback(channel: Channel): number {
 // ---------------------------------------------------------------------------
 
 let activeMpegtsPlayer: MpegtsType.Player | null = null;
+let disposeFiniteHls: (() => void) | null = null;
 let bgProgressInterval: ReturnType<typeof setInterval> | null = null;
 let bgBufferTimer: ReturnType<typeof setTimeout> | null = null;
 let recordingVodPoll: ReturnType<typeof setInterval> | null = null;
@@ -363,6 +365,9 @@ export function stopActivePlayback() {
     }
   }
 
+  disposeFiniteHls?.();
+  disposeFiniteHls = null;
+
   if (typeof webapis !== 'undefined' && webapis.avplay) {
     clearAvplayStallTimer();
     try {
@@ -461,7 +466,7 @@ export function usePlayer(): {
   // that the media element actually detects, with Off enforced by track mode.
   const keepSubsRef = useRef(getSubtitlesEnabled());
 
-  const play = useCallback(function play() {
+  const play = useCallback(function play(finiteRetryPosition?: number) {
     const channel = usePlayerStore.getState().currentChannel;
     if (!channel) {
       log.warn('play() called but no currentChannel set');
@@ -472,13 +477,18 @@ export function usePlayer(): {
     const setError = usePlayerStore.getState().setError;
     const audioOnly = channel.contentType === 'livetv' && usePlayerStore.getState().audioOnly;
 
-    log.info(`▶ play() channel="${channel.name}" id=${channel.id} type=${channel.contentType} url=${channel.url ? channel.url.substring(0, 60) + '...' : '(empty)'}`);
+    // Provider URLs and DVR ticket queries are credentials; never send them to client logs.
+    log.info(`▶ play() channel="${channel.name}" id=${channel.id} type=${channel.contentType}`);
 
     // Check for saved progress to resume from
     const savedProgress = channel.contentType !== 'livetv'
       ? getWatchProgress(channel.id)
       : null;
-    const resumePosition = normalizePlaybackStart(getResumePosition(savedProgress));
+    const resumePosition = normalizePlaybackStart(
+      channel.dvrHls && Number.isFinite(finiteRetryPosition)
+        ? finiteRetryPosition!
+        : savedProgress ? getResumePosition(savedProgress) : (channel.initialSeekSeconds ?? 0),
+    );
     if (resumePosition > 0) {
       log.info(`Resuming from position ${resumePosition.toFixed(1)}s`);
     }
@@ -501,14 +511,14 @@ export function usePlayer(): {
         // playback retains subtitle data so AVPlay can inventory real TEXT
         // tracks; setSilentSubtitle enforces the persisted Off state.
         const isRecording = Boolean(channel.recordingId);
-        const playerPath = isRecording
+        const playerPath = isRecording || channel.dvrHls
           ? channel.url
           : getStreamUrl(channel.id, channel.url, isLive ? true : keepSubsRef.current, isLive, audioOnly);
         const tizenPlayUrl = toAbsolutePlayerUrl(
           playerPath,
           useChannelStore.getState().apiBaseUrl
         );
-        log.info(`AVPlay: opening ${tizenPlayUrl}`);
+        log.info(`AVPlay: opening ${channel.dvrHls ? 'finite DVR HLS' : channel.contentType} playback`);
         avplay.open(tizenPlayUrl);
         avplay.setDisplayRect(0, 0, 1920, 1080);
 
@@ -549,7 +559,21 @@ export function usePlayer(): {
           avplayLastRetryAt = now;
           log.warn(`AVPlay: ${reason} — auto-retrying`);
           clearAvplayStallTimer();
-          play();
+          // A finite snapshot is stable across retries. Its persisted watch
+          // checkpoint is only updated every ten seconds; using it here turns
+          // a segment-boundary stall into a visible replay of those seconds.
+          let finiteRetryPosition: number | undefined;
+          if (channel.dvrHls && startupReady) {
+            try {
+              const position = avplay.getCurrentTime() / 1000;
+              if (Number.isFinite(position) && position > 0) finiteRetryPosition = position;
+            } catch { /* fall back to the last published clock reading */ }
+            if (finiteRetryPosition === undefined && playbackClock.getSnapshot().generation === clockGeneration) {
+              const position = playbackClock.getSnapshot().position;
+              if (position > 0) finiteRetryPosition = position;
+            }
+          }
+          play(finiteRetryPosition);
           return true;
         };
 
@@ -717,6 +741,8 @@ export function usePlayer(): {
         activeMpegtsPlayer = null;
         previousPlayer.destroy();
       }
+      disposeFiniteHls?.();
+      disposeFiniteHls = null;
       // Reset the video element so the new source can attach cleanly
       video.pause();
       video.removeAttribute('src');
@@ -734,6 +760,28 @@ export function usePlayer(): {
       let startupStarted = false;
       let canPlay = false;
       let playAttempted = false;
+      let pendingLiveEof = false;
+      let eofSettled = false;
+      const recoverDrainedLiveStream = (force = false) => {
+        // mpegts.js emits LOADING_COMPLETE before its final MSE append settles.
+        // Keep EOF pending through an intentional pause so resume can recover.
+        if (!pendingLiveEof || !eofSettled || !isCurrentPlayback() ||
+            liveStreamRecovery.isSuspended()) return;
+        if (!force) {
+          const position = video.currentTime;
+          let ahead = 0;
+          for (let i = 0; i < video.buffered.length; i++) {
+            if (video.buffered.start(i) <= position + 0.25 && video.buffered.end(i) > position) {
+              ahead = video.buffered.end(i) - position;
+              break;
+            }
+          }
+          if (ahead > 3) return;
+        }
+        pendingLiveEof = false;
+        setStatus('loading');
+        liveStreamRecovery.transportEnded('loading-complete');
+      };
       const updateHtml5Clock = () => {
         routePlaybackClock(
           playbackClock,
@@ -803,8 +851,12 @@ export function usePlayer(): {
           canPlay = true;
           attemptPlay();
         };
+        video.onplay = () => recoverDrainedLiveStream();
         video.onwaiting = () => {
           log.debug('HTML5 event: waiting');
+          // A completed transport can still have playable MSE data. Reconnect
+          // only when it is actually exhausted, not while it is buffered.
+          if (pendingLiveEof) recoverDrainedLiveStream();
           // Delay showing loading spinner to avoid flashing during brief rebuffers
           if (bgBufferTimer) clearTimeout(bgBufferTimer);
           bgBufferTimer = setTimeout(() => setStatus('loading'), 1500);
@@ -820,6 +872,7 @@ export function usePlayer(): {
           if (!isLiveTs || !isCurrentPlayback() || video.currentTime <= lastMediaTime) return;
           lastMediaTime = video.currentTime;
           liveStreamRecovery.progress();
+          recoverDrainedLiveStream();
         };
         video.onstalled = () => {
           log.warn('HTML5 event: stalled');
@@ -841,6 +894,7 @@ export function usePlayer(): {
         video.onended = () => {
           log.info('HTML5 event: ended');
           if (isLiveTs && isCurrentPlayback()) {
+            if (pendingLiveEof) { recoverDrainedLiveStream(true); return; }
             setStatus('loading');
             liveStreamRecovery.transportEnded('media-ended');
             return;
@@ -856,21 +910,23 @@ export function usePlayer(): {
       // Recordings have a direct server URL; live/VOD go through stream proxy
       const isFiniteTsRecording = isRecording && channel.recordingTransport === 'mpegts';
       const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
-      const appleRecordingHlsPath = isFiniteTsRecording && isAppleMobile()
-        ? recordingHlsPath(channel.url, channel.recordingVodReady ? 0 : resumePosition)
-        : null;
-      const appleMobileVodPath = isAppleMobile()
+      const appleMobileVodPath = isAppleMobile() && !channel.dvrHls
         ? iphoneVodPlaybackPath(channel.id, channel.url, channel.contentType, resumePosition)
         : null;
-      const needsBrowserTranscode = !isLiveTs && !isRecording && !appleMobileVodPath;
-      const playUrl = isRecording
-        ? appleRecordingHlsPath ? `${apiBaseUrl}${appleRecordingHlsPath}` : channel.url
+      const appleRecordingHlsPath = isFiniteTsRecording && isAppleMobile() && !channel.dvrHls
+        ? recordingHlsPath(channel.url, channel.recordingVodReady ? 0 : resumePosition)
+        : null;
+      const needsBrowserTranscode = !isLiveTs && !isRecording && !channel.dvrHls && !appleMobileVodPath;
+      const playUrl = channel.dvrHls
+        ? channel.url
+        : isRecording
+          ? appleRecordingHlsPath ? `${apiBaseUrl}${appleRecordingHlsPath}` : channel.url
         : appleMobileVodPath
           ? `${apiBaseUrl}${appleMobileVodPath}`
             : needsBrowserTranscode
             ? `${apiBaseUrl}${browserTranscodePath(channel.id, channel.id.startsWith('episode_') ? channel.url : undefined, resumePosition)}`
             : getStreamUrl(channel.id, channel.url, isLiveTs ? true : keepSubsRef.current, isLiveTs, audioOnly);
-      log.info(`HTML5: playUrl=${playUrl}, contentType=${channel.contentType}`);
+      log.info(`HTML5: starting ${channel.dvrHls ? 'finite DVR HLS' : channel.contentType} playback`);
 
       if (isLiveTs || (isFiniteTsRecording && !appleRecordingHlsPath)) {
         // Native video cannot demux a saved MPEG-TS master either.
@@ -936,8 +992,14 @@ export function usePlayer(): {
             if (!isCurrentPlayback() || activeMpegtsPlayer !== player) return;
             log.info('mpegts: loading complete');
             if (isLiveTs) {
-              setStatus('loading');
-              liveStreamRecovery.transportEnded('loading-complete');
+              pendingLiveEof = true;
+              eofSettled = false;
+              // The final SourceBuffer update can land after LOADING_COMPLETE.
+              setTimeout(() => {
+                if (!isCurrentPlayback() || activeMpegtsPlayer !== player) return;
+                eofSettled = true;
+                recoverDrainedLiveStream();
+              }, 750);
             }
           });
           player.on(mpegts.Events.MEDIA_INFO, (info: unknown) => {
@@ -969,9 +1031,31 @@ export function usePlayer(): {
           if (isLiveTs) disableLiveStreamRecovery();
           setError(isLiveTs ? 'Failed to load live TV player' : 'Failed to load recording player');
         });
+      } else if (channel.dvrHls) {
+        setupEvents();
+        const syncDvrSubtitleTracks = () => {
+          if (!isCurrentPlayback()) return;
+          const tracks = getHtml5SubtitleTracks(video.textTracks,
+            textTrack => !browserProgrammaticTextTracks.has(textTrack));
+          const selectedIndex = selectPreferredSubtitleTrack(tracks, keepSubsRef.current, getSubtitleLanguage());
+          applyHtml5SubtitleSelection(video, selectedIndex);
+          browserSubtitleSession.replace(channel.id, tracks, selectedIndex);
+        };
+        video.textTracks.onaddtrack = syncDvrSubtitleTracks;
+        video.textTracks.onremovetrack = syncDvrSubtitleTracks;
+        syncDvrSubtitleTracks();
+        video.dataset.streamOffset = '0';
+        void attachFiniteHls(video, playUrl, detail => {
+          if (isCurrentPlayback()) setError(`DVR playback failed: ${detail}`);
+        }).then(dispose => {
+          if (!isCurrentPlayback()) { dispose(); return; }
+          disposeFiniteHls = dispose;
+        }).catch(error => {
+          if (isCurrentPlayback()) setError(error instanceof Error ? error.message : String(error));
+        });
       } else {
         // VOD (MP4, etc) — direct URL (no proxy needed, browser handles it)
-        log.info(`HTML5: direct video playback, setting src=${playUrl}`);
+        log.info('HTML5: setting direct video source');
         setupEvents();
         // Force aggressive preload for VOD so the browser fills its buffer
         // before playback starts. iOS Safari may clamp this without user
@@ -1116,11 +1200,11 @@ export function usePlayer(): {
       const video = document.getElementById('av-player') as HTMLVideoElement | null;
       const channel = usePlayerStore.getState().currentChannel;
       if (!video || !channel) return;
-      const appleMobileVodPath = isAppleMobile()
+      const appleMobileVodPath = isAppleMobile() && !channel.dvrHls
         ? iphoneVodPlaybackPath(channel.id, channel.url, channel.contentType, targetTime)
         : null;
-      const appleRecordingHls = channel.recordingTransport === 'mpegts' && isAppleMobile();
-      const usesTranscode = channel.contentType !== 'livetv' && !channel.id.startsWith('recording_') && !appleMobileVodPath;
+      const usesTranscode = channel.contentType !== 'livetv' && !channel.recordingId && !channel.dvrHls && !appleMobileVodPath;
+      const appleRecordingHls = !channel.dvrHls && channel.recordingTransport === 'mpegts' && isAppleMobile();
       const restartSelectedSubtitles = () => {
         const track = subtitleTracksRef.current.find(
           (candidate) => candidate.index === selectedSubtitleIndexRef.current,

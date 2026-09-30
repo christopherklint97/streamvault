@@ -102,6 +102,10 @@ export class LiveStreamRecovery {
     this.clearRetryTimer();
   }
 
+  isSuspended(): boolean {
+    return this.paused;
+  }
+
   resume(): void {
     if (!this.active) return;
     this.paused = false;

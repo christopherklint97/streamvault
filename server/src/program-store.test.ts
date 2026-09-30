@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import { ensureRecordingSchema } from './db-migrations.js';
 import { createProgramStore, type ProgramSnapshotRow } from './program-store.js';
+import { createArchiveStore, ensureArchiveSchema } from './archive-store.js';
 
 function database(): InstanceType<typeof Database> {
   const db = new Database(':memory:');
@@ -24,6 +25,17 @@ function program(overrides: Partial<ProgramSnapshotRow> = {}): ProgramSnapshotRo
 }
 
 describe('EPG snapshot reconciliation', () => {
+  it('keeps bounded past archive labels after provider drops old programmes', () => {
+    const db = database(); ensureArchiveSchema(db);
+    createArchiveStore(db).configure('c1', 'C', true, 1);
+    const store = createProgramStore(db);
+    store.saveSnapshot([program()], 1_000, ['c1']);
+    store.saveSnapshot([program({ airing_key: 'new', title: 'New', start_time: 1000, stop_time: 2000 })], 3_000, ['c1']);
+    expect(db.prepare('SELECT title FROM archive_program_history').all()).toEqual([{ title: 'Show' }]);
+    store.saveSnapshot([program({ airing_key: 'new', title: 'New', start_time: 1000, stop_time: 2000 })], 7_300_000, ['c1']);
+    expect(db.prepare('SELECT title FROM archive_program_history').all()).toEqual([]);
+    db.close();
+  });
   it('updates stable airings in place while preserving first_seen and incrementing revision only for changes', () => {
     const db = database();
     const store = createProgramStore(db);

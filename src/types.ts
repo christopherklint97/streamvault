@@ -14,6 +14,10 @@ export interface Channel {
   seriesId?: string;
   /** Explicit recording identity; avoids inferring it from a synthetic channel ID. */
   recordingId?: string;
+  /** A finite, signed HLS DVR manifest rather than a provider VOD URL. */
+  dvrHls?: boolean;
+  /** Offset into a segment-aligned archive playlist for an exact programme start. */
+  initialSeekSeconds?: number;
   /** Finite MPEG-TS masters require a browser demuxer, not native <video>. */
   recordingTransport?: 'mpegts' | 'native';
   recordingSize?: number;
@@ -124,6 +128,7 @@ export interface Recording {
   master_file_path?: string | null;
   derivative_file_path?: string | null;
   derivative_error?: string | null;
+  playback_format?: 'file' | 'hls';
   analysis_state?: CommercialAnalysisStatus;
   analysis_error?: string | null;
   analysis_profile?: string | null;

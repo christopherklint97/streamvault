@@ -29,6 +29,7 @@ const PROGRAM_COLUMNS: ColumnSpec[] = [
 ];
 
 const RECORDING_COLUMNS: ColumnSpec[] = [
+  { name: 'capture_format', definition: "TEXT NOT NULL DEFAULT 'file'" },
   { name: 'program_start_time', definition: 'INTEGER' },
   { name: 'program_stop_time', definition: 'INTEGER' },
   { name: 'rule_revision', definition: 'INTEGER' },

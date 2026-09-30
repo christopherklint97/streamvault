@@ -85,6 +85,102 @@ describe('usePlayer manual seek integration', () => {
     await act(async () => hookRef.current?.stop());
   });
 
+  it('keeps playing buffered live media after upstream EOF until the buffer tail', async () => {
+    usePlayerStore.setState({ currentChannel: {
+      id: 'live_71984', name: 'NFL Redzone', url: '/api/stream/live_71984',
+      logo: '', group: '', region: '', contentType: 'livetv',
+    } });
+    Object.defineProperty(video, 'buffered', { configurable: true, value: {
+      length: 1, start: () => 0, end: () => 90,
+    } });
+    video.currentTime = 40;
+    try {
+      await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
+      await vi.waitFor(() => expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(1));
+      const player = mpegtsMock.createPlayer.mock.results[0].value;
+      const complete = (player.on.mock.calls as unknown as Array<[string, () => void]>)
+        .find(([event]) => event === 'complete')?.[1];
+      expect(complete).toBeDefined();
+      usePlayerStore.setState({ status: 'playing' });
+
+      await act(async () => { complete?.(); await Promise.resolve(); });
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 350)); });
+      expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(1);
+      expect(usePlayerStore.getState().status).toBe('playing');
+      await act(async () => video.dispatchEvent(new Event('waiting')));
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 500)); });
+      expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(1);
+
+      video.currentTime = 88;
+      await act(async () => video.dispatchEvent(new Event('timeupdate')));
+      await vi.waitFor(() => expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(2));
+    } finally {
+      await act(async () => hookRef.current?.stop());
+    }
+  });
+
+  it('waits for final MSE append before treating live EOF as an empty buffer', async () => {
+    usePlayerStore.setState({ currentChannel: {
+      id: 'live_71984', name: 'NFL Redzone', url: '/api/stream/live_71984',
+      logo: '', group: '', region: '', contentType: 'livetv',
+    } });
+    let bufferEnd = 0;
+    Object.defineProperty(video, 'buffered', { configurable: true, get: () => ({
+      length: bufferEnd ? 1 : 0, start: () => 0, end: () => bufferEnd,
+    }) });
+    video.currentTime = 40;
+    try {
+      await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
+      await vi.waitFor(() => expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(1));
+      const player = mpegtsMock.createPlayer.mock.results[0].value;
+      const complete = (player.on.mock.calls as unknown as Array<[string, () => void]>)
+        .find(([event]) => event === 'complete')?.[1];
+      expect(complete).toBeDefined();
+      usePlayerStore.setState({ status: 'playing' });
+      await act(async () => { complete?.(); await Promise.resolve(); });
+      bufferEnd = 90; // final SourceBuffer update becomes visible after LOADING_COMPLETE
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 900)); });
+      expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(1);
+      expect(usePlayerStore.getState().status).not.toBe('loading');
+    } finally {
+      await act(async () => hookRef.current?.stop());
+    }
+  });
+
+  it('retains live EOF recovery while paused and reconnects on resume', async () => {
+    usePlayerStore.setState({ currentChannel: {
+      id: 'live_71984', name: 'NFL Redzone', url: '/api/stream/live_71984',
+      logo: '', group: '', region: '', contentType: 'livetv',
+    } });
+    let paused = false;
+    Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
+    vi.spyOn(video, 'pause').mockImplementation(() => { paused = true; });
+    vi.spyOn(video, 'play').mockImplementation(async () => { paused = false; });
+    Object.defineProperty(video, 'buffered', { configurable: true, value: {
+      length: 1, start: () => 0, end: () => 41,
+    } });
+    video.currentTime = 40;
+    try {
+      await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
+      await vi.waitFor(() => expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(1));
+      const player = mpegtsMock.createPlayer.mock.results[0].value;
+      const complete = (player.on.mock.calls as unknown as Array<[string, () => void]>)
+        .find(([event]) => event === 'complete')?.[1];
+      expect(complete).toBeDefined();
+      await act(async () => video.dispatchEvent(new Event('loadeddata')));
+      await act(async () => video.dispatchEvent(new Event('canplay')));
+      await act(async () => hookRef.current?.togglePlay());
+      expect(paused).toBe(true);
+      await act(async () => { complete?.(); await Promise.resolve(); });
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 350)); });
+      expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(1);
+      await act(async () => { hookRef.current?.togglePlay(); video.dispatchEvent(new Event('play')); });
+      await vi.waitFor(() => expect(mpegtsMock.createPlayer).toHaveBeenCalledTimes(2));
+    } finally {
+      await act(async () => hookRef.current?.stop());
+    }
+  });
+
   it('sends a TS-only iPhone recording through native HLS, not a whole-file MSE demux', async () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15');
     usePlayerStore.setState({ currentChannel: {
@@ -338,6 +434,45 @@ describe('usePlayer manual seek integration', () => {
     });
     expect(commercialTick).toHaveBeenCalledTimes(1);
 
+    await act(async () => hookRef.current?.stop());
+  });
+
+  it('does not rewind a finite archive to an old bookmark when AVPlay buffers', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>(() => {}));
+    usePlayerStore.setState({ currentChannel: {
+      id: 'archive_live_44115', name: 'TV4 archive', url: '/api/archive/snapshots/t/index.m3u8',
+      logo: '', group: '', region: '', contentType: 'movies', dvrHls: true,
+      duration: 600, initialSeekSeconds: 20,
+    } });
+    let positionMs = 20_000;
+    const seekTo = vi.fn((targetMs: number, success?: () => void) => { positionMs = targetMs; success?.(); });
+    const listeners: Array<{ oncurrentplaytime: (ms: number) => void; onbufferingstart: () => void;
+      onbufferingcomplete: () => void }> = [];
+    const avplay = {
+      close: vi.fn(), open: vi.fn(), setDisplayRect: vi.fn(), setBufferingParam: vi.fn(),
+      setListener: vi.fn((listener: typeof listeners[number]) => { listeners.push(listener); }),
+      prepareAsync: vi.fn((success?: () => void) => success?.()),
+      getDuration: vi.fn(() => 600_000), getCurrentTime: vi.fn(() => positionMs),
+      seekTo, play: vi.fn(), stop: vi.fn(),
+    };
+    (globalThis as typeof globalThis & { webapis: WebApis }).webapis = { avplay } as unknown as WebApis;
+    await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
+    expect(avplay.open).toHaveBeenCalledTimes(1);
+    positionMs = 42_500;
+    await act(async () => { listeners[0].oncurrentplaytime(positionMs); });
+    saveWatchProgress('archive_live_44115', 35, 600, 'movies'); // stale ten-second checkpoint
+    await act(async () => { listeners[0].onbufferingstart(); await vi.advanceTimersByTimeAsync(8_000); });
+    expect(avplay.open).toHaveBeenCalledTimes(2);
+    expect(seekTo).toHaveBeenLastCalledWith(42_500, expect.any(Function), expect.any(Function));
+    positionMs = 0; // AVPlay can report zero while buffering even after prior progress.
+    await act(async () => { listeners[1].oncurrentplaytime(43_000); });
+    await act(async () => { listeners[1].onbufferingstart(); await vi.advanceTimersByTimeAsync(8_000); });
+    expect(avplay.open).toHaveBeenCalledTimes(3);
+    expect(seekTo).toHaveBeenLastCalledWith(43_000, expect.any(Function), expect.any(Function));
+    await act(async () => { listeners[2].onbufferingstart(); await vi.advanceTimersByTimeAsync(7_000);
+      listeners[2].onbufferingcomplete(); await vi.advanceTimersByTimeAsync(2_000); });
+    expect(avplay.open).toHaveBeenCalledTimes(3);
     await act(async () => hookRef.current?.stop());
   });
 });

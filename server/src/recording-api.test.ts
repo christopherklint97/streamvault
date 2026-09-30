@@ -32,6 +32,10 @@ function segment(overrides: Partial<DBCommercialSegment> = {}): DBCommercialSegm
 }
 
 describe('recording API mapping', () => {
+  it('keeps legacy recordings on direct-file playback without HLS migration', () => {
+    expect(mapRecordingForApi(recording()).playback_format).toBe('file');
+  });
+
   it('includes live finalization progress without claiming it for terminal rows', () => {
     const progress = { phase: 'derivative' as const, percent: 42 };
     expect(mapRecordingForApi(recording({ status: 'finalizing' }), progress).finalization_progress).toEqual(progress);
