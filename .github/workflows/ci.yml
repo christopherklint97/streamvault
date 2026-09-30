@@ -27,7 +27,7 @@ jobs:
         run: |
           # apt-get update can hang on a hosted runner mirror; use pinned npm binaries for CI only.
           npm install --prefix "$RUNNER_TEMP/media-tools" --no-save --ignore-scripts --no-audit --no-fund \
-            @ffmpeg-installer/linux-x64@4.1.0 @ffprobe-installer/linux-x64@5.2.0
+            @ffmpeg-installer/linux-x64@4.1.0 @ffprobe-installer/linux-x64@4.1.0
           chmod +x "$RUNNER_TEMP/media-tools/node_modules/@ffprobe-installer/linux-x64/ffprobe"
           echo "$RUNNER_TEMP/media-tools/node_modules/@ffmpeg-installer/linux-x64" >> "$GITHUB_PATH"
           echo "$RUNNER_TEMP/media-tools/node_modules/@ffprobe-installer/linux-x64" >> "$GITHUB_PATH"
