@@ -32,6 +32,13 @@ export function hasArchiveCapacity(freeBytes: number, usedBytes: number, reserve
   maxBytes = MAX_ARCHIVE_BYTES): boolean {
   return hasArchiveReserve(freeBytes, reserveBytes) && Number.isFinite(usedBytes) && usedBytes < maxBytes;
 }
+/** Background copies must leave space for raw capture between pruning passes. */
+export function hasArchiveRepairHeadroom(freeBytes: number, usedBytes: number,
+  reserveBytes: number, maxBytes: number): boolean {
+  return Number.isFinite(freeBytes) && Number.isFinite(usedBytes) &&
+    freeBytes > reserveBytes + Math.min(5 * GIB, reserveBytes / 4) &&
+    usedBytes < maxBytes - Math.min(10 * GIB, maxBytes / 20);
+}
 function gigabytes(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= 10_000 ? parsed : fallback;
@@ -80,6 +87,8 @@ export class ArchiveCapture {
   private seamUrgent = new Set<string>();
   private seamTimer: ReturnType<typeof setTimeout> | null = null;
   private seamWork: Promise<void> | null = null;
+  private seamWorkAbort: AbortController | null = null;
+  private seamWorkChannel: string | null = null;
   private readonly seamAbort = new AbortController();
   constructor(private readonly store: ArchiveStore, private readonly root: string, private readonly port: number,
     private readonly onPublished: (channelId: string) => void = () => {},
@@ -87,10 +96,19 @@ export class ArchiveCapture {
     private readonly processSeam: typeof processArchiveSeam = processArchiveSeam) {}
 
   /** Keep FFprobe/stream-copy work off the synchronous two-second capture poll.
-   * New TV4 segments jump ahead of historical backfill; one job runs at a time. */
+   * New archive segments jump ahead of historical backfill; one job runs at a time. */
   private enqueueSeam(id: string, urgent = false): void {
-    if (this.stopping || !id.endsWith('-chunk-000000000.ts') || this.seamQueued.has(id)) return;
-    if (this.seamQueue.length >= 2_000) return;
+    if (this.stopping || !id.endsWith('-chunk-000000000.ts')) return;
+    if (this.seamQueued.has(id)) {
+      if (!urgent || this.seamUrgent.has(id)) return;
+      const index = this.seamQueue.indexOf(id);
+      if (index < 0) return; // Already processing; never run two repairs for the same seam.
+      this.seamQueue.splice(index, 1);
+    } else if (this.seamQueue.length >= 2_000) {
+      if (!urgent) return;
+      const dropped = this.seamQueue.pop();
+      if (dropped) { this.seamQueued.delete(dropped); this.seamUrgent.delete(dropped); }
+    }
     this.seamQueued.add(id);
     if (urgent) {
       this.seamUrgent.add(id);
@@ -102,22 +120,52 @@ export class ArchiveCapture {
     this.scheduleSeam();
   }
 
+  /** New playback tickets can lift an existing historical seam ahead of backfill.
+   * The ticket's pinned media is unchanged; reopening later selects repaired copies. */
+  prioritizeWindow(channelId: string, start: number, end: number): void {
+    if (this.stopping || !this.store.getArchive(channelId)?.enabled || end <= start) return;
+    const candidates = this.store.seamCandidates(channelId, start)
+      .filter(chunk => chunk.start < end).slice(0, 200);
+    for (const chunk of candidates.reverse()) this.enqueueSeam(chunk.id, true);
+  }
+
   private scheduleSeam(delay = 0): void {
     if (this.stopping || this.seamWork || this.seamTimer || !this.seamQueue.length) return;
     this.seamTimer = setTimeout(() => {
       this.seamTimer = null;
-      const id = this.seamQueue.shift();
-      if (!id || this.stopping) return;
+      if (this.stopping) return;
       const reserve = gigabytes(process.env.STREAMVAULT_ARCHIVE_RESERVE_GB, 20) * GIB;
       const maximum = gigabytes(process.env.STREAMVAULT_ARCHIVE_MAX_DISK_GB, 400) * GIB;
-      const work = this.processSeam(this.store, this.root, id, Date.now(), reserve, maximum, this.seamAbort.signal)
+      try {
+        const disk = fs.statfsSync(this.root);
+        if (!hasArchiveRepairHeadroom(disk.bavail * disk.bsize, this.store.totalUsageBytes(), reserve, maximum)) {
+          this.scheduleSeam(60_000); return;
+        }
+      } catch { this.scheduleSeam(60_000); return; }
+      const id = this.seamQueue.shift();
+      if (!id) return;
+      const chunk = this.store.getChunk(id);
+      if (!chunk || !this.store.getArchive(chunk.channelId)?.enabled) {
+        this.seamQueued.delete(id);
+        this.seamUrgent.delete(id);
+        this.scheduleSeam(); return;
+      }
+      const controller = new AbortController();
+      this.seamWorkAbort = controller;
+      this.seamWorkChannel = chunk.channelId;
+      const signal = AbortSignal.any([this.seamAbort.signal, controller.signal]);
+      const work = this.processSeam(this.store, this.root, id, Date.now(), reserve, maximum, signal)
         .then(() => {}, () => {
           if (!this.stopping) logger.warn('Archive seam check failed; captured media preserved');
         })
         .finally(() => {
           this.seamQueued.delete(id);
           this.seamUrgent.delete(id);
-          if (this.seamWork === work) this.seamWork = null;
+          if (this.seamWork === work) {
+            this.seamWork = null;
+            this.seamWorkAbort = null;
+            this.seamWorkChannel = null;
+          }
           this.scheduleSeam(this.seamUrgent.has(this.seamQueue[0]) ? 0 : 10_000);
         });
       this.seamWork = work;
@@ -317,7 +365,7 @@ export class ArchiveCapture {
     const id = `${session}-${name}`;
     this.store.publish({ id, channelId, start, end, duration,
       path: path.relative(this.root, absolute), size: stat.size, epoch });
-    if (channelId === 'live_44115') this.enqueueSeam(id, true);
+    if (this.store.getArchive(channelId)?.enabled && name === 'chunk-000000000.ts') this.enqueueSeam(id, true);
     if (writer) {
       writer.epoch = epoch;
       writer.lastPublishedAt = Date.now();
@@ -341,7 +389,20 @@ export class ArchiveCapture {
     this.store.setStatus(channelId, 'stopped');
   }
   async stopArchive(channelId: string): Promise<void> {
+    if (this.seamWorkChannel === channelId) {
+      this.seamWorkAbort?.abort();
+      if (this.seamWork) await this.seamWork;
+    }
     if (!this.showChannels.has(channelId)) await this.stop(channelId);
+    this.seamQueue = this.seamQueue.filter(id => {
+      if (this.store.getChunk(id)?.channelId !== channelId) return true;
+      this.seamQueued.delete(id);
+      this.seamUrgent.delete(id);
+      return false;
+    });
+    if (!this.seamQueue.length && this.seamTimer) {
+      clearTimeout(this.seamTimer); this.seamTimer = null;
+    }
   }
   async stopShow(channelId: string): Promise<void> {
     this.showChannels.delete(channelId);
@@ -349,15 +410,21 @@ export class ArchiveCapture {
   }
   startAll(): void {
     for (const archive of this.store.archives()) if (archive.enabled) this.start(archive.channelId);
-    // Backfill TV4 conservatively while prioritizing newly captured seams.
+    // Backfill every configured channel while prioritizing newly captured seams.
     // Derived copies never overwrite the masters or an existing snapshot pin.
-    for (const chunk of this.store.seamCandidates('live_44115', Date.now() - 24 * 3_600_000).reverse()) {
-      this.enqueueSeam(chunk.id);
-    }
+    const now = Date.now();
+    const candidates = this.store.archives().filter(archive => archive.enabled).flatMap(archive =>
+      this.store.seamCandidates(archive.channelId, now - archive.retentionHours * 3_600_000));
+    const windows = this.store.recentViewerWindows(now, 60 * 60_000);
+    const focused = new Set(candidates.filter(chunk => windows.some(w => w.channelId === chunk.channelId &&
+      chunk.end > w.startTime && chunk.start < w.endTime)).map(chunk => chunk.id));
+    candidates.sort((a, b) => Number(focused.has(b.id)) - Number(focused.has(a.id)) || b.end - a.end);
+    for (const chunk of candidates) this.enqueueSeam(chunk.id);
   }
   async stopAll(): Promise<void> {
     this.stopping = true;
     this.seamAbort.abort();
+    this.seamWorkAbort?.abort();
     if (this.seamTimer) clearTimeout(this.seamTimer);
     this.seamTimer = null;
     this.seamQueue = [];

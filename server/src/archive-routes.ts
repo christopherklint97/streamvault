@@ -19,6 +19,7 @@ export function createArchiveRouter(deps: {
   getRecording: (id: string) => DBRecording | undefined;
   getPrograms: (id: string, from: number, to: number) => Array<{ title: string; startTime: number; endTime: number }>;
   start: (channelId: string) => void; stop: (channelId: string) => Promise<void>;
+  prioritize?: (channelId: string, startTime: number, endTime: number) => void;
 }) {
   const { store, root, secret } = deps;
   const router = Router();
@@ -53,10 +54,13 @@ export function createArchiveRouter(deps: {
       (channelName !== undefined && (typeof channelName !== 'string' || channelName.length > 200))) {
       res.status(400).json({ error: 'Valid live channel, enabled boolean and retentionHours (1–168) required' }); return;
     }
-    if (!enabled) await deps.stop(channelId);
+    // Persist disable before awaiting writer/repair shutdown, so an in-flight
+    // derivative cannot publish while the disable request is pending.
     store.configure(channelId, channel.name, enabled, retentionHours);
-    if (enabled) deps.start(channelId);
-    else store.setStatus(channelId, 'stopped');
+    if (!enabled) {
+      await deps.stop(channelId);
+      store.setStatus(channelId, 'stopped');
+    } else deps.start(channelId);
     // Apply a shortened policy now; deletion respects active viewer pins.
     pruneArchive(store, root, channelId);
     res.json({ archive: view(channelId) });
@@ -77,6 +81,7 @@ export function createArchiveRouter(deps: {
     const effectiveEnd = playableEnd(selected.at(-1)!);
     const expiresAt = now + LEASE_MS;
     const snapshot = store.createSnapshot(channelId, startTime, endTime, now, expiresAt);
+    deps.prioritize?.(channelId, startTime, endTime);
     const ticket = createArchiveTicket(snapshot.id, secret, expiresAt);
     res.set('Cache-Control', 'no-store').json({ url: `/api/archive/snapshots/${snapshot.id}/index.m3u8?ticket=${ticket}`,
       snapshotId: snapshot.id, expiresAt, startTime: effectiveStart, endTime: effectiveEnd,

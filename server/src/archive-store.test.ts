@@ -86,6 +86,30 @@ describe('durable archive index', () => {
     db.close();
   });
 
+  it('does not drop an active viewer when more than twelve windows were opened', () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('espn', 'ESPN', true, 24);
+    store.publish({ id: 'segment', channelId: 'espn', start: 0, end: 20_000,
+      duration: 20, path: 'segment.ts', size: 188, epoch: 1 });
+    for (let i = 0; i < 13; i++) store.createSnapshot('espn', i * 100, 10_000, 1000 + i, 4000);
+    expect(store.recentViewerWindows(2000, 1000)).toHaveLength(13);
+    db.close();
+  });
+
+  it('finds recent unexpired viewer windows for repair priority', () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('espn', 'ESPN', true, 24);
+    store.publish({ id: 'segment', channelId: 'espn', start: 0, end: 20_000,
+      duration: 20, path: 'segment.ts', size: 188, epoch: 1 });
+    store.createSnapshot('espn', 0, 10_000, 100, 4000);
+    store.createSnapshot('espn', 1000, 12_000, 1100, 4000);
+    store.createSnapshot('espn', 3000, 16_000, 1300, 1500);
+    expect(store.recentViewerWindows(2000, 1000)).toEqual([
+      { channelId: 'espn', startTime: 1000, endTime: 12_000 },
+    ]);
+    db.close();
+  });
+
   it('pins the original snapshot media while new snapshots use a verified derivative', () => {
     const db = new Database(':memory:'); ensureArchiveSchema(db);
     const store = createArchiveStore(db); store.configure('one', 'One', true, 24);

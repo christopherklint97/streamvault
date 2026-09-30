@@ -13,9 +13,13 @@ it('issues finite scoped playback and denies cross-snapshot and forged segment r
   const db = new Database(':memory:'); ensureArchiveSchema(db);
   const store = createArchiveStore(db);
   let recording: DBRecording | undefined;
+  const prioritize = vi.fn();
+  const stop = vi.fn(async (id: string) => {
+    expect(store.getArchive(id)?.enabled).toBeFalsy();
+  });
   const app = express(); app.use(express.json());
   app.use(createArchiveRouter({ store, root, secret: Buffer.alloc(32, 2), getChannel: id => id === 'c' ? { id: 'c', name: 'C', content_type: 'livetv' } : undefined,
-    start: () => {}, stop: async () => {}, getRecording: id => id === recording?.id ? recording : undefined,
+    start: () => {}, stop, prioritize, getRecording: id => id === recording?.id ? recording : undefined,
     getPrograms: () => [{ title: 'Show', startTime: 1000, endTime: 21000 }] }));
   const server = app.listen(0);
   try {
@@ -45,8 +49,10 @@ it('issues finite scoped playback and denies cross-snapshot and forged segment r
     const show = await fetch(`${base}/api/recordings/saved/hls-ticket`, { method: 'POST' });
     expect(show.status).toBe(200);
     expect((await show.json() as { startOffsetSeconds: number }).startOffsetSeconds).toBe(4);
+    expect(prioritize).not.toHaveBeenCalled();
     const response = await fetch(`${base}/api/archive/c/playback-ticket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ startTime: 1000, endTime: 21000 }) });
     expect(response.status).toBe(200);
+    expect(prioritize).toHaveBeenCalledWith('c', 1000, 21000);
     const ticket = await response.json() as { url: string; snapshotId: string; duration: number; expiresAt: number };
     expect(ticket.expiresAt - Date.now()).toBeGreaterThan(25 * 3_600_000);
     const tooWide = await fetch(`${base}/api/archive/c/playback-ticket`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -77,5 +83,10 @@ it('issues finite scoped playback and denies cross-snapshot and forged segment r
       expect((await fetch(base + segment)).status).toBe(200);
       expect(store.prunable('c', Number.MAX_SAFE_INTEGER, Date.now()).map(c => c.id)).not.toContain('one');
     } finally { clock.mockRestore(); }
+    const disabled = await fetch(`${base}/api/archives/c`, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: false, retentionHours: 24 }) });
+    expect(disabled.status).toBe(200);
+    expect(stop).toHaveBeenCalledWith('c');
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); db.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });

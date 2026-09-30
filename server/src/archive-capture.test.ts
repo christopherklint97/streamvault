@@ -281,7 +281,7 @@ describe('stream-copy HLS capture', () => {
 
   it('aborts an in-flight seam check before shutdown can close the database', async () => {
     const db = new Database(':memory:'); ensureArchiveSchema(db);
-    const store = createArchiveStore(db); store.configure('live_44115', 'TV4', false, 24);
+    const store = createArchiveStore(db); store.configure('live_44115', 'TV4', true, 24);
     const id = '55555555-5555-4555-8555-555555555555-chunk-000000000.ts';
     store.publish({ id, channelId: 'live_44115', start: Date.now() - 20_000, end: Date.now(),
       duration: 20, path: 'unused.ts', size: 188, epoch: 1 });
@@ -292,40 +292,177 @@ describe('stream-copy HLS capture', () => {
       signal?.addEventListener('abort', () => { cancelled = true; reject(new Error('cancelled')); }, { once: true });
     });
     vi.useFakeTimers();
-    const capture = new ArchiveCapture(store, 'unused', 1, undefined, undefined, seamProcessor);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-abort-seam-'));
+    const capture = new ArchiveCapture(store, root, 1, undefined, undefined, seamProcessor);
     try {
-      capture.startAll();
+      (capture as unknown as { enqueueSeam: (id: string, urgent: boolean) => void }).enqueueSeam(id, true);
       vi.advanceTimersByTime(0);
       await capture.stopAll();
       expect(cancelled).toBe(true);
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); db.close();
+      fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('awaits and aborts an in-flight repair on archive disable', async () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('espn', 'ESPN', true, 24);
+    const id = '11111111-1111-4111-8111-111111111111-chunk-000000000.ts';
+    store.publish({ id, channelId: 'espn', start: 0, end: 20_000,
+      duration: 20, path: 'raw.ts', size: 188, epoch: 1 });
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-disable-work-'));
+    let cancelled = false;
+    const processor: typeof import('./archive-seam.js').processArchiveSeam = async (
+      _store, _root, _id, _now, _reserve, _max, signal,
+    ) => new Promise((_resolve, reject) => {
+      signal?.addEventListener('abort', () => { cancelled = true; reject(new Error('cancelled')); }, { once: true });
+    });
+    vi.useFakeTimers();
+    const capture = new ArchiveCapture(store, root, 1, undefined, undefined, processor);
+    try {
+      (capture as unknown as { enqueueSeam: (id: string, urgent: boolean) => void }).enqueueSeam(id, true);
+      vi.advanceTimersByTime(0);
+      await capture.stopArchive('espn');
+      expect(cancelled).toBe(true);
+      await capture.stopAll();
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); db.close();
+      fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('cancels queued repairs when an archive is disabled', async () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('espn', 'ESPN', true, 24);
+    const id = '11111111-1111-4111-8111-111111111111-chunk-000000000.ts';
+    store.publish({ id, channelId: 'espn', start: 0, end: 20_000,
+      duration: 20, path: 'raw.ts', size: 188, epoch: 1 });
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-disable-repair-'));
+    const processSeam = vi.fn(async () => false);
+    const capture = new ArchiveCapture(store, root, 1, undefined, undefined,
+      processSeam as unknown as typeof import('./archive-seam.js').processArchiveSeam);
+    vi.useFakeTimers();
+    try {
+      const internals = capture as unknown as { seamQueue: string[];
+        enqueueSeam: (id: string, urgent: boolean) => void };
+      internals.enqueueSeam(id, true);
+      await capture.stopArchive('espn');
+      store.configure('espn', 'ESPN', false, 24);
+      vi.advanceTimersByTime(60_000);
+      expect(processSeam).not.toHaveBeenCalled();
+      expect(internals.seamQueue).toEqual([]);
+      await capture.stopAll();
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); db.close();
+      fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('pauses derivative repair before it crowds the capture disk cap, then resumes', async () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('espn', 'ESPN', true, 24);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-repair-headroom-'));
+    const processSeam = vi.fn(async () => false);
+    const capture = new ArchiveCapture(store, root, 1, undefined, undefined,
+      processSeam as unknown as typeof import('./archive-seam.js').processArchiveSeam);
+    vi.useFakeTimers(); vi.stubEnv('STREAMVAULT_ARCHIVE_MAX_DISK_GB', '1');
+    vi.stubEnv('STREAMVAULT_ARCHIVE_RESERVE_GB', '1');
+    const usage = vi.spyOn(store, 'totalUsageBytes').mockReturnValueOnce(980 * 1024 ** 2).mockReturnValue(0);
+    try {
+      const id = 'fresh-chunk-000000000.ts';
+      store.publish({ id, channelId: 'espn', start: 0, end: 20_000,
+        duration: 20, path: 'raw.ts', size: 188, epoch: 1 });
+      const internals = capture as unknown as { seamQueue: string[];
+        enqueueSeam: (id: string, urgent: boolean) => void };
+      internals.enqueueSeam(id, true);
+      vi.advanceTimersByTime(0);
+      expect(processSeam).not.toHaveBeenCalled();
+      expect(internals.seamQueue).toContain(id);
+      vi.advanceTimersByTime(60_000);
+      expect(processSeam).toHaveBeenCalledTimes(1);
+      await capture.stopAll();
+    } finally { usage.mockRestore(); vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllEnvs();
+      db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('promotes a queued historical seam when a viewer requests that window', async () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('espn', 'ESPN', true, 24);
+    const capture = new ArchiveCapture(store, 'unused', 1);
+    vi.useFakeTimers();
+    try {
+      const internals = capture as unknown as { seamQueue: string[]; seamQueued: Set<string>;
+        prioritizeWindow: (channelId: string, start: number, end: number) => void };
+      const ids = [0, 1, 2].map(i => `${i}-chunk-000000000.ts`);
+      ids.forEach((id, i) => store.publish({ id, channelId: 'espn', start: i * 20_000,
+        end: (i + 1) * 20_000, duration: 20, path: `${i}.ts`, size: 188, epoch: i }));
+      internals.seamQueue.push(...ids); ids.forEach(id => internals.seamQueued.add(id));
+      internals.prioritizeWindow('espn', 20_000, 40_000);
+      expect(internals.seamQueue).toEqual([ids[1], ids[0], ids[2]]);
+      await capture.stopAll();
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); db.close(); }
+  });
+
+  it('keeps an urgent reconnect when the historical queue is full', async () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db);
+    const capture = new ArchiveCapture(store, 'unused', 1);
+    vi.useFakeTimers();
+    try {
+      const internals = capture as unknown as { seamQueue: string[]; seamQueued: Set<string>;
+        enqueueSeam: (id: string, urgent: boolean) => void };
+      const old = Array.from({ length: 20_000 }, (_, i) => `${i}-chunk-000000000.ts`);
+      internals.seamQueue.push(...old); old.forEach(id => internals.seamQueued.add(id));
+      const fresh = 'fresh-chunk-000000000.ts';
+      internals.enqueueSeam(fresh, true);
+      expect(internals.seamQueue[0]).toBe(fresh);
+      expect(internals.seamQueue).toHaveLength(20_000);
+      await capture.stopAll();
     } finally { vi.clearAllTimers(); vi.useRealTimers(); db.close(); }
   });
 
   it('runs one nonblocking TV4 seam check at a time and prioritizes fresh capture over backfill', async () => {
     const db = new Database(':memory:'); ensureArchiveSchema(db);
-    const store = createArchiveStore(db); store.configure('live_44115', 'TV4', false, 24);
+    const store = createArchiveStore(db); store.configure('live_44115', 'TV4', true, 24);
     const ids = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222',
       '33333333-3333-4333-8333-333333333333'].map(s => `${s}-chunk-000000000.ts`);
     vi.useFakeTimers();
     const now = Date.now();
+    const espnId = '55555555-5555-4555-8555-555555555555-chunk-000000000.ts';
+    store.configure('live_1015944', 'ESPN', true, 24);
+    store.publish({ id: espnId, channelId: 'live_1015944', start: now + 60_000,
+      end: now + 80_000, duration: 20, path: 'espn.ts', size: 188, epoch: 4 });
+    const disabledId = '66666666-6666-4666-8666-666666666666-chunk-000000000.ts';
+    store.configure('disabled', 'Disabled', false, 24);
+    store.publish({ id: disabledId, channelId: 'disabled', start: now + 80_000,
+      end: now + 100_000, duration: 20, path: 'disabled.ts', size: 188, epoch: 5 });
     for (const [i, id] of ids.entries()) {
       store.publish({ id, channelId: 'live_44115', start: now + i * 20_000,
         end: now + (i + 1) * 20_000, duration: 20, path: `${i}.ts`, size: 188, epoch: i });
     }
+    store.createSnapshot('live_44115', now, now + 20_000, Date.now(), Date.now() + 60_000);
     const resolves: Array<(result: boolean) => void> = [];
     vi.stubEnv('STREAMVAULT_ARCHIVE_RESERVE_GB', '5');
     vi.stubEnv('STREAMVAULT_ARCHIVE_MAX_DISK_GB', '40');
     const seamProcessor = vi.fn(() => new Promise<boolean>(resolve => { resolves.push(resolve); }));
-    const capture = new ArchiveCapture(store, 'unused', 1, undefined, undefined,
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-seam-queue-'));
+    const fakeSpawn = vi.fn(() => {
+      const proc = Object.assign(new EventEmitter(), { stderr: new EventEmitter(),
+        kill: () => { queueMicrotask(() => proc.emit('close', 0)); return true; } });
+      return proc as unknown as ChildProcess;
+    });
+    const capture = new ArchiveCapture(store, root, 1, undefined,
+      fakeSpawn as unknown as typeof import('node:child_process').spawn,
       seamProcessor as unknown as typeof import('./archive-seam.js').processArchiveSeam);
     try {
       capture.startAll();
       vi.advanceTimersByTime(0);
       expect(seamProcessor).toHaveBeenCalledTimes(1);
-      expect(seamProcessor.mock.calls[0][2]).toBe(ids[2]);
+      expect(seamProcessor.mock.calls[0][2]).toBe(ids[0]); // currently viewed archive window
       expect(seamProcessor.mock.calls[0].slice(4, 6)).toEqual([5 * 1024 ** 3, 40 * 1024 ** 3]);
-      const freshId = '44444444-4444-4444-8444-444444444444-chunk-000000000.ts';
-      (capture as unknown as { enqueueSeam: (id: string, urgent: boolean) => void }).enqueueSeam(freshId, true);
+      const session = '44444444-4444-4444-8444-444444444444';
+      const freshId = `${session}-chunk-000000000.ts`;
+      const directory = path.join(root, 'archive', 'live_1015944', session);
+      fs.mkdirSync(directory, { recursive: true });
+      fs.writeFileSync(path.join(directory, 'chunk-000000000.ts'), 'media');
+      (capture as unknown as { publishFile: (channel: string, dir: string, name: string,
+        duration: number, discontinuity: boolean) => void }).publishFile(
+        'live_1015944', directory, 'chunk-000000000.ts', 20, false);
       expect(seamProcessor).toHaveBeenCalledTimes(1);
       resolves[0](false);
       await vi.waitFor(() => expect(resolves).toHaveLength(1));
@@ -338,10 +475,12 @@ describe('stream-copy HLS capture', () => {
       expect(seamProcessor).toHaveBeenCalledTimes(2);
       vi.advanceTimersByTime(1);
       expect(seamProcessor).toHaveBeenCalledTimes(3); // paced historical backfill
+      expect(seamProcessor.mock.calls[2][2]).toBe(espnId);
       resolves[2](false);
       await capture.stopAll();
       vi.advanceTimersByTime(60_000);
       expect(seamProcessor).toHaveBeenCalledTimes(3);
-    } finally { vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllEnvs(); db.close(); }
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllEnvs(); db.close();
+      fs.rmSync(root, { recursive: true, force: true }); }
   });
 });

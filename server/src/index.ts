@@ -211,7 +211,8 @@ setSegmentedCapture(archiveCapture);
 const archiveTicketSecret = loadArchiveSigningKey(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data'));
 app.use(createArchiveRouter({ store: archiveStore, root: archiveRoot, secret: archiveTicketSecret,
   getChannel: getChannelById, getRecording, getPrograms: getArchivePrograms,
-  start: id => archiveCapture.start(id), stop: id => archiveCapture.stopArchive(id) }));
+  start: id => archiveCapture.start(id), stop: id => archiveCapture.stopArchive(id),
+  prioritize: (id, start, end) => archiveCapture.prioritizeWindow(id, start, end) }));
 
 // Request logging; include completion timing only when a request is slow.
 app.use((req, res, next) => {

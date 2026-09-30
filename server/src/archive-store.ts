@@ -219,6 +219,11 @@ export function createArchiveStore(db: Db) {
         AND (p.end < c.end OR (p.end = c.end AND p.rowid < c.rowid))
         ORDER BY p.end DESC,p.rowid DESC LIMIT 1`).get(id) as ArchiveChunk | undefined;
     },
+    recentViewerWindows(now: number, maxAgeMs: number): Array<{ channelId: string; startTime: number; endTime: number }> {
+      return db.prepare(`SELECT DISTINCT channelId,startTime,endTime FROM archive_snapshots
+        WHERE createdAt >= ? AND expiresAt > ? ORDER BY createdAt DESC`)
+        .all(now - maxAgeMs, now) as Array<{ channelId: string; startTime: number; endTime: number }>;
+    },
     seamCandidates(channelId: string, since: number): ArchiveChunk[] {
       return chunks(`SELECT c.* FROM media_chunks c WHERE c.channelId = ? AND c.end > ?
         AND c.unavailable = 0 AND c.playbackHidden = 0 AND c.playbackPath IS NULL
