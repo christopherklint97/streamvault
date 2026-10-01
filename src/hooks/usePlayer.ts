@@ -104,6 +104,12 @@ function beginCommercialPlayback(channel: Channel): number {
 
 let activeMpegtsPlayer: MpegtsType.Player | null = null;
 let disposeFiniteHls: (() => void) | null = null;
+let finiteHlsRetry = { channelId: '', position: -1, attempts: 0, at: 0 };
+let finiteHlsStallTimer: ReturnType<typeof setTimeout> | null = null;
+function clearFiniteHlsStallTimer() {
+  if (finiteHlsStallTimer) clearTimeout(finiteHlsStallTimer);
+  finiteHlsStallTimer = null;
+}
 let bgProgressInterval: ReturnType<typeof setInterval> | null = null;
 let bgBufferTimer: ReturnType<typeof setTimeout> | null = null;
 let recordingVodPoll: ReturnType<typeof setInterval> | null = null;
@@ -343,6 +349,8 @@ export function stopActivePlayback() {
   log.info('⏹ stopPlayback()');
 
   stopBgProgressTracking();
+  clearFiniteHlsStallTimer();
+  finiteHlsRetry = { channelId: '', position: -1, attempts: 0, at: 0 };
   clearRecordingVodPoll();
   html5PlaybackGeneration += 1;
   playbackClock.reset();
@@ -726,6 +734,7 @@ export function usePlayer(): {
       log.info(`HTML5: found video element, readyState=${video.readyState}, networkState=${video.networkState}`);
 
       // Clean up any previous playback state
+      clearFiniteHlsStallTimer();
       clearBrowserSubtitleTrack();
       video.textTracks.onaddtrack = null;
       video.textTracks.onremovetrack = null;
@@ -762,6 +771,41 @@ export function usePlayer(): {
       let playAttempted = false;
       let pendingLiveEof = false;
       let eofSettled = false;
+      let finiteRecoveryStarted = false;
+      const recoverFiniteHls = (reason: string) => {
+        if (!channel.dvrHls || !isCurrentPlayback() || finiteRecoveryStarted) return false;
+        const now = Date.now();
+        const clock = playbackClock.getSnapshot();
+        const position = Number.isFinite(video.currentTime) && video.currentTime > 0
+          ? video.currentTime : lastMediaTime > 0 ? lastMediaTime
+            : clock.generation === clockGeneration && clock.position > 0 ? clock.position : resumePosition;
+        if (finiteHlsRetry.channelId !== channel.id || now - finiteHlsRetry.at > 5 * 60_000 ||
+            Math.abs(position - finiteHlsRetry.position) > 5) {
+          finiteHlsRetry = { channelId: channel.id, position, attempts: 0, at: now };
+        }
+        if (finiteHlsRetry.attempts >= 2) return false;
+        finiteHlsRetry.attempts += 1;
+        finiteHlsRetry.position = position;
+        finiteHlsRetry.at = now;
+        finiteRecoveryStarted = true;
+        clearFiniteHlsStallTimer();
+        log.warn(`Finite HLS: ${reason} — reopening at ${position.toFixed(1)}s (attempt ${finiteHlsRetry.attempts})`);
+        play(position);
+        return true;
+      };
+      const armFiniteHlsStallTimer = (reset = false) => {
+        if (!channel.dvrHls || !isCurrentPlayback() || video.paused || video.ended) return;
+        if (reset) clearFiniteHlsStallTimer();
+        if (finiteHlsStallTimer) return;
+        finiteHlsStallTimer = setTimeout(() => {
+          finiteHlsStallTimer = null;
+          if (!isCurrentPlayback() || video.paused || video.ended ||
+              usePlayerStore.getState().status === 'error') return;
+          if (!recoverFiniteHls('no media progress')) {
+            setError('Archive playback stopped making progress. Try seeking past the damaged section.');
+          }
+        }, 15_000);
+      };
       const recoverDrainedLiveStream = (force = false) => {
         // mpegts.js emits LOADING_COMPLETE before its final MSE append settles.
         // Keep EOF pending through an intentional pause so resume can recover.
@@ -798,14 +842,16 @@ export function usePlayer(): {
         );
       };
       const attemptPlay = () => {
-        if (!startupReady || !canPlay || playAttempted || !isCurrentPlayback()) return;
+        if (!startupReady || !canPlay || playAttempted || !isCurrentPlayback() ||
+            usePlayerStore.getState().status === 'error') return;
         playAttempted = true;
         log.info('HTML5: startup ready — attempting play()');
         void video.play().then(() => {
-          if (!isCurrentPlayback()) return;
+          if (!isCurrentPlayback() || usePlayerStore.getState().status === 'error') return;
           log.info('HTML5: play() succeeded');
           setStatus('playing');
         }).catch((error) => {
+          if (!isCurrentPlayback() || usePlayerStore.getState().status === 'error') return;
           log.error('HTML5: play() rejected', error);
           if (isLiveTs && isCurrentPlayback()) disableLiveStreamRecovery();
           if (isCurrentPlayback()) setError('Playback blocked — tap to retry');
@@ -845,23 +891,37 @@ export function usePlayer(): {
         video.ondurationchange = updateHtml5Clock;
         video.onloadeddata = () => {
           log.info(`HTML5 event: loadeddata, readyState=${video.readyState}`);
+          armFiniteHlsStallTimer();
           void completeHtml5Startup();
         };
         video.oncanplay = () => {
           canPlay = true;
           attemptPlay();
         };
-        video.onplay = () => recoverDrainedLiveStream();
+        video.onseeked = () => {
+          if (!channel.dvrHls || !isCurrentPlayback() || !Number.isFinite(video.currentTime)) return;
+          // A backward seek resets the progress baseline; old high-water marks
+          // must not make healthy playback look stalled at the new position.
+          lastMediaTime = video.currentTime;
+          armFiniteHlsStallTimer(true);
+        };
+        video.onplay = () => { recoverDrainedLiveStream(); armFiniteHlsStallTimer(); };
+        video.onpause = clearFiniteHlsStallTimer;
         video.onwaiting = () => {
+          if (usePlayerStore.getState().status === 'error') return;
           log.debug('HTML5 event: waiting');
+          armFiniteHlsStallTimer();
           // A completed transport can still have playable MSE data. Reconnect
           // only when it is actually exhausted, not while it is buffered.
           if (pendingLiveEof) recoverDrainedLiveStream();
           // Delay showing loading spinner to avoid flashing during brief rebuffers
           if (bgBufferTimer) clearTimeout(bgBufferTimer);
-          bgBufferTimer = setTimeout(() => setStatus('loading'), 1500);
+          bgBufferTimer = setTimeout(() => {
+            if (isCurrentPlayback() && usePlayerStore.getState().status !== 'error') setStatus('loading');
+          }, 1500);
         };
         video.onplaying = () => {
+          if (!isCurrentPlayback() || usePlayerStore.getState().status === 'error') return;
           log.info('HTML5 event: playing');
           if (bgBufferTimer) { clearTimeout(bgBufferTimer); bgBufferTimer = null; }
           setStatus('playing');
@@ -869,20 +929,32 @@ export function usePlayer(): {
         };
         video.ontimeupdate = () => {
           updateHtml5Clock();
+          if (channel.dvrHls && isCurrentPlayback() && video.currentTime > lastMediaTime + 0.1) {
+            lastMediaTime = video.currentTime;
+            armFiniteHlsStallTimer(true);
+          }
           if (!isLiveTs || !isCurrentPlayback() || video.currentTime <= lastMediaTime) return;
           lastMediaTime = video.currentTime;
           liveStreamRecovery.progress();
           recoverDrainedLiveStream();
         };
         video.onstalled = () => {
+          if (usePlayerStore.getState().status === 'error') return;
           log.warn('HTML5 event: stalled');
+          armFiniteHlsStallTimer();
           if (isLiveTs) liveStreamRecovery.stalled();
         };
         video.onsuspend = () => log.debug('HTML5 event: suspend');
         video.onerror = () => {
+          if (!isCurrentPlayback()) return;
           const err = video.error;
           const errMsg = err ? `code=${err.code} message="${err.message}"` : 'unknown';
           log.error(`HTML5 event: error — ${errMsg}`);
+          if (channel.dvrHls) {
+            if (recoverFiniteHls('decode error')) return;
+            setError('Archive playback could not recover at this position. Try seeking past the damaged section.');
+            return;
+          }
           if (isLiveTs && isCurrentPlayback()) {
             setStatus('loading');
             liveStreamRecovery.transportEnded('mpegts-error');
@@ -892,6 +964,7 @@ export function usePlayer(): {
         };
         video.onabort = () => log.warn('HTML5 event: abort');
         video.onended = () => {
+          if (!isCurrentPlayback() || usePlayerStore.getState().status === 'error') return;
           log.info('HTML5 event: ended');
           if (isLiveTs && isCurrentPlayback()) {
             if (pendingLiveEof) { recoverDrainedLiveStream(true); return; }
@@ -1045,8 +1118,11 @@ export function usePlayer(): {
         video.textTracks.onremovetrack = syncDvrSubtitleTracks;
         syncDvrSubtitleTracks();
         video.dataset.streamOffset = '0';
-        void attachFiniteHls(video, playUrl, detail => {
-          if (isCurrentPlayback()) setError(`DVR playback failed: ${detail}`);
+        void attachFiniteHls(video, playUrl, _detail => {
+          if (isCurrentPlayback() && !recoverFiniteHls('HLS failure')) {
+            log.warn('Finite HLS failed after bounded recovery');
+            setError('Archive playback could not recover. Try seeking past the damaged section.');
+          }
         }).then(dispose => {
           if (!isCurrentPlayback()) { dispose(); return; }
           disposeFiniteHls = dispose;
@@ -1126,8 +1202,12 @@ export function usePlayer(): {
   const retry = useCallback(() => {
     log.info('🔄 retry() called');
     const clearError = usePlayerStore.getState().clearError;
+    const channel = usePlayerStore.getState().currentChannel;
+    const video = document.getElementById('av-player') as HTMLVideoElement | null;
+    const position = channel?.dvrHls && video && Number.isFinite(video.currentTime) && video.currentTime > 0
+      ? video.currentTime : undefined;
     clearError();
-    play();
+    play(position);
   }, [play]);
 
   const selectSubtitleTrack = useCallback((index: number) => {
@@ -1259,10 +1339,13 @@ export function usePlayer(): {
         restartSelectedSubtitles();
         video.play().catch(() => {});
       } else {
-        video.currentTime = targetTime;
+        if (channel.dvrHls && usePlayerStore.getState().status === 'error') {
+          usePlayerStore.getState().clearError();
+          play(targetTime);
+        } else video.currentTime = targetTime;
       }
     }
-  }, []);
+  }, [play]);
 
   const getVideoElement = useCallback(() => {
     return document.getElementById('av-player') as HTMLVideoElement | null;
