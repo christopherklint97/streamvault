@@ -90,3 +90,42 @@ it('issues finite scoped playback and denies cross-snapshot and forged segment r
     expect(stop).toHaveBeenCalledWith('c');
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); db.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+it('serves prior raw masters and hidden chunks to new archive tickets when emergency fallback is enabled', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-raw-api-'));
+  const db = new Database(':memory:'); ensureArchiveSchema(db);
+  const store = createArchiveStore(db); store.configure('c', 'C', true, 24);
+  const app = express(); app.use(express.json());
+  app.use(createArchiveRouter({ store, root, secret: Buffer.alloc(32, 4), getChannel: id => id === 'c' ? { id: 'c', name: 'C', content_type: 'livetv' } : undefined,
+    start: () => {}, stop: async () => {}, getRecording: () => undefined, getPrograms: () => [] }));
+  const server = app.listen(0);
+  try {
+    const address = server.address(); if (!address || typeof address === 'string') throw new Error('No address');
+    const base = `http://127.0.0.1:${address.port}`;
+    for (const [id, start] of [['first', 1_000], ['hidden', 21_000], ['joined', 41_000]] as const) {
+      fs.writeFileSync(path.join(root, `${id}.ts`), `RAW-${id}`);
+      store.publish({ id, channelId: 'c', start, end: start + 20_000, duration: 20,
+        path: `${id}.ts`, size: `RAW-${id}`.length, epoch: id === 'joined' ? 2 : 1 });
+    }
+    fs.writeFileSync(path.join(root, 'joined.playback.ts'), 'REPAIRED');
+    expect(store.hidePlaybackDuplicate('hidden')).toBe(true);
+    expect(store.setPlaybackMedia('joined', 'joined.playback.ts', 8, 5, 15, Date.now())).toBe(true);
+    const ticket = () => fetch(`${base}/api/archive/c/playback-ticket`, { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ startTime: 1_000, endTime: 61_000 }) }).then(r => r.json()) as Promise<{ url: string; snapshotId: string; duration: number; endTime: number }>;
+    const prior = await ticket();
+    expect(store.snapshot(prior.snapshotId)?.chunks.map(c => c.id)).toEqual(['first', 'joined']);
+    vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '1');
+    const fallback = await ticket();
+    expect(fallback.duration).toBe(60);
+    expect(fallback.endTime).toBe(61_000);
+    expect(store.snapshot(fallback.snapshotId)?.chunks.map(c => c.id)).toEqual(['first', 'hidden', 'joined']);
+    expect(store.snapshot(fallback.snapshotId)?.chunks.every(c => !c.playbackPath)).toBe(true);
+    const playlist = await fetch(base + fallback.url).then(r => r.text());
+    const joinedUrl = playlist.split('\n').find(line => line.includes('/joined.ts?'))!;
+    expect(await fetch(base + joinedUrl).then(r => r.text())).toBe('RAW-joined');
+    expect(store.snapshot(prior.snapshotId)?.chunks.at(-1)?.playbackPath).toBe('joined.playback.ts');
+  } finally {
+    vi.unstubAllEnvs();
+    await new Promise<void>(resolve => server.close(() => resolve())); db.close(); fs.rmSync(root, { recursive: true, force: true });
+  }
+});

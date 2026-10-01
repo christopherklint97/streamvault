@@ -127,11 +127,11 @@ export function createArchiveStore(db: Db) {
   const chunks = (sql: string, ...params: (string | number)[]) => db.prepare(sql).all(...params) as ArchiveChunk[];
   const getChunk = (id: string) => db.prepare('SELECT * FROM media_chunks WHERE id = ?').get(id) as ArchiveChunk | undefined;
   const getArchive = (channelId: string) => db.prepare('SELECT * FROM channel_archives WHERE channelId = ?').get(channelId) as ArchiveRow | undefined;
-  const overlap = (channelId: string, start: number, end: number) => chunks(
-    'SELECT * FROM media_chunks WHERE channelId = ? AND unavailable = 0 AND playbackHidden = 0 AND end > ? AND start < ? ORDER BY end,rowid', channelId, start - 1000, end + 1000,
+  const overlap = (channelId: string, start: number, end: number, raw = false) => chunks(
+    'SELECT * FROM media_chunks WHERE channelId = ? AND unavailable = 0 AND (? = 1 OR playbackHidden = 0) AND end > ? AND start < ? ORDER BY end,rowid', channelId, raw ? 1 : 0, start - 1000, end + 1000,
   ).filter(chunk => {
-    const playableStart = chunk.start + (chunk.playbackPath ? (chunk.playbackOffset ?? 0) * 1000 : 0);
-    const playableEnd = playableStart + (chunk.playbackPath ? (chunk.playbackDuration ?? chunk.duration) : chunk.duration) * 1000;
+    const playableStart = chunk.start + (!raw && chunk.playbackPath ? (chunk.playbackOffset ?? 0) * 1000 : 0);
+    const playableEnd = playableStart + (!raw && chunk.playbackPath ? (chunk.playbackDuration ?? chunk.duration) : chunk.duration) * 1000;
     return playableEnd > start && playableStart < end;
   });
   const snapshot = (id: string): ArchiveSnapshot | undefined => {
@@ -282,17 +282,18 @@ export function createArchiveStore(db: Db) {
       return chunks(`SELECT c.* FROM media_chunks c JOIN recording_chunk_refs r ON r.chunkId = c.id
         WHERE r.recordingId = ? AND c.unavailable = 0 ORDER BY c.end,c.rowid`, recordingId);
     },
-    createSnapshot(channelId: string, startTime: number, endTime: number, now: number, expiresAt: number): ArchiveSnapshot {
+    createSnapshot(channelId: string, startTime: number, endTime: number, now: number, expiresAt: number, raw = false): ArchiveSnapshot {
       const id = randomUUID();
       db.transaction(() => {
-        const selected = overlap(channelId, startTime, endTime);
+        const selected = overlap(channelId, startTime, endTime, raw);
         if (!selected.length) throw new Error('No published chunks in this interval');
         db.prepare('INSERT INTO archive_snapshots(id,channelId,startTime,endTime,expiresAt,createdAt) VALUES(?,?,?,?,?,?)').run(id, channelId, startTime, endTime, expiresAt, now);
         const add = db.prepare(`INSERT INTO archive_snapshot_chunks
           (snapshotId,chunkId,ordinal,playbackPath,playbackSize,playbackOffset,playbackDuration)
           VALUES(?,?,?,?,?,?,?)`);
         selected.forEach((c, ordinal) => add.run(id, c.id, ordinal,
-          c.playbackPath ?? null, c.playbackSize ?? 0, c.playbackOffset ?? 0, c.playbackDuration ?? null));
+          raw ? null : c.playbackPath ?? null, raw ? 0 : c.playbackSize ?? 0,
+          raw ? 0 : c.playbackOffset ?? 0, raw ? null : c.playbackDuration ?? null));
       }).immediate();
       return snapshot(id)!;
     },

@@ -23,6 +23,8 @@ services:
       - STREAMVAULT_FRAME_ACCURATE_CHANNEL_IDS=${STREAMVAULT_FRAME_ACCURATE_CHANNEL_IDS:-}
       # Optional per-channel fast retry only after a clean, publishing archive EOF.
       - STREAMVAULT_FAST_EOF_CHANNEL_IDS=${STREAMVAULT_FAST_EOF_CHANNEL_IDS:-}
+      # Emergency raw-master playback for new archive tickets; preserves pinned viewers.
+      - STREAMVAULT_ARCHIVE_RAW_PLAYBACK=${STREAMVAULT_ARCHIVE_RAW_PLAYBACK:-0}
       # Optional hardening. If set, browser clients must enter the same value
       # in Settings under Backend token.
       - STREAMVAULT_AUTH_TOKEN=${STREAMVAULT_AUTH_TOKEN:-}
