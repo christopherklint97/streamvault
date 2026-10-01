@@ -807,6 +807,16 @@ export default function Player() {
             ) : (
               <p className="text-base text-[#555]">Press ENTER to retry</p>
             )}
+            {currentChannel?.dvrHls && (
+              <button type="button" className="block mx-auto mt-3 py-2 px-5 rounded-lg border border-white/30 bg-[#222] text-white text-sm tap-none"
+                onClick={() => {
+                  const position = getVideoElement()?.currentTime;
+                  const from = Number.isFinite(position) && position! > 0 ? position! : currentTime;
+                  seek(hasDuration ? Math.min(duration - 1, from + 20) : from + 20);
+                }}>
+                Skip 20s (may miss footage)
+              </button>
+            )}
           </div>
         )}
 
