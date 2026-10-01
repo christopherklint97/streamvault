@@ -75,13 +75,14 @@ export function createArchiveRouter(deps: {
       res.status(400).json({ error: 'Invalid archive interval' }); return;
     }
     const now = Date.now();
-    const selected = store.overlap(channelId, startTime, endTime);
+    const raw = process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1';
+    const selected = store.overlap(channelId, startTime, endTime, raw);
     if (!selected.length) { res.status(404).json({ error: 'No published archive coverage' }); return; }
-    const effectiveStart = playableStart(selected[0]);
-    const effectiveEnd = playableEnd(selected.at(-1)!);
     const expiresAt = now + LEASE_MS;
-    const snapshot = store.createSnapshot(channelId, startTime, endTime, now, expiresAt);
-    deps.prioritize?.(channelId, startTime, endTime);
+    const snapshot = store.createSnapshot(channelId, startTime, endTime, now, expiresAt, raw);
+    const effectiveStart = playableStart(snapshot.chunks[0]);
+    const effectiveEnd = playableEnd(snapshot.chunks.at(-1)!);
+    if (!raw) deps.prioritize?.(channelId, startTime, endTime);
     const ticket = createArchiveTicket(snapshot.id, secret, expiresAt);
     res.set('Cache-Control', 'no-store').json({ url: `/api/archive/snapshots/${snapshot.id}/index.m3u8?ticket=${ticket}`,
       snapshotId: snapshot.id, expiresAt, startTime: effectiveStart, endTime: effectiveEnd,

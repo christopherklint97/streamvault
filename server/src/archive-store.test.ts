@@ -154,6 +154,26 @@ describe('durable archive index', () => {
     db.close();
   });
 
+  it('can pin all original archive chunks for an emergency playback fallback without changing existing snapshots', () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('espn', 'ESPN', true, 24);
+    for (const [id, start] of [['prior', 0], ['repeated', 20_000], ['joined', 40_000]] as const) {
+      store.publish({ id, channelId: 'espn', start, end: start + 20_000,
+        duration: 20, path: `${id}.ts`, size: 188, epoch: id === 'joined' ? 2 : 1 });
+    }
+    expect(store.hidePlaybackDuplicate('repeated')).toBe(true);
+    expect(store.setPlaybackMedia('joined', 'joined.playback.ts', 188, 5, 15, 1)).toBe(true);
+    const repaired = store.createSnapshot('espn', 0, 61_000, 2, 100);
+    expect(repaired.chunks.map(c => c.id)).toEqual(['prior', 'joined']);
+    const raw = store.createSnapshot('espn', 0, 61_000, 3, 100, true);
+    expect(raw.chunks.map(c => c.id)).toEqual(['prior', 'repeated', 'joined']);
+    expect(raw.chunks.every(c => !c.playbackPath && c.playbackOffset === 0 && !c.playbackDuration)).toBe(true);
+    expect(store.snapshot(repaired.id)?.chunks.at(-1)?.playbackPath).toBe('joined.playback.ts');
+    expect(store.snapshot(raw.id)?.chunks.at(-1)?.playbackPath).toBeNull();
+    expect(store.overlap('espn', 0, 61_000, true).map(c => c.id)).toEqual(['prior', 'repeated', 'joined']);
+    db.close();
+  });
+
   it('preserves referenced chunks and active snapshot pins when pruning at exact cutoff', () => {
     const db = new Database(':memory:');
     ensureArchiveSchema(db);
