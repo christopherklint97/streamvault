@@ -209,12 +209,18 @@ export class ArchiveCapture {
     // persist or log raw stderr (or a raw spawn exception).
     proc.stderr?.on('data', () => {});
     proc.once('error', () => { logger.warn(`Archive ${channelId}: writer spawn failed`); });
-    proc.once('close', () => {
+    proc.once('close', (code, signal) => {
       if (writer.forceKillTimer) clearTimeout(writer.forceKillTimer);
       this.poll(channelId);
       clearInterval(writer.timer);
       if (this.writers.get(channelId) !== writer) return;
       this.writers.delete(channelId);
+      const exitCause = this.stopping || writer.intentionalStop ? 'intentional' :
+        writer.capacityError ? 'storage_low' : writer.stale ? 'stalled' : 'source_exit';
+      const safeId = /^[a-zA-Z0-9_-]{1,64}$/.test(channelId) ? channelId : 'unknown';
+      logger.info(`Archive writer lifecycle ${safeId}: cause=${exitCause} code=${typeof code === 'number' ? code : 'null'}` +
+        ` signal=${signal && /^SIG[A-Z0-9]+$/.test(signal) ? signal : 'none'}` +
+        ` sessionMs=${Date.now() - writer.epoch} publishAgeMs=${Date.now() - writer.lastPublishedAt}`);
       if (this.stopping || writer.intentionalStop ||
         (!this.store.getArchive(channelId)?.enabled && !this.showChannels.has(channelId))) return;
       const restartReason = writer.capacityError ? 'storage_low' : writer.stale ? 'stalled' : 'source_exit';

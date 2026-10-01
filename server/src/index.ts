@@ -41,6 +41,7 @@ import type { XtreamConfig } from './xtream.js';
 import { logger } from './logger.js';
 import { startEventLoopMonitor } from './event-loop-monitor.js';
 import { requestStream, pickHeader, VLC_HEADERS } from './stream-utils.js';
+import { pipeBinaryStream } from './binary-stream-lifecycle.js';
 import { prewarmUpstream } from './http-agent.js';
 import {
   startRecording,
@@ -1534,11 +1535,12 @@ app.get('/api/stream/:channelId', async (req, res) => {
       });
     } else {
       logger.info(`Stream proxy: piping binary stream for ${channelId} (content-type: ${contentType}, content-length: ${upstreamCL || 'unknown'})`);
-      upstream.body.on('error', (err) => logger.warn(`upstream error ${channelId}: ${err.message}`));
-      upstream.body.pipe(res);
-      req.on('close', () => {
-        logger.info(`Stream proxy: client disconnected from ${channelId}`);
-        upstream.body.destroy();
+      pipeBinaryStream(upstream.body, req, res, summary => {
+        // Never include the upstream URL, error text, headers, or signed ticket.
+        const id = /^[a-zA-Z0-9_-]{1,64}$/.test(channelId) ? channelId : 'unknown';
+        logger.info(`Stream proxy lifecycle ${id}: first=${summary.firstCause} upstreamEnd=${summary.upstreamEnded}` +
+          ` responseFinish=${summary.responseFinished} requestClose=${summary.requestClosed}` +
+          ` bytes=${summary.bytes} elapsedMs=${summary.elapsedMs}`);
       });
     }
   } catch (err) {
