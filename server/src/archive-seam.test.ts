@@ -1,17 +1,76 @@
 import { describe, expect, it, vi } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { matchedPrefix, fullDuplicateInSameWindow, prepareSeamCopy, processArchiveSeam,
-  frameAccurateEnabledFor } from './archive-seam.js';
+  frameAccurateEnabledFor, allowDamagedTerminalPicture, localizedTerminalDecoderError } from './archive-seam.js';
 import Database from 'better-sqlite3';
 import { createArchiveStore, ensureArchiveSchema } from './archive-store.js';
 
 const run = (args: string[]) => execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', ...args], { timeout: 30_000 });
 
 describe('conservative TS seam copy', () => {
+  it('localizes a single decoder error to the final picture rather than an earlier or mixed error', () => {
+    const damaged = '[h264 @ 0x1234] error while decoding MB 51 5, bytestream -6';
+    const terminal = '[dec:h264] decoder -> pts:1404000 pts_time:15.6 pkt_dts:1404000';
+    const early = '[dec:h264] decoder -> pts:180000 pts_time:2 pkt_dts:180000';
+    const companions = '[h264 @ 0x1234] concealing 3198 DC, 3198 AC, 3198 MV errors in P frame\n' +
+      '[vist#0:0/h264 @ 0x5678] [dec:h264 @ 0x9abc] corrupt decoded frame';
+    expect(localizedTerminalDecoderError(`${damaged}\n${terminal}`, 15.6, 50)).toBe(true);
+    expect(localizedTerminalDecoderError(`${damaged}\n${companions}\n${terminal}`, 15.6, 50)).toBe(true);
+    expect(localizedTerminalDecoderError(`${damaged}\n${companions}\n${early}`, 15.6, 50)).toBe(false);
+    expect(localizedTerminalDecoderError(`${damaged}\n${terminal}\n[h264 @ 0x1234] invalid NAL`, 15.6, 50)).toBe(false);
+    expect(localizedTerminalDecoderError(`${damaged}\n${early}\n${damaged}\n${terminal}`, 15.6, 50)).toBe(false);
+  });
+  it('accepts at most one damaged terminal picture only with a decoder corruption signal', () => {
+    expect(allowDamagedTerminalPicture(0, false)).toBe(true);
+    expect(allowDamagedTerminalPicture(1, true)).toBe(true);
+    expect(allowDamagedTerminalPicture(1, false)).toBe(false);
+    expect(allowDamagedTerminalPicture(2, true)).toBe(false);
+    expect(allowDamagedTerminalPicture(-1, true)).toBe(false);
+  });
+  it.skipIf(!process.env.STREAMVAULT_TV4_TORN_SAMPLE)(
+    'removes the GOP replay after a real TV4 one-frame torn predecessor without losing raw media', async () => {
+      const base = process.env.STREAMVAULT_TV4_TORN_SAMPLE!;
+      const files = ['older.ts', 'prior.ts', 'raw.ts'].map(name => path.join(base, name));
+      for (const file of files) expect(fs.statSync(file).isFile()).toBe(true);
+      const initial = files.map(file => ({ size: fs.statSync(file).size, mtimeMs: fs.statSync(file).mtimeMs }));
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-tv4-torn-'));
+      try {
+        const result = await prepareSeamCopy(files.slice(0, 2), files[2], path.join(dir, 'playback.ts'), undefined, true);
+        expect(result?.kind).toBe('trim');
+        if (result?.kind !== 'trim') throw new Error('expected frame-accurate TV4 trim');
+        expect(result.offset).toBeCloseTo(15.6, 2);
+        const output = path.join(dir, 'playback.ts');
+        const frameCount = (file: string) => Number((JSON.parse(execFileSync('ffprobe',
+          ['-v', 'error', '-count_frames', '-select_streams', 'v:0', '-show_entries',
+            'stream=nb_read_frames', '-of', 'json', file], { timeout: 30_000 }).toString()) as
+          { streams: Array<{ nb_read_frames: string }> }).streams[0].nb_read_frames);
+        expect(frameCount(output)).toBe(frameCount(files[2]) - Math.round(result.offset * 50));
+        const visual = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'info', '-nostdin',
+          '-i', files[2], '-i', output,
+          '-filter_complex', `[0:v]trim=start_frame=${Math.round(result.offset * 50)},setpts=PTS-STARTPTS[ref];` +
+            '[1:v]setpts=PTS-STARTPTS[got];[ref][got]ssim', '-an', '-f', 'null', '-'],
+        { encoding: 'utf8', timeout: 45_000 });
+        expect(visual.status).toBe(0);
+        const similarity = /All:([0-9.]+)/.exec(visual.stderr)?.[1];
+        expect(Number(similarity)).toBeGreaterThan(0.98);
+        const audioHashes = (file: string): string[] =>
+          (JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'a:0',
+            '-show_packets', '-show_data_hash', 'sha256', '-show_entries', 'packet=data_hash',
+            '-of', 'json', file], { timeout: 30_000 }).toString()) as
+            { packets: Array<{ data_hash: string }> }).packets.map(packet => packet.data_hash);
+        const previousAudio = audioHashes(files[1]);
+        const rawAudio = audioHashes(files[2]);
+        const copiedAudio = audioHashes(output);
+        expect(previousAudio.at(-1)).toBe(rawAudio[previousAudio.length - 1]);
+        expect(copiedAudio).toEqual(rawAudio.slice(previousAudio.length));
+        expect(files.map(file => ({ size: fs.statSync(file).size, mtimeMs: fs.statSync(file).mtimeMs })))
+          .toEqual(initial);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }, 120_000);
   it('gates frame-accurate re-encoding to explicitly named fresh channels', () => {
     const now = 10_000_000;
     try {
