@@ -11,6 +11,13 @@ export interface BinaryStreamSummary {
   elapsedMs: number;
 }
 
+/** Remove upstream media metadata before replacing a response with a local error. */
+export function clearProxyMediaHeaders(res: ServerResponse): void {
+  for (const name of ['Content-Type', 'Content-Length', 'Content-Range', 'Accept-Ranges']) {
+    res.removeHeader(name);
+  }
+}
+
 /** A completed GET request is not a disconnected streaming response.
  * In particular, req.close can run after either upstream EOF or client abort.
  * Classify the first stream/response event, then wait for both streams to close. */
@@ -35,9 +42,7 @@ export function pipeBinaryStream(upstream: Readable, res: ServerResponse,
   upstream.once('error', () => {
     firstCause ??= 'upstream_error';
     if (!res.headersSent) {
-      res.removeHeader('Content-Length');
-      res.removeHeader('Content-Range');
-      res.removeHeader('Accept-Ranges');
+      clearProxyMediaHeaders(res);
       res.statusCode = 502;
       res.setHeader('Content-Type', 'application/json');
       res.end('{"error":"Stream unavailable"}');

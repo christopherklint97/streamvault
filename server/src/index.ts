@@ -40,8 +40,9 @@ import { createEpgWriteWorker } from './epg-write-worker.js';
 import type { XtreamConfig } from './xtream.js';
 import { logger } from './logger.js';
 import { startEventLoopMonitor } from './event-loop-monitor.js';
-import { requestStream, pickHeader, VLC_HEADERS, safeProxyChannelId, safeProxyMime, safeProxyLength } from './stream-utils.js';
-import { pipeBinaryStream } from './binary-stream-lifecycle.js';
+import { requestStream, pickHeader, VLC_HEADERS, safeProxyChannelId, safeProxyMime, safeProxyLength,
+  safeProxyContentRange, safeProxyAcceptRanges, safeRequestLogPath } from './stream-utils.js';
+import { pipeBinaryStream, clearProxyMediaHeaders } from './binary-stream-lifecycle.js';
 import { prewarmUpstream } from './http-agent.js';
 import {
   startRecording,
@@ -218,11 +219,12 @@ app.use(createArchiveRouter({ store: archiveStore, root: archiveRoot, secret: ar
 // Request logging; include completion timing only when a request is slow.
 app.use((req, res, next) => {
   const start = performance.now();
-  logger.info(`${req.method} ${req.path}`);
+  const loggedPath = safeRequestLogPath(req.path);
+  logger.info(`${req.method} ${loggedPath}`);
   res.on('finish', () => {
     const duration = performance.now() - start;
     if (duration >= 500 && req.path.startsWith('/api/')) {
-      logger.warn(`Slow ${req.method} ${req.path}: ${Math.round(duration)}ms (${res.statusCode})`);
+      logger.warn(`Slow ${req.method} ${loggedPath}: ${Math.round(duration)}ms (${res.statusCode})`);
     }
   });
   next();
@@ -1414,12 +1416,14 @@ app.get('/api/stream/:channelId', async (req, res) => {
       res.status(502).json({ error: 'Stream unavailable — provider returned an error page instead of video' });
       return;
     }
-    if (upstreamCT) res.setHeader('Content-Type', upstreamCT);
+    const forwardedType = safeProxyMime(upstreamCT);
+    if (forwardedType !== 'other') res.setHeader('Content-Type', forwardedType);
     res.setHeader('Access-Control-Allow-Origin', '*');
 
-    if (upstreamCL) res.setHeader('Content-Length', upstreamCL);
+    const forwardedLength = safeProxyLength(upstreamCL);
+    if (forwardedLength !== 'unknown') res.setHeader('Content-Length', forwardedLength);
 
-    const contentRange = pickHeader(upstream.headers, 'content-range');
+    const contentRange = safeProxyContentRange(pickHeader(upstream.headers, 'content-range'));
     if (contentRange) res.setHeader('Content-Range', contentRange);
 
     // Normalize Accept-Ranges to the canonical "bytes" for VOD — some upstreams
@@ -1428,7 +1432,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
     if (!isLive) {
       res.setHeader('Accept-Ranges', 'bytes');
     } else {
-      const acceptRanges = pickHeader(upstream.headers, 'accept-ranges');
+      const acceptRanges = safeProxyAcceptRanges(pickHeader(upstream.headers, 'accept-ranges'));
       if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
     }
 
@@ -1453,16 +1457,20 @@ app.get('/api/stream/:channelId', async (req, res) => {
       const body = Buffer.concat(chunks).toString('utf8');
       logger.info(`Stream proxy: HLS playlist received (${body.length} bytes), rewriting URLs`);
       if (body.length > 2_000_000) {
+        clearProxyMediaHeaders(res);
         res.status(502).json({ error: 'HLS playlist too large to proxy safely' });
         return;
       }
+      if (forwardedType === 'other') res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       const rewritten = rewriteHlsManifest(body, upstream.finalUrl || streamUrl, signedHlsProxyUrl);
+      res.removeHeader('Content-Length');
+      res.removeHeader('Content-Range');
       res.send(rewritten);
     } else if (pipeline === 'ffmpeg-pipe' || pipeline === 'ffmpeg-url') {
       const releaseAudioSlot = audioOnly ? liveAudioTranscodes.acquire() : () => {};
       if (!releaseAudioSlot) {
         await upstream.body.dump().catch(() => {});
-        res.removeHeader('Content-Length');
+        clearProxyMediaHeaders(res);
         res.setHeader('Retry-After', '5');
         res.status(503).json({ error: 'Audio-only capacity reached; retry shortly' });
         return;
@@ -1500,7 +1508,10 @@ app.get('/api/stream/:channelId', async (req, res) => {
         releaseAudioSlot();
         logger.error(`ffmpeg spawn failed for ${safeId}`);
         upstream.body.destroy();
-        if (!res.headersSent) res.status(500).json({ error: 'Stream processing failed' });
+        if (!res.headersSent) {
+          clearProxyMediaHeaders(res);
+          res.status(500).json({ error: 'Stream processing failed' });
+        }
         else res.destroy(new Error('Stream processing failed'));
       });
       ff.on('close', (code, signal) => {
@@ -1511,7 +1522,10 @@ app.get('/api/stream/:channelId', async (req, res) => {
         const level = code === 0 || action === 'ignore' ? 'info' : 'error';
         logger[level](`ffmpeg exited ${safeId} code=${code} signal=${signal}`);
         if (action === 'end') res.end();
-        else if (action === 'send-502') res.status(502).json({ error: 'Live stream processing failed' });
+        else if (action === 'send-502') {
+          clearProxyMediaHeaders(res);
+          res.status(502).json({ error: 'Live stream processing failed' });
+        }
         else if (action === 'destroy') res.destroy(new Error('Live stream processing failed'));
       });
 
@@ -1545,6 +1559,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
   } catch {
     logger.error(`Stream proxy failed for ${safeId}; details suppressed`);
     if (!res.headersSent) {
+      clearProxyMediaHeaders(res);
       res.status(502).json({ error: 'Stream proxy unavailable' });
     }
   }

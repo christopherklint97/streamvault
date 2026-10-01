@@ -13,11 +13,20 @@ export function safeProxyChannelId(value: string): string {
 }
 export function safeProxyMime(value?: string): string {
   const mime = value?.trim().toLowerCase();
-  return mime && /^(?:audio|video)\/[a-z0-9.+-]+$|^application\/(?:vnd\.apple\.mpegurl|x-mpegurl|octet-stream)$/.test(mime)
-    ? mime : 'other';
+  const match = mime && /^((?:audio|video|application|text)\/[a-z0-9.+-]+)(?:;\s*charset=[a-z0-9_-]+)?$/.exec(mime);
+  return match?.[1] ?? 'other';
 }
 export function safeProxyLength(value?: string): string {
   return value && /^\d{1,12}$/.test(value) ? value : 'unknown';
+}
+export function safeProxyContentRange(value?: string): string | null {
+  return value && /^bytes (?:\d+-\d+\/(?:\d+|\*)|\*\/\d+)$/.test(value) ? value : null;
+}
+export function safeProxyAcceptRanges(value?: string): string | null {
+  return value && /^(?:bytes|none)$/i.test(value) ? value.toLowerCase() : null;
+}
+export function safeRequestLogPath(value: string): string {
+  return value.startsWith('/api/stream') ? '/api/stream/:channelId' : value;
 }
 
 /** Standard VLC-like headers to get past CDN restrictions */

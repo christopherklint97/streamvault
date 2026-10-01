@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { fetchWithRedirects, requestStream, safeProxyChannelId, safeProxyMime, safeProxyLength } from './stream-utils';
+import { fetchWithRedirects, requestStream, safeProxyChannelId, safeProxyMime, safeProxyLength,
+  safeProxyContentRange, safeProxyAcceptRanges, safeRequestLogPath } from './stream-utils';
 
 let server: Server;
 let origin: string;
@@ -26,6 +27,13 @@ describe('proxy log hygiene', () => {
     expect(safeProxyMime('video/mp2t; url=https://host/private')).toBe('other');
     expect(safeProxyLength('1024')).toBe('1024');
     expect(safeProxyLength('1024; token=hidden')).toBe('unknown');
+    expect(safeProxyContentRange('bytes 0-188/189')).toBe('bytes 0-188/189');
+    expect(safeProxyContentRange('bytes 0-188/189;token=hidden')).toBeNull();
+    expect(safeProxyAcceptRanges('bytes')).toBe('bytes');
+    expect(safeProxyAcceptRanges('token=hidden')).toBeNull();
+    expect(safeRequestLogPath('/api/stream/live_44115')).toBe('/api/stream/:channelId');
+    expect(safeRequestLogPath('/api/stream/token%3Dhidden')).toBe('/api/stream/:channelId');
+    expect(safeRequestLogPath('/api/health')).toBe('/api/health');
   });
 });
 

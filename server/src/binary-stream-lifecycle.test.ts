@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import http from 'node:http';
-import { pipeBinaryStream, type BinaryStreamSummary } from './binary-stream-lifecycle.js';
+import { pipeBinaryStream, clearProxyMediaHeaders, type BinaryStreamSummary } from './binary-stream-lifecycle.js';
 
-async function exercise(mode: 'eof' | 'abort' | 'reset' | 'resetBefore'): Promise<{ summary: BinaryStreamSummary; upstreamClosed: boolean; clientStatus: number }> {
+async function exercise(mode: 'eof' | 'abort' | 'reset' | 'resetBefore'): Promise<{ summary: BinaryStreamSummary; upstreamClosed: boolean; clientStatus: number; clientHeaders: http.IncomingHttpHeaders; body: string }> {
   let clientStatus = 0;
+  let clientHeaders: http.IncomingHttpHeaders = {};
+  let body = '';
   let upstreamClosed = false;
   let notifyUpstreamClosed!: () => void;
   const closed = new Promise<void>(resolve => { notifyUpstreamClosed = resolve; });
@@ -20,6 +22,12 @@ async function exercise(mode: 'eof' | 'abort' | 'reset' | 'resetBefore'): Promis
   const reported = new Promise<BinaryStreamSummary>(resolve => { report = resolve; });
   const proxy = http.createServer((_req, res) => {
     http.get(`http://127.0.0.1:${(upstream.address() as { port: number }).port}/`, response => {
+      if (mode === 'resetBefore') {
+        res.setHeader('Content-Type', 'video/mp2t; token=hidden');
+        res.setHeader('Content-Length', '1000');
+        res.setHeader('Content-Range', 'bytes 0-999/1000;token=hidden');
+        res.setHeader('Accept-Ranges', 'token=hidden');
+      }
       pipeBinaryStream(response, res, report);
     }).on('error', () => res.destroy());
   });
@@ -28,7 +36,9 @@ async function exercise(mode: 'eof' | 'abort' | 'reset' | 'resetBefore'): Promis
     const completed = new Promise<void>(resolve => {
       const client = http.get(`http://127.0.0.1:${(proxy.address() as { port: number }).port}/`, response => {
         clientStatus = response.statusCode ?? 0;
-        response.on('data', () => {
+        clientHeaders = response.headers;
+        response.on('data', (chunk: Buffer) => {
+          body += chunk.toString('utf8');
           if (mode === 'abort') response.destroy();
         });
         response.on('error', resolve);
@@ -42,7 +52,7 @@ async function exercise(mode: 'eof' | 'abort' | 'reset' | 'resetBefore'): Promis
     await completed;
     await Promise.race([closed, new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error('upstream close timeout')), 1500))]);
-    return { summary, upstreamClosed, clientStatus };
+    return { summary, upstreamClosed, clientStatus, clientHeaders, body };
   } finally {
     proxy.closeAllConnections(); upstream.closeAllConnections();
     await Promise.all([new Promise<void>(resolve => proxy.close(() => resolve())),
@@ -60,9 +70,39 @@ describe('binary stream lifecycle', () => {
     expect(upstreamClosed).toBe(true);
   });
   it('sends a sanitized 502 if upstream resets before downstream headers', async () => {
-    const { summary, clientStatus } = await exercise('resetBefore');
+    const { summary, clientStatus, clientHeaders, body } = await exercise('resetBefore');
     expect(summary.firstCause).toBe('upstream_error');
     expect(clientStatus).toBe(502);
+    expect(clientHeaders['content-type']).toMatch(/^application\/json/);
+    expect(clientHeaders['content-range']).toBeUndefined();
+    expect(clientHeaders['accept-ranges']).toBeUndefined();
+    expect(clientHeaders['content-length']).not.toBe('1000');
+    expect(JSON.stringify(clientHeaders) + body).not.toContain('token=hidden');
+    expect(body).toContain('Stream unavailable');
+  });
+  it('clears media headers before an unrelated HLS or processing error response', async () => {
+    const proxy = http.createServer((_req, res) => {
+      res.setHeader('Content-Type', 'video/mp2t; token=hidden');
+      res.setHeader('Content-Range', 'bytes 0-999/1000;token=hidden');
+      res.setHeader('Content-Length', '1000');
+      res.setHeader('Accept-Ranges', 'token=hidden');
+      clearProxyMediaHeaders(res);
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end('{"error":"Stream unavailable"}');
+    });
+    await new Promise<void>(resolve => proxy.listen(0, '127.0.0.1', resolve));
+    try {
+      const response = await fetch(`http://127.0.0.1:${(proxy.address() as { port: number }).port}/`);
+      const body = await response.text();
+      expect(response.status).toBe(502);
+      expect(response.headers.get('content-range')).toBeNull();
+      expect(response.headers.get('accept-ranges')).toBeNull();
+      expect(response.headers.get('content-length')).not.toBe('1000');
+      expect(JSON.stringify(Object.fromEntries(response.headers)) + body).not.toContain('token=hidden');
+    } finally {
+      proxy.closeAllConnections();
+      await new Promise<void>(resolve => proxy.close(() => resolve()));
+    }
   });
   it('classifies an upstream reset before downstream closure', async () => {
     const { summary, upstreamClosed } = await exercise('reset');
