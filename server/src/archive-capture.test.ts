@@ -1,12 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parsePublishedSegments, hlsCaptureArgs, hasArchiveReserve, hasArchiveCapacity, nextArchiveEpoch } from './archive-capture.js';
+import { parsePublishedSegments, hlsCaptureArgs, hasArchiveReserve, hasArchiveCapacity, nextArchiveEpoch, archiveRetryDelay } from './archive-capture.js';
 import { ArchiveCapture } from './archive-capture.js';
 import { createArchiveStore, ensureArchiveSchema } from './archive-store.js';
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 import type { ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 
@@ -30,6 +31,28 @@ describe('stream-copy HLS capture', () => {
     expect(fs.existsSync(path.join(dir, 'chunk-000000020.ts'))).toBe(false);
     db.close(); fs.rmSync(root, { recursive: true, force: true });
   });
+  it('sends the capture session tag alongside authentication on a real FFmpeg HTTP request', async () => {
+    const session = '11111111-1111-4111-8111-111111111111';
+    let observed: { session?: string; auth?: string } = {};
+    const server = createServer((req, res) => {
+      observed = { session: req.headers['x-streamvault-capture-session'] as string | undefined,
+        auth: req.headers.authorization };
+      res.writeHead(404); res.end();
+    });
+    const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? os.tmpdir(), 'archive-http-tag-'));
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const port = (server.address() as { port: number }).port;
+      const proc = spawn('ffmpeg', hlsCaptureArgs(`http://127.0.0.1:${port}/stream`, root,
+        'synthetic-test-token', session), { stdio: ['ignore', 'ignore', 'ignore'] });
+      await Promise.race([new Promise<void>(resolve => proc.once('close', () => resolve())),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('ffmpeg request timeout')), 5_000))]);
+      expect(observed).toEqual({ session, auth: 'Bearer synthetic-test-token' });
+    } finally {
+      server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
   it('only imports completed manifest-listed chunks, never partial output', () => {
     const playlist = `#EXTM3U\n#EXT-X-PROGRAM-DATE-TIME:2026-09-27T12:00:00.000Z\n#EXTINF:19.520,\nchunk-000000001.ts\n#EXT-X-PROGRAM-DATE-TIME:2026-09-27T12:00:19.520Z\n#EXTINF:20.040,\nchunk-000000002.ts\n`;
     expect(parsePublishedSegments(playlist)).toEqual([
@@ -42,6 +65,9 @@ describe('stream-copy HLS capture', () => {
     expect(args[args.indexOf('-hls_list_size') + 1]).toBe('12');
     const auth = hlsCaptureArgs('http://127.0.0.1:3001/api/stream/one', '/tmp/archive', 'private-token');
     expect(auth.slice(auth.indexOf('-headers') + 1, auth.indexOf('-headers') + 2)).toEqual(['Authorization: Bearer private-token\r\n']);
+    const tagged = hlsCaptureArgs('http://127.0.0.1:3001/api/stream/one', '/archive', undefined,
+      '11111111-1111-4111-8111-111111111111');
+    expect(tagged[tagged.indexOf('-headers') + 1]).toBe('X-StreamVault-Capture-Session: 11111111-1111-4111-8111-111111111111\r\n');
     expect(hasArchiveReserve(6_000_000_000, 5_000_000_000)).toBe(true);
     expect(hasArchiveReserve(4_000_000_000, 5_000_000_000)).toBe(false);
     expect(hasArchiveCapacity(600, 200, 100, 500)).toBe(true);
@@ -160,6 +186,83 @@ describe('stream-copy HLS capture', () => {
     } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  it('keeps normal and storage backoff unless a canary writer had a fresh clean exit', () => {
+    const eligible = { channelId: 'live_44115', allowlist: 'live_44115', code: 0, signal: null,
+      sessionMs: 45_000, publishAgeMs: 5_000, proxyEndAgeMs: 500, hasPublished: true,
+      fastAttemptsLast10Min: 0, stalled: false, storageLow: false };
+    expect(archiveRetryDelay(eligible)).toBe(1_000);
+    for (const override of [
+      { allowlist: '' }, { channelId: 'live_17289' }, { code: 1 }, { signal: 'SIGINT' },
+      { sessionMs: 29_999 }, { publishAgeMs: 30_001 }, { proxyEndAgeMs: -1 },
+      { proxyEndAgeMs: 5_001 }, { hasPublished: false }, { stalled: true },
+      { fastAttemptsLast10Min: 4 },
+    ]) expect(archiveRetryDelay({ ...eligible, ...override })).toBe(10_000);
+    expect(archiveRetryDelay({ ...eligible, proxyEndAgeMs: undefined })).toBe(10_000);
+    expect(archiveRetryDelay({ ...eligible, storageLow: true })).toBe(60_000);
+  });
+
+  it('retries a published TV4 EOF promptly while preserving a new repairable session', async () => {
+    const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? os.tmpdir(), 'archive-eof-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('live_44115', 'TV4', true, 24);
+    const previous = process.env.STREAMVAULT_FAST_EOF_CHANNEL_IDS;
+    process.env.STREAMVAULT_FAST_EOF_CHANNEL_IDS = 'live_44115';
+    vi.useFakeTimers();
+    const child = () => Object.assign(new EventEmitter(), { stderr: new EventEmitter(), kill: vi.fn(() => true) });
+    const first = child(), second = child(), third = child();
+    const spawnWriter = vi.fn().mockReturnValueOnce(first as unknown as ChildProcess)
+      .mockReturnValueOnce(second as unknown as ChildProcess)
+      .mockReturnValueOnce(third as unknown as ChildProcess);
+    try {
+      const capture = new ArchiveCapture(store, root, 3001, undefined,
+        spawnWriter as unknown as typeof import('node:child_process').spawn);
+      capture.start('live_44115');
+      vi.advanceTimersByTime(30_000);
+      const directory = (capture as unknown as { writers: Map<string, { directory: string }> }).writers.get('live_44115')!.directory;
+      fs.writeFileSync(path.join(directory, 'chunk-000000000.ts'), 'first media');
+      fs.writeFileSync(path.join(directory, 'current.m3u8'), '#EXTM3U\n#EXTINF:20,\nchunk-000000000.ts\n');
+      vi.advanceTimersByTime(2_000);
+      expect(store.cursor(path.basename(directory))).toBeDefined();
+      const pinned = store.createSnapshot('live_44115', Date.now() - 40_000, Date.now(), Date.now(), Date.now() + 60_000);
+      capture.noteProxyLifecycle('live_44115', '00000000-0000-4000-8000-000000000000', 'upstream_end', true);
+      capture.noteProxyLifecycle('live_44115', path.basename(directory), 'client_close', false);
+      const observed = (capture as unknown as { writers: Map<string, { proxyEndAt?: number }> }).writers.get('live_44115')!;
+      expect(observed.proxyEndAt).toBeUndefined();
+      capture.noteProxyLifecycle('live_44115', path.basename(directory), 'upstream_end', true);
+      expect(observed.proxyEndAt).toBe(Date.now());
+      first.emit('close', 0, null);
+      expect(store.getArchive('live_44115')).toMatchObject({ autoRestartCount: 1, lastRecoveredRestartCount: 0 });
+      vi.advanceTimersByTime(999);
+      expect(spawnWriter).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(1);
+      expect(spawnWriter).toHaveBeenCalledTimes(2);
+      const replacement = (capture as unknown as { writers: Map<string, { directory: string }> }).writers.get('live_44115')!.directory;
+      expect(replacement).not.toBe(directory);
+      expect(store.getArchive('live_44115')?.lastRecoveredRestartCount).toBe(0);
+      fs.writeFileSync(path.join(replacement, 'chunk-000000000.ts'), 'new writer media');
+      fs.writeFileSync(path.join(replacement, 'current.m3u8'), '#EXTM3U\n#EXTINF:20,\nchunk-000000000.ts\n');
+      vi.advanceTimersByTime(2_000);
+      expect(store.cursor(path.basename(replacement))).toBeDefined();
+      expect(store.getArchive('live_44115')).toMatchObject({ status: 'capturing', lastRecoveredRestartCount: 1 });
+      expect(store.snapshot(pinned.id)?.chunks.map(chunk => chunk.id)).toEqual([`${path.basename(directory)}-chunk-000000000.ts`]);
+      expect(fs.existsSync(path.join(directory, 'chunk-000000000.ts'))).toBe(true);
+      vi.advanceTimersByTime(28_000);
+      const history = (capture as unknown as { fastRetryHistory: Map<string, number[]> }).fastRetryHistory;
+      history.set('live_44115', [0, 1, 2, 3].map(i => Date.now() - i * 1_000));
+      capture.noteProxyLifecycle('live_44115', path.basename(replacement), 'upstream_end', true);
+      second.emit('close', 0, null);
+      vi.advanceTimersByTime(9_999);
+      expect(spawnWriter).toHaveBeenCalledTimes(2);
+      vi.advanceTimersByTime(1);
+      expect(spawnWriter).toHaveBeenCalledTimes(3);
+      expect(history.get('live_44115')).toHaveLength(4);
+      const stopped = capture.stopAll(); third.emit('close', null, 'SIGINT'); await stopped;
+    } finally {
+      if (previous === undefined) delete process.env.STREAMVAULT_FAST_EOF_CHANNEL_IDS;
+      else process.env.STREAMVAULT_FAST_EOF_CHANNEL_IDS = previous;
+      vi.clearAllTimers(); vi.useRealTimers(); db.close(); fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
   it('restarts a stuck FFmpeg child after forced close and the bounded retry delay', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-retry-'));
     const db = new Database(':memory:'); ensureArchiveSchema(db);

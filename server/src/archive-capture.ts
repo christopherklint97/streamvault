@@ -18,7 +18,9 @@ type ArchiveWriter = {
   timer: ReturnType<typeof setInterval>;
   directory: string;
   epoch: number;
+  startedAt: number;
   lastPublishedAt: number;
+  proxyEndAt?: number;
   terminationRequested?: boolean;
   intentionalStop?: boolean;
   forceKillTimer?: ReturnType<typeof setTimeout>;
@@ -47,14 +49,31 @@ export function nextArchiveEpoch(current: number, discontinuity: boolean): numbe
   return current + (discontinuity ? 1 : 0);
 }
 
-export function hlsCaptureArgs(url: string, directory: string, authToken?: string): string[] {
+export function hlsCaptureArgs(url: string, directory: string, authToken?: string, captureSession?: string): string[] {
+  const headers = [authToken ? `Authorization: Bearer ${authToken}` : null,
+    captureSession && /^[0-9a-f-]{36}$/.test(captureSession)
+      ? `X-StreamVault-Capture-Session: ${captureSession}` : null].filter(Boolean).join('\r\n');
   return ['-hide_banner', '-loglevel', 'warning', '-nostats', '-nostdin',
-    ...(authToken ? ['-headers', `Authorization: Bearer ${authToken}\r\n`] : []), '-i', url,
+    ...(headers ? ['-headers', `${headers}\r\n`] : []), '-i', url,
     '-map', '0:v:0?', '-map', '0:a?', '-map', '0:d?', '-c', 'copy', '-copy_unknown',
     '-f', 'hls', '-hls_time', '20', '-hls_list_size', '12',
     '-hls_flags', 'temp_file+program_date_time+omit_endlist+independent_segments',
     '-hls_segment_type', 'mpegts', '-hls_segment_filename', path.join(directory, 'chunk-%09d.ts'),
     path.join(directory, 'current.m3u8')];
+}
+
+export function archiveRetryDelay(options: {
+  channelId: string; allowlist?: string; code: number | null; signal: string | null;
+  sessionMs: number; publishAgeMs: number; proxyEndAgeMs?: number; hasPublished: boolean;
+  fastAttemptsLast10Min: number; stalled: boolean; storageLow: boolean;
+}): number {
+  if (options.storageLow) return 60_000;
+  const eligible = options.code === 0 && !options.signal && !options.stalled && options.hasPublished &&
+    options.allowlist?.split(',').some(id => id.trim() === options.channelId) &&
+    options.sessionMs >= 30_000 && options.publishAgeMs >= 0 && options.publishAgeMs <= 30_000 &&
+    options.proxyEndAgeMs !== undefined && options.proxyEndAgeMs >= 0 && options.proxyEndAgeMs <= 5_000 &&
+    options.fastAttemptsLast10Min >= 0 && options.fastAttemptsLast10Min < 4;
+  return eligible ? 1_000 : 10_000;
 }
 
 export function parsePublishedSegments(manifest: string) {
@@ -80,6 +99,7 @@ export function parsePublishedSegments(manifest: string) {
  * playlists. Rollover recovery probes only older, finalized unlisted files. */
 export class ArchiveCapture {
   private readonly writers = new Map<string, ArchiveWriter>();
+  private readonly fastRetryHistory = new Map<string, number[]>();
   private retry = new Map<string, ReturnType<typeof setTimeout>>();
   private stopping = false;
   private seamQueue: string[] = [];
@@ -94,6 +114,12 @@ export class ArchiveCapture {
     private readonly onPublished: (channelId: string) => void = () => {},
     private readonly spawnWriter: typeof spawn = spawn,
     private readonly processSeam: typeof processArchiveSeam = processArchiveSeam) {}
+  /** Correlate a loopback capture's completed response with its active writer. */
+  noteProxyLifecycle(channelId: string, session: string, cause: string, responseFinished: boolean): void {
+    if (cause !== 'upstream_end' || !responseFinished) return;
+    const writer = this.writers.get(channelId);
+    if (writer && path.basename(writer.directory) === session) writer.proxyEndAt = Date.now();
+  }
 
   /** Keep FFprobe/stream-copy work off the synchronous two-second capture poll.
    * New archive segments jump ahead of historical backfill; one job runs at a time. */
@@ -201,8 +227,8 @@ export class ArchiveCapture {
     const directory = path.join(this.root, 'archive', encodeURIComponent(channelId), session);
     fs.mkdirSync(directory, { recursive: true });
     const url = `http://127.0.0.1:${this.port}/api/stream/${encodeURIComponent(channelId)}?subs=1`;
-    const proc = this.spawnWriter('ffmpeg', hlsCaptureArgs(url, directory, process.env.STREAMVAULT_AUTH_TOKEN), { stdio: ['ignore', 'ignore', 'pipe'] });
-    const writer: ArchiveWriter = { process: proc, directory, epoch: Date.now(),
+    const proc = this.spawnWriter('ffmpeg', hlsCaptureArgs(url, directory, process.env.STREAMVAULT_AUTH_TOKEN, session), { stdio: ['ignore', 'ignore', 'pipe'] });
+    const writer: ArchiveWriter = { process: proc, directory, epoch: Date.now(), startedAt: Date.now(),
       lastPublishedAt: Date.now(), timer: setInterval(() => this.poll(channelId), 2_000) };
     this.writers.set(channelId, writer);
     // FFmpeg diagnostics may contain credential-bearing provider URLs. Never
@@ -220,7 +246,7 @@ export class ArchiveCapture {
       const safeId = /^[a-zA-Z0-9_-]{1,64}$/.test(channelId) ? channelId : 'unknown';
       logger.info(`Archive writer lifecycle ${safeId}: cause=${exitCause} code=${typeof code === 'number' ? code : 'null'}` +
         ` signal=${signal && /^SIG[A-Z0-9]+$/.test(signal) ? signal : 'none'}` +
-        ` sessionMs=${Date.now() - writer.epoch} publishAgeMs=${Date.now() - writer.lastPublishedAt}`);
+        ` sessionMs=${Date.now() - writer.startedAt} publishAgeMs=${Date.now() - writer.lastPublishedAt}`);
       if (this.stopping || writer.intentionalStop ||
         (!this.store.getArchive(channelId)?.enabled && !this.showChannels.has(channelId))) return;
       const restartReason = writer.capacityError ? 'storage_low' : writer.stale ? 'stalled' : 'source_exit';
@@ -228,7 +254,24 @@ export class ArchiveCapture {
       const reason = writer.capacityError ?? (writer.stale ? 'No archive segment published for two minutes' :
         'Source disconnected');
       this.store.setStatus(channelId, writer.capacityError ? 'storage_low' : 'retrying', reason);
-      const timer = setTimeout(() => { this.retry.delete(channelId); this.start(channelId); }, writer.capacityError ? 60_000 : 10_000);
+      // An opt-in clean, recently publishing writer exit can skip most of the
+      // cooldown. The replacement still uses a fresh session so its first
+      // chunk remains an explicit discontinuity and seam-repair candidate.
+      const now = Date.now();
+      const recentFastRetries = (this.fastRetryHistory.get(channelId) ?? [])
+        .filter(at => at <= now && now - at < 10 * 60_000);
+      const delay = archiveRetryDelay({ channelId,
+        allowlist: process.env.STREAMVAULT_FAST_EOF_CHANNEL_IDS, code, signal,
+        sessionMs: now - writer.startedAt, publishAgeMs: now - writer.lastPublishedAt,
+        proxyEndAgeMs: writer.proxyEndAt === undefined ? undefined : now - writer.proxyEndAt,
+        hasPublished: Boolean(this.store.cursor(path.basename(writer.directory))),
+        fastAttemptsLast10Min: recentFastRetries.length,
+        stalled: Boolean(writer.stale), storageLow: Boolean(writer.capacityError) });
+      if (delay === 1_000) recentFastRetries.push(now);
+      if (recentFastRetries.length) this.fastRetryHistory.set(channelId, recentFastRetries);
+      else this.fastRetryHistory.delete(channelId);
+      logger.info(`Archive retry ${safeId}: delayMs=${delay} cause=${restartReason}`);
+      const timer = setTimeout(() => { this.retry.delete(channelId); this.start(channelId); }, delay);
       this.retry.set(channelId, timer);
     });
   }

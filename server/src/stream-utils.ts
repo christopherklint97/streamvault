@@ -38,6 +38,12 @@ export function safeRequestLogPath(value: string): string {
   return '/:path';
 }
 
+export function isLoopbackCaptureSession(remoteAddress: string | undefined, session: string | undefined): string | null {
+  if (!session || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(session)) return null;
+  return remoteAddress === '127.0.0.1' || remoteAddress === '::ffff:127.0.0.1' || remoteAddress === '::1'
+    ? session : null;
+}
+
 /** Standard VLC-like headers to get past CDN restrictions */
 export const VLC_HEADERS: Record<string, string> = {
   'User-Agent': 'VLC/3.0.20 LibVLC/3.0.20',

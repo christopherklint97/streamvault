@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import express from 'express';
 import { fetchWithRedirects, requestStream, safeProxyChannelId, safeProxyMime, safeProxyLength,
-  safeProxyContentRange, safeProxyAcceptRanges, safeRequestLogPath, isUpstreamHtmlResponse } from './stream-utils';
+  safeProxyContentRange, safeProxyAcceptRanges, safeRequestLogPath, isUpstreamHtmlResponse,
+  isLoopbackCaptureSession } from './stream-utils';
 
 let server: Server;
 let origin: string;
@@ -45,6 +46,14 @@ describe('proxy log hygiene', () => {
     expect(safeProxyMime('application/javascript')).toBe('other');
     expect(safeProxyMime('application/vnd.apple.mpegurl; charset=UTF-8')).toBe('application/vnd.apple.mpegurl');
     expect(safeRequestLogPath('/api/health')).toBe('/api/health');
+  });
+  it('accepts only loopback requests with a well-formed capture session tag', () => {
+    const session = '11111111-1111-4111-8111-111111111111';
+    expect(isLoopbackCaptureSession('127.0.0.1', session)).toBe(session);
+    expect(isLoopbackCaptureSession('::ffff:127.0.0.1', session)).toBe(session);
+    expect(isLoopbackCaptureSession('::1', session)).toBe(session);
+    expect(isLoopbackCaptureSession('192.0.2.4', session)).toBeNull();
+    expect(isLoopbackCaptureSession('127.0.0.1', 'bad;token=hidden')).toBeNull();
   });
   it('masks routed and unmatched encoded paths before request logging', async () => {
     const app = express();
