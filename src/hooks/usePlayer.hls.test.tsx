@@ -35,6 +35,7 @@ describe('finite HLS DVR player', () => {
     await act(async () => root.render(<Harness ref={hookRef} />));
   });
   afterEach(async () => {
+    await act(async () => hookRef.current?.stop());
     await act(async () => root.unmount()); video.remove(); container.remove(); vi.restoreAllMocks();
   });
   it('loads HLS through MSE and destroys the transport when playback stops', async () => {
@@ -63,6 +64,20 @@ describe('finite HLS DVR player', () => {
     await act(async () => video.dispatchEvent(new Event('waiting')));
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 1600)); });
     expect(usePlayerStore.getState().status).toBe('error');
+    await act(async () => video.dispatchEvent(new Event('playing')));
+    expect(usePlayerStore.getState().status).toBe('error');
+  });
+  it('recovers at the last confirmed playback time when the media element loses its clock', async () => {
+    const log = vi.spyOn(clientLogger, 'info');
+    saveWatchProgress('archive_live_7_1000', 5, 3600, 'movies');
+    Object.defineProperty(video, 'error', { configurable: true, value: { code: 3, message: 'decode' } });
+    await act(async () => { hookRef.current?.play(); await vi.waitFor(() => expect(hls.loadSource).toHaveBeenCalledTimes(1)); });
+    video.currentTime = 45;
+    await act(async () => video.dispatchEvent(new Event('timeupdate')));
+    video.currentTime = 0;
+    await act(async () => video.dispatchEvent(new Event('error')));
+    await vi.waitFor(() => expect(hls.loadSource).toHaveBeenCalledTimes(2));
+    expect(log).toHaveBeenCalledWith('Resuming from position 45.0s');
   });
   it('reopens a finite HLS session if playback makes no progress, without treating a pause as a stall', async () => {
     let paused = false;

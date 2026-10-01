@@ -350,6 +350,7 @@ export function stopActivePlayback() {
 
   stopBgProgressTracking();
   clearFiniteHlsStallTimer();
+  finiteHlsRetry = { channelId: '', position: -1, attempts: 0, at: 0 };
   clearRecordingVodPoll();
   html5PlaybackGeneration += 1;
   playbackClock.reset();
@@ -774,8 +775,10 @@ export function usePlayer(): {
       const recoverFiniteHls = (reason: string) => {
         if (!channel.dvrHls || !isCurrentPlayback() || finiteRecoveryStarted) return false;
         const now = Date.now();
+        const clock = playbackClock.getSnapshot();
         const position = Number.isFinite(video.currentTime) && video.currentTime > 0
-          ? video.currentTime : resumePosition;
+          ? video.currentTime : lastMediaTime > 0 ? lastMediaTime
+            : clock.generation === clockGeneration && clock.position > 0 ? clock.position : resumePosition;
         if (finiteHlsRetry.channelId !== channel.id || now - finiteHlsRetry.at > 5 * 60_000 ||
             Math.abs(position - finiteHlsRetry.position) > 5) {
           finiteHlsRetry = { channelId: channel.id, position, attempts: 0, at: now };
@@ -839,14 +842,16 @@ export function usePlayer(): {
         );
       };
       const attemptPlay = () => {
-        if (!startupReady || !canPlay || playAttempted || !isCurrentPlayback()) return;
+        if (!startupReady || !canPlay || playAttempted || !isCurrentPlayback() ||
+            usePlayerStore.getState().status === 'error') return;
         playAttempted = true;
         log.info('HTML5: startup ready — attempting play()');
         void video.play().then(() => {
-          if (!isCurrentPlayback()) return;
+          if (!isCurrentPlayback() || usePlayerStore.getState().status === 'error') return;
           log.info('HTML5: play() succeeded');
           setStatus('playing');
         }).catch((error) => {
+          if (!isCurrentPlayback() || usePlayerStore.getState().status === 'error') return;
           log.error('HTML5: play() rejected', error);
           if (isLiveTs && isCurrentPlayback()) disableLiveStreamRecovery();
           if (isCurrentPlayback()) setError('Playback blocked — tap to retry');
@@ -909,6 +914,7 @@ export function usePlayer(): {
           }, 1500);
         };
         video.onplaying = () => {
+          if (!isCurrentPlayback() || usePlayerStore.getState().status === 'error') return;
           log.info('HTML5 event: playing');
           if (bgBufferTimer) { clearTimeout(bgBufferTimer); bgBufferTimer = null; }
           setStatus('playing');
@@ -951,6 +957,7 @@ export function usePlayer(): {
         };
         video.onabort = () => log.warn('HTML5 event: abort');
         video.onended = () => {
+          if (!isCurrentPlayback() || usePlayerStore.getState().status === 'error') return;
           log.info('HTML5 event: ended');
           if (isLiveTs && isCurrentPlayback()) {
             if (pendingLiveEof) { recoverDrainedLiveStream(true); return; }
