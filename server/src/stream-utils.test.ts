@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { fetchWithRedirects, requestStream } from './stream-utils';
+import express from 'express';
+import { fetchWithRedirects, requestStream, safeProxyChannelId, safeProxyMime, safeProxyLength,
+  safeProxyContentRange, safeProxyAcceptRanges, safeRequestLogPath, isUpstreamHtmlResponse } from './stream-utils';
 
 let server: Server;
 let origin: string;
@@ -17,6 +19,51 @@ beforeAll(async () => {
   origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 });
 afterAll(async () => { await new Promise<void>(resolve => server.close(() => resolve())); });
+
+describe('proxy log hygiene', () => {
+  it('allows only stable channel IDs and canonical media metadata, never arbitrary URL-bearing fields', () => {
+    expect(safeProxyChannelId('live_44115')).toBe('live_44115');
+    expect(safeProxyChannelId('live_44115/secret')).toBe('unknown');
+    expect(safeProxyMime('video/mp2t')).toBe('video/mp2t');
+    expect(safeProxyMime('video/mp2t; url=https://host/private')).toBe('other');
+    expect(safeProxyLength('1024')).toBe('1024');
+    expect(safeProxyLength('1024; token=hidden')).toBe('unknown');
+    expect(safeProxyContentRange('bytes 0-188/189')).toBe('bytes 0-188/189');
+    expect(safeProxyContentRange('bytes 0-188/189;token=hidden')).toBeNull();
+    expect(safeProxyAcceptRanges('bytes')).toBe('bytes');
+    expect(safeProxyAcceptRanges('token=hidden')).toBeNull();
+    expect(safeRequestLogPath('/api/stream/live_44115')).toBe('/api/stream/:channelId');
+    expect(safeRequestLogPath('/api/stream/token%3Dhidden')).toBe('/api/stream/:channelId');
+    expect(safeRequestLogPath('/API/STREAM/token%3Dhidden')).toBe('/api/stream/:channelId');
+    expect(safeRequestLogPath('/%41PI/STREAM/token%3Dhidden')).toBe('/:path');
+    expect(safeRequestLogPath('/api/other/token%3Dhidden')).toBe('/api/:route');
+    expect(safeRequestLogPath('/token%3Dhidden')).toBe('/:path');
+    expect(isUpstreamHtmlResponse('TEXT/HTML; charset=UTF-8')).toBe(true);
+    expect(isUpstreamHtmlResponse('application/xhtml+xml')).toBe(true);
+    expect(isUpstreamHtmlResponse('video/mp2t')).toBe(false);
+    expect(safeProxyMime('TEXT/HTML; charset=UTF-8')).toBe('other');
+    expect(safeProxyMime('application/javascript')).toBe('other');
+    expect(safeProxyMime('application/vnd.apple.mpegurl; charset=UTF-8')).toBe('application/vnd.apple.mpegurl');
+    expect(safeRequestLogPath('/api/health')).toBe('/api/health');
+  });
+  it('masks routed and unmatched encoded paths before request logging', async () => {
+    const app = express();
+    const labels: string[] = [];
+    app.use((req, _res, next) => { labels.push(safeRequestLogPath(req.path)); next(); });
+    app.get('/api/stream/:channelId', (_req, res) => res.end('ok'));
+    const server = createServer(app);
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      expect((await fetch(`${base}/API/STREAM/token%3Dhidden`)).status).toBe(200);
+      expect((await fetch(`${base}/%41PI/STREAM/token%3Dhidden`)).status).toBe(404);
+      expect(labels).toEqual(['/api/stream/:channelId', '/:path']);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+});
 
 describe('stream redirects', () => {
   it('rejects a disallowed redirect before requesting its target', async () => {

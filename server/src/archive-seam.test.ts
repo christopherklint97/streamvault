@@ -20,6 +20,12 @@ describe('conservative TS seam copy', () => {
       '[vist#0:0/h264 @ 0x5678] [dec:h264 @ 0x9abc] corrupt decoded frame';
     expect(localizedTerminalDecoderError(`${damaged}\n${terminal}`, 15.6, 50)).toBe(true);
     expect(localizedTerminalDecoderError(`${damaged}\n${companions}\n${terminal}`, 15.6, 50)).toBe(true);
+    const near = '[dec:h264] decoder -> pts:1398600 pts_time:15.54 pkt_dts:1398600';
+    const reordered = `[h264 @ 0x1234] concealing 232 DC, 232 AC, 232 MV errors in I frame\n${near}\n` +
+      '[vist#0:0/h264 @ 0x5678] [dec:h264 @ 0x9abc] corrupt decoded frame';
+    expect(localizedTerminalDecoderError(`${damaged}\n${reordered}\n${terminal}`, 15.6, 50)).toBe(true);
+    expect(localizedTerminalDecoderError(`${damaged}\n${reordered}\n${early}`, 15.6, 50)).toBe(false);
+    expect(localizedTerminalDecoderError(`${damaged}\n${early}\n${reordered}\n${terminal}`, 15.6, 50)).toBe(false);
     expect(localizedTerminalDecoderError(`${damaged}\n${companions}\n${early}`, 15.6, 50)).toBe(false);
     expect(localizedTerminalDecoderError(`${damaged}\n${terminal}\n[h264 @ 0x1234] invalid NAL`, 15.6, 50)).toBe(false);
     expect(localizedTerminalDecoderError(`${damaged}\n${early}\n${damaged}\n${terminal}`, 15.6, 50)).toBe(false);
@@ -67,6 +73,44 @@ describe('conservative TS seam copy', () => {
         const copiedAudio = audioHashes(output);
         expect(previousAudio.at(-1)).toBe(rawAudio[previousAudio.length - 1]);
         expect(copiedAudio).toEqual(rawAudio.slice(previousAudio.length));
+        expect(files.map(file => ({ size: fs.statSync(file).size, mtimeMs: fs.statSync(file).mtimeMs })))
+          .toEqual(initial);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }, 120_000);
+  it.skipIf(!process.env.STREAMVAULT_TV4_REORDERED_SAMPLE)(
+    'retains the unique tail and exact AAC when a B-frame precedes terminal corruption', async () => {
+      const base = process.env.STREAMVAULT_TV4_REORDERED_SAMPLE!;
+      const files = ['older.ts', 'prior.ts', 'raw.ts'].map(name => path.join(base, name));
+      const initial = files.map(file => ({ size: fs.statSync(file).size, mtimeMs: fs.statSync(file).mtimeMs }));
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-tv4-bframe-'));
+      try {
+        const output = path.join(dir, 'playback.ts');
+        const result = await prepareSeamCopy(files.slice(0, 2), files[2], output, undefined, true);
+        expect(result?.kind).toBe('trim');
+        if (result?.kind !== 'trim') throw new Error('expected frame-accurate TV4 trim');
+        expect(result.offset).toBeCloseTo(17.28, 2);
+        const frameCount = (file: string) => Number((JSON.parse(execFileSync('ffprobe',
+          ['-v', 'error', '-count_frames', '-select_streams', 'v:0', '-show_entries',
+            'stream=nb_read_frames', '-of', 'json', file], { timeout: 30_000 }).toString()) as
+          { streams: Array<{ nb_read_frames: string }> }).streams[0].nb_read_frames);
+        expect(frameCount(output)).toBe(frameCount(files[2]) - Math.round(result.offset * 50));
+        const visual = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'info', '-nostdin',
+          '-i', files[2], '-i', output,
+          '-filter_complex', `[0:v]trim=start_frame=${Math.round(result.offset * 50)},setpts=PTS-STARTPTS[ref];` +
+            '[1:v]setpts=PTS-STARTPTS[got];[ref][got]ssim', '-an', '-f', 'null', '-'],
+        { encoding: 'utf8', timeout: 45_000 });
+        expect(visual.status).toBe(0);
+        expect(Number(/All:([0-9.]+)/.exec(visual.stderr)?.[1])).toBeGreaterThan(0.98);
+        const audioHashes = (file: string): string[] =>
+          (JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'a:0',
+            '-show_packets', '-show_data_hash', 'sha256', '-show_entries', 'packet=data_hash',
+            '-of', 'json', file], { timeout: 30_000 }).toString()) as
+            { packets: Array<{ data_hash: string }> }).packets.map(packet => packet.data_hash);
+        const rawAudio = audioHashes(files[2]); const copiedAudio = audioHashes(output);
+        const start = rawAudio.indexOf(copiedAudio[0]);
+        expect(start).toBeGreaterThan(0);
+        expect(copiedAudio).toEqual(rawAudio.slice(start));
+        expect(audioHashes(files[1]).at(-1)).toBe(rawAudio[start - 1]);
         expect(files.map(file => ({ size: fs.statSync(file).size, mtimeMs: fs.statSync(file).mtimeMs })))
           .toEqual(initial);
       } finally { fs.rmSync(dir, { recursive: true, force: true }); }

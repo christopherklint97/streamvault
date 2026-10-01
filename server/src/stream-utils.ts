@@ -7,6 +7,37 @@ import { logger } from './logger.js';
 /** undici BodyReadable extends Readable with a dump() helper for safe discard. */
 export type UndiciBody = Readable & { dump: (opts?: { limit?: number }) => Promise<void> };
 
+/** Allow only fields which cannot contain source credentials in proxy diagnostics. */
+export function safeProxyChannelId(value: string): string {
+  return /^[a-zA-Z0-9_-]{1,64}$/.test(value) ? value : 'unknown';
+}
+export function safeProxyMime(value?: string): string {
+  const mime = value?.trim().toLowerCase();
+  const match = mime && /^((?:audio|video)\/[a-z0-9.+-]+|application\/(?:vnd\.apple\.mpegurl|x-mpegurl|octet-stream)|text\/plain)(?:;\s*charset=[a-z0-9_-]+)?$/.exec(mime);
+  return match?.[1] ?? 'other';
+}
+export function isUpstreamHtmlResponse(value?: string): boolean {
+  return Boolean(value && /^\s*(?:text\/html|application\/xhtml\+xml)(?:\s*;|\s*$)/i.test(value));
+}
+export function safeProxyLength(value?: string): string {
+  return value && /^\d{1,12}$/.test(value) ? value : 'unknown';
+}
+export function safeProxyContentRange(value?: string): string | null {
+  return value && /^bytes (?:\d+-\d+\/(?:\d+|\*)|\*\/\d+)$/.test(value) ? value : null;
+}
+export function safeProxyAcceptRanges(value?: string): string | null {
+  return value && /^(?:bytes|none)$/i.test(value) ? value.toLowerCase() : null;
+}
+export function safeRequestLogPath(value: string): string {
+  // Request paths are untrusted even if a route does not match (including encoded
+  // static segments); never log arbitrary path bytes or signed media tickets.
+  if (value === '/') return '/';
+  if (/^\/api\/health$/i.test(value)) return '/api/health';
+  if (value.toLowerCase().startsWith('/api/stream')) return '/api/stream/:channelId';
+  if (value.toLowerCase().startsWith('/api/')) return '/api/:route';
+  return '/:path';
+}
+
 /** Standard VLC-like headers to get past CDN restrictions */
 export const VLC_HEADERS: Record<string, string> = {
   'User-Agent': 'VLC/3.0.20 LibVLC/3.0.20',

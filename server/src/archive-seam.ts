@@ -130,8 +130,20 @@ export function localizedTerminalDecoderError(trace: string, terminalTime: numbe
   if (damage.length !== 1 || conceal.length > 1 || corrupt.length > 1 ||
       diagnostics.length !== damage.length + conceal.length + corrupt.length ||
       diagnostics.some(({ index }) => index < damage[0].index)) return false;
+  // H.264 B-frames may flush earlier presentation-time pictures after the
+  // macroblock error. The decoder's explicit corrupt-frame marker, when
+  // present, identifies the damaged picture more reliably than the first
+  // post-error frame; require every intervening output to stay near the tail.
+  const markerIndex = corrupt[0]?.index ?? damage[0].index;
+  const intermediate = lines.slice(damage[0].index + 1, markerIndex)
+    .filter(line => line.includes('decoder -> pts:'));
+  if (intermediate.length > 4 || intermediate.some(line => {
+    const pts = /decoder -> pts:[^\n]*?pts_time:([\d.-]+)/.exec(line);
+    const time = Number(pts?.[1]);
+    return !pts || !Number.isFinite(time) || time < terminalTime - 4 / fps || time > terminalTime;
+  })) return false;
   const nextFrameIndex = lines.findIndex((line, index) =>
-    index > damage[0].index && line.includes('decoder -> pts:'));
+    index > markerIndex && line.includes('decoder -> pts:'));
   if (nextFrameIndex < 0 || diagnostics.some(({ index }) => index > nextFrameIndex)) return false;
   const parsed = /decoder -> pts:[^\n]*?pts_time:([\d.-]+)/.exec(lines[nextFrameIndex]);
   return Boolean(parsed && Number.isFinite(Number(parsed[1])) &&
