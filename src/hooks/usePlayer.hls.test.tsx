@@ -3,6 +3,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { usePlayer } from './usePlayer';
 import { usePlayerStore } from '../stores/playerStore';
+import { saveWatchProgress } from '../services/channel-service';
+import { clientLogger } from '../utils/logger';
 
 const { hls } = vi.hoisted(() => ({ hls: { attachMedia: vi.fn(), loadSource: vi.fn(), destroy: vi.fn(), on: vi.fn() } }));
 vi.mock('hls.js', () => ({ default: Object.assign(class MockHls { constructor() { return hls; } }, {
@@ -41,5 +43,52 @@ describe('finite HLS DVR player', () => {
     expect(hls.attachMedia).toHaveBeenCalledWith(video);
     await act(async () => hookRef.current?.stop());
     expect(hls.destroy).toHaveBeenCalledOnce();
+  });
+  it('reopens a failed finite archive at its current position, then stops bounded repeats without leaving a spinner', async () => {
+    const log = vi.spyOn(clientLogger, 'info');
+    saveWatchProgress('archive_live_7_1000', 5, 3600, 'movies');
+    Object.defineProperty(video, 'duration', { configurable: true, value: 3600 });
+    Object.defineProperty(video, 'error', { configurable: true, value: { code: 3, message: 'decode' } });
+    await act(async () => { hookRef.current?.play(); await vi.waitFor(() => expect(hls.loadSource).toHaveBeenCalledTimes(1)); });
+    video.currentTime = 45;
+    await act(async () => video.dispatchEvent(new Event('error')));
+    await vi.waitFor(() => expect(hls.loadSource).toHaveBeenCalledTimes(2));
+    expect(video.currentTime).toBe(45);
+    expect(log).toHaveBeenCalledWith('Resuming from position 45.0s');
+    await act(async () => video.dispatchEvent(new Event('error')));
+    await vi.waitFor(() => expect(hls.loadSource).toHaveBeenCalledTimes(3));
+    await act(async () => video.dispatchEvent(new Event('error')));
+    expect(hls.loadSource).toHaveBeenCalledTimes(3);
+    expect(usePlayerStore.getState().status).toBe('error');
+    await act(async () => video.dispatchEvent(new Event('waiting')));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 1600)); });
+    expect(usePlayerStore.getState().status).toBe('error');
+  });
+  it('reopens a finite HLS session if playback makes no progress, without treating a pause as a stall', async () => {
+    let paused = false;
+    Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
+    await act(async () => { hookRef.current?.play(); await vi.waitFor(() => expect(hls.loadSource).toHaveBeenCalledTimes(1)); });
+    video.currentTime = 25;
+    vi.useFakeTimers();
+    await act(async () => video.dispatchEvent(new Event('waiting')));
+    await act(async () => vi.advanceTimersByTime(15_100));
+    vi.useRealTimers();
+    await vi.waitFor(() => expect(hls.loadSource).toHaveBeenCalledTimes(2));
+    paused = true;
+    await act(async () => video.dispatchEvent(new Event('pause')));
+    vi.useFakeTimers();
+    await act(async () => vi.advanceTimersByTime(20_000));
+    vi.useRealTimers();
+    expect(hls.loadSource).toHaveBeenCalledTimes(2);
+  });
+  it('lets a viewer explicitly seek away from an errored archive section using a new transport', async () => {
+    const log = vi.spyOn(clientLogger, 'info');
+    await act(async () => { hookRef.current?.play(); await vi.waitFor(() => expect(hls.loadSource).toHaveBeenCalledTimes(1)); });
+    video.currentTime = 40;
+    usePlayerStore.getState().setError('Damaged section');
+    await act(async () => hookRef.current?.seek(60));
+    await vi.waitFor(() => expect(hls.loadSource).toHaveBeenCalledTimes(2));
+    expect(log).toHaveBeenCalledWith('Resuming from position 60.0s');
+    expect(usePlayerStore.getState().status).not.toBe('error');
   });
 });
