@@ -1,4 +1,4 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
 import type { Readable } from 'node:stream';
 
 export type BinaryStreamCause = 'upstream_end' | 'upstream_error' | 'upstream_close' |
@@ -7,7 +7,6 @@ export interface BinaryStreamSummary {
   firstCause: BinaryStreamCause;
   upstreamEnded: boolean;
   responseFinished: boolean;
-  requestClosed: boolean;
   bytes: number;
   elapsedMs: number;
 }
@@ -15,7 +14,7 @@ export interface BinaryStreamSummary {
 /** A completed GET request is not a disconnected streaming response.
  * In particular, req.close can run after either upstream EOF or client abort.
  * Classify the first stream/response event, then wait for both streams to close. */
-export function pipeBinaryStream(upstream: Readable, req: IncomingMessage, res: ServerResponse,
+export function pipeBinaryStream(upstream: Readable, res: ServerResponse,
   onDone: (summary: BinaryStreamSummary) => void): void {
   const start = Date.now();
   let firstCause: BinaryStreamCause | undefined;
@@ -23,20 +22,26 @@ export function pipeBinaryStream(upstream: Readable, req: IncomingMessage, res: 
   let upstreamClosed = false;
   let responseFinished = false;
   let responseClosed = false;
-  let requestClosed = false;
   let bytes = 0;
   let reported = false;
   const finish = () => {
     if (reported || !responseClosed || !upstreamClosed) return;
     reported = true;
     onDone({ firstCause: firstCause ?? 'response_finish', upstreamEnded, responseFinished,
-      requestClosed, bytes, elapsedMs: Date.now() - start });
+      bytes, elapsedMs: Date.now() - start });
   };
   upstream.on('data', chunk => { bytes += Buffer.byteLength(chunk); });
   upstream.once('end', () => { upstreamEnded = true; firstCause ??= 'upstream_end'; });
   upstream.once('error', () => {
     firstCause ??= 'upstream_error';
-    res.destroy();
+    if (!res.headersSent) {
+      res.removeHeader('Content-Length');
+      res.removeHeader('Content-Range');
+      res.removeHeader('Accept-Ranges');
+      res.statusCode = 502;
+      res.setHeader('Content-Type', 'application/json');
+      res.end('{"error":"Stream unavailable"}');
+    } else res.destroy();
   });
   upstream.once('close', () => {
     upstreamClosed = true;
@@ -50,6 +55,5 @@ export function pipeBinaryStream(upstream: Readable, req: IncomingMessage, res: 
     if (!upstream.destroyed) upstream.destroy();
     finish();
   });
-  req.once('close', () => { requestClosed = true; });
   upstream.pipe(res);
 }

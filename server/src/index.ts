@@ -40,7 +40,7 @@ import { createEpgWriteWorker } from './epg-write-worker.js';
 import type { XtreamConfig } from './xtream.js';
 import { logger } from './logger.js';
 import { startEventLoopMonitor } from './event-loop-monitor.js';
-import { requestStream, pickHeader, VLC_HEADERS } from './stream-utils.js';
+import { requestStream, pickHeader, VLC_HEADERS, safeProxyChannelId, safeProxyMime, safeProxyLength } from './stream-utils.js';
 import { pipeBinaryStream } from './binary-stream-lifecycle.js';
 import { prewarmUpstream } from './http-agent.js';
 import {
@@ -1333,6 +1333,7 @@ app.get('/api/ios-hls-assets/:sessionId/:asset', (req, res) => {
 
 app.get('/api/stream/:channelId', async (req, res) => {
   const channelId = req.params.channelId;
+  const safeId = safeProxyChannelId(channelId);
   const channel = getChannelById(channelId);
 
   // For episodes (not in DB), accept URL as query parameter
@@ -1349,14 +1350,13 @@ app.get('/api/stream/:channelId', async (req, res) => {
     }
     streamUrl = validation.url.toString();
     contentType = (req.query.type as string) || 'series';
-    logger.info(`Stream proxy: using URL param for ${channelId}`);
+    logger.info(`Stream proxy: using URL param for ${safeId}`);
   } else {
-    logger.warn(`Stream proxy: channel ${channelId} not found or has no URL`);
+    logger.warn(`Stream proxy: channel ${safeId} not found or has no URL`);
     res.status(404).json({ error: 'Channel not found' });
     return;
   }
-  const channelName = channel?.name || channelId;
-  logger.info(`Stream proxy: ${channelId} "${channelName}" type=${contentType} → upstream`);
+  logger.info(`Stream proxy: ${safeId} type=${contentType === 'livetv' ? 'livetv' : 'other'} → upstream`);
 
   const isLive = contentType === 'livetv';
 
@@ -1365,7 +1365,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
     // Forward Range header for VOD (seeking), skip for live streams
     if (req.headers.range && !isLive) {
       upstreamHeaders['Range'] = req.headers.range;
-      logger.info(`Stream proxy: forwarding Range header: ${req.headers.range}`);
+      logger.info(`Stream proxy: forwarding Range request for ${safeId}`);
     }
 
     // Use undici.request directly: returns a Node Readable so we skip the
@@ -1383,14 +1383,14 @@ app.get('/api/stream/:channelId', async (req, res) => {
     logger.info('Stream proxy: upstream redirect resolved');
     const upstreamCT = pickHeader(upstream.headers, 'content-type');
     const upstreamCL = pickHeader(upstream.headers, 'content-length');
-    logger.info(`Stream proxy: upstream responded ${upstream.statusCode}, content-type=${upstreamCT}, content-length=${upstreamCL}`);
+    logger.info(`Stream proxy: upstream responded ${upstream.statusCode}, content-type=${safeProxyMime(upstreamCT)}, content-length=${safeProxyLength(upstreamCL)}`);
 
     // Detect Cloudflare abuse page (tiny response masquerading as video)
     const cl = upstreamCL ? parseInt(upstreamCL, 10) : null;
     if (cl && cl < 100_000 && !isLive) {
       const finalHost = new URL(upstream.finalUrl).hostname;
       if (finalHost.includes('cloudflare') || finalHost.includes('abuse')) {
-        logger.error(`Stream proxy: Cloudflare blocked stream for ${channelId} (redirected to ${finalHost}, ${cl} bytes)`);
+        logger.error(`Stream proxy: Cloudflare blocked stream for ${safeId} (${cl} bytes)`);
         upstream.body.on('error', () => {});
         upstream.body.dump().catch(() => {});
         res.status(502).json({ error: 'Stream blocked by CDN protection. The content provider may be restricting access.' });
@@ -1399,7 +1399,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
     }
 
     if (upstream.statusCode >= 400) {
-      logger.error(`Stream proxy: upstream error ${upstream.statusCode} for ${channelId}`);
+      logger.error(`Stream proxy: upstream error ${upstream.statusCode} for ${safeId}`);
       upstream.body.on('error', () => {});
       upstream.body.dump().catch(() => {});
       res.status(upstream.statusCode).json({ error: `Upstream error: ${upstream.statusCode}` });
@@ -1408,7 +1408,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
 
     // Reject HTML responses — upstream returned an error page instead of video
     if (upstreamCT && upstreamCT.includes('text/html')) {
-      logger.error(`Stream proxy: upstream returned text/html for ${channelId} — likely an error page`);
+      logger.error(`Stream proxy: upstream returned text/html for ${safeId} — likely an error page`);
       upstream.body.on('error', () => {});
       upstream.body.dump().catch(() => {});
       res.status(502).json({ error: 'Stream unavailable — provider returned an error page instead of video' });
@@ -1477,7 +1477,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
         : 'pipe:0';
       if (pipeline === 'ffmpeg-url') await upstream.body.dump().catch(() => {});
 
-      logger.info(`Stream proxy: ffmpeg ${audioOnly ? 'audio-only' : '-sn'} pipe for ${channelId} (content-type: ${contentType})`);
+      logger.info(`Stream proxy: ffmpeg ${audioOnly ? 'audio-only' : '-sn'} pipe for ${safeId} (content-type: ${safeProxyMime(contentType)})`);
       res.removeHeader('Content-Length');
       res.removeHeader('Content-Range');
       res.removeHeader('Accept-Ranges');
@@ -1488,19 +1488,20 @@ app.get('/api/stream/:channelId', async (req, res) => {
       const ff = spawn('ffmpeg', buildLiveMpegTsArgs(audioOnly, ffmpegSource), { stdio: ['pipe', 'pipe', 'pipe'] });
       let clientClosed = false;
       let processHandled = false;
+      let ffmpegDiagnosticSeen = false;
 
-      ff.stderr.on('data', (chunk) => {
-        const msg = chunk.toString().trim();
-        if (msg) logger.warn(`ffmpeg[${channelId}]: ${msg}`);
+      ff.stderr.on('data', () => {
+        if (!ffmpegDiagnosticSeen) logger.warn(`ffmpeg diagnostic for ${safeId}; details suppressed`);
+        ffmpegDiagnosticSeen = true;
       });
-      ff.on('error', (err) => {
+      ff.on('error', () => {
         if (processHandled) return;
         processHandled = true;
         releaseAudioSlot();
-        logger.error(`ffmpeg spawn failed for ${channelId}: ${err.message}`);
+        logger.error(`ffmpeg spawn failed for ${safeId}`);
         upstream.body.destroy();
         if (!res.headersSent) res.status(500).json({ error: 'Stream processing failed' });
-        else res.destroy(err);
+        else res.destroy(new Error('Stream processing failed'));
       });
       ff.on('close', (code, signal) => {
         if (processHandled) return;
@@ -1508,7 +1509,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
         releaseAudioSlot();
         const action = liveFfmpegExitAction(code, signal, clientClosed, res.headersSent);
         const level = code === 0 || action === 'ignore' ? 'info' : 'error';
-        logger[level](`ffmpeg exited ${channelId} code=${code} signal=${signal}`);
+        logger[level](`ffmpeg exited ${safeId} code=${code} signal=${signal}`);
         if (action === 'end') res.end();
         else if (action === 'send-502') res.status(502).json({ error: 'Live stream processing failed' });
         else if (action === 'destroy') res.destroy(new Error('Live stream processing failed'));
@@ -1522,32 +1523,29 @@ app.get('/api/stream/:channelId', async (req, res) => {
 
       ff.stdin.on('error', () => {});
       ff.stdout.on('error', () => {});
-      upstream.body.on('error', (err) => {
-        if (!clientClosed) logger.warn(`upstream error ${channelId}: ${err.message}`);
+      upstream.body.on('error', () => {
+        if (!clientClosed) logger.warn(`upstream error ${safeId}; details suppressed`);
       });
 
       res.on('close', () => {
         if (res.writableEnded) return;
         clientClosed = true;
-        logger.info(`Stream proxy: client disconnected from ${channelId}`);
+        logger.info(`Stream proxy: client disconnected from ${safeId}`);
         upstream.body.destroy();
         if (!ff.killed) ff.kill('SIGKILL');
       });
     } else {
-      logger.info(`Stream proxy: piping binary stream for ${channelId} (content-type: ${contentType}, content-length: ${upstreamCL || 'unknown'})`);
-      pipeBinaryStream(upstream.body, req, res, summary => {
+      logger.info(`Stream proxy: piping binary stream for ${safeId} (content-type: ${safeProxyMime(contentType)}, content-length: ${safeProxyLength(upstreamCL)})`);
+      pipeBinaryStream(upstream.body, res, summary => {
         // Never include the upstream URL, error text, headers, or signed ticket.
-        const id = /^[a-zA-Z0-9_-]{1,64}$/.test(channelId) ? channelId : 'unknown';
-        logger.info(`Stream proxy lifecycle ${id}: first=${summary.firstCause} upstreamEnd=${summary.upstreamEnded}` +
-          ` responseFinish=${summary.responseFinished} requestClose=${summary.requestClosed}` +
-          ` bytes=${summary.bytes} elapsedMs=${summary.elapsedMs}`);
+        logger.info(`Stream proxy lifecycle ${safeId}: first=${summary.firstCause} upstreamEnd=${summary.upstreamEnded}` +
+          ` responseFinish=${summary.responseFinished} bytes=${summary.bytes} elapsedMs=${summary.elapsedMs}`);
       });
     }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Stream proxy error';
-    logger.error(`Stream proxy failed for ${channelId}: ${msg}`);
+  } catch {
+    logger.error(`Stream proxy failed for ${safeId}; details suppressed`);
     if (!res.headersSent) {
-      res.status(502).json({ error: msg });
+      res.status(502).json({ error: 'Stream proxy unavailable' });
     }
   }
 });

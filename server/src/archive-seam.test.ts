@@ -94,6 +94,13 @@ describe('conservative TS seam copy', () => {
             'stream=nb_read_frames', '-of', 'json', file], { timeout: 30_000 }).toString()) as
           { streams: Array<{ nb_read_frames: string }> }).streams[0].nb_read_frames);
         expect(frameCount(output)).toBe(frameCount(files[2]) - Math.round(result.offset * 50));
+        const visual = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'info', '-nostdin',
+          '-i', files[2], '-i', output,
+          '-filter_complex', `[0:v]trim=start_frame=${Math.round(result.offset * 50)},setpts=PTS-STARTPTS[ref];` +
+            '[1:v]setpts=PTS-STARTPTS[got];[ref][got]ssim', '-an', '-f', 'null', '-'],
+        { encoding: 'utf8', timeout: 45_000 });
+        expect(visual.status).toBe(0);
+        expect(Number(/All:([0-9.]+)/.exec(visual.stderr)?.[1])).toBeGreaterThan(0.98);
         const audioHashes = (file: string): string[] =>
           (JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'a:0',
             '-show_packets', '-show_data_hash', 'sha256', '-show_entries', 'packet=data_hash',

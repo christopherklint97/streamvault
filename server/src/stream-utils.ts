@@ -7,6 +7,19 @@ import { logger } from './logger.js';
 /** undici BodyReadable extends Readable with a dump() helper for safe discard. */
 export type UndiciBody = Readable & { dump: (opts?: { limit?: number }) => Promise<void> };
 
+/** Allow only fields which cannot contain source credentials in proxy diagnostics. */
+export function safeProxyChannelId(value: string): string {
+  return /^[a-zA-Z0-9_-]{1,64}$/.test(value) ? value : 'unknown';
+}
+export function safeProxyMime(value?: string): string {
+  const mime = value?.trim().toLowerCase();
+  return mime && /^(?:audio|video)\/[a-z0-9.+-]+$|^application\/(?:vnd\.apple\.mpegurl|x-mpegurl|octet-stream)$/.test(mime)
+    ? mime : 'other';
+}
+export function safeProxyLength(value?: string): string {
+  return value && /^\d{1,12}$/.test(value) ? value : 'unknown';
+}
+
 /** Standard VLC-like headers to get past CDN restrictions */
 export const VLC_HEADERS: Record<string, string> = {
   'User-Agent': 'VLC/3.0.20 LibVLC/3.0.20',

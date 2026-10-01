@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
-import { fetchWithRedirects, requestStream } from './stream-utils';
+import { fetchWithRedirects, requestStream, safeProxyChannelId, safeProxyMime, safeProxyLength } from './stream-utils';
 
 let server: Server;
 let origin: string;
@@ -17,6 +17,17 @@ beforeAll(async () => {
   origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 });
 afterAll(async () => { await new Promise<void>(resolve => server.close(() => resolve())); });
+
+describe('proxy log hygiene', () => {
+  it('allows only stable channel IDs and canonical media metadata, never arbitrary URL-bearing fields', () => {
+    expect(safeProxyChannelId('live_44115')).toBe('live_44115');
+    expect(safeProxyChannelId('live_44115/secret')).toBe('unknown');
+    expect(safeProxyMime('video/mp2t')).toBe('video/mp2t');
+    expect(safeProxyMime('video/mp2t; url=https://host/private')).toBe('other');
+    expect(safeProxyLength('1024')).toBe('1024');
+    expect(safeProxyLength('1024; token=hidden')).toBe('unknown');
+  });
+});
 
 describe('stream redirects', () => {
   it('rejects a disallowed redirect before requesting its target', async () => {
