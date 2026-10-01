@@ -41,7 +41,7 @@ import type { XtreamConfig } from './xtream.js';
 import { logger } from './logger.js';
 import { startEventLoopMonitor } from './event-loop-monitor.js';
 import { requestStream, pickHeader, VLC_HEADERS, safeProxyChannelId, safeProxyMime, safeProxyLength,
-  safeProxyContentRange, safeProxyAcceptRanges, safeRequestLogPath } from './stream-utils.js';
+  safeProxyContentRange, safeProxyAcceptRanges, safeRequestLogPath, isUpstreamHtmlResponse } from './stream-utils.js';
 import { pipeBinaryStream, clearProxyMediaHeaders } from './binary-stream-lifecycle.js';
 import { prewarmUpstream } from './http-agent.js';
 import {
@@ -1409,15 +1409,17 @@ app.get('/api/stream/:channelId', async (req, res) => {
     }
 
     // Reject HTML responses — upstream returned an error page instead of video
-    if (upstreamCT && upstreamCT.includes('text/html')) {
-      logger.error(`Stream proxy: upstream returned text/html for ${safeId} — likely an error page`);
+    if (isUpstreamHtmlResponse(upstreamCT)) {
+      logger.error(`Stream proxy: upstream returned HTML for ${safeId} — likely an error page`);
       upstream.body.on('error', () => {});
       upstream.body.dump().catch(() => {});
       res.status(502).json({ error: 'Stream unavailable — provider returned an error page instead of video' });
       return;
     }
     const forwardedType = safeProxyMime(upstreamCT);
-    if (forwardedType !== 'other') res.setHeader('Content-Type', forwardedType);
+    // Unknown upstream types are data, never same-origin executable content.
+    res.setHeader('Content-Type', forwardedType === 'other' ? 'application/octet-stream' : forwardedType);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Access-Control-Allow-Origin', '*');
 
     const forwardedLength = safeProxyLength(upstreamCL);
@@ -1436,7 +1438,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
       if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
     }
 
-    const contentType = upstreamCT || '';
+    const contentType = upstreamCT?.toLowerCase() || '';
     const isM3u8 = contentType.includes('mpegurl') || contentType.includes('m3u') || streamUrl.endsWith('.m3u8');
 
     // Preserve 206 Partial Content when client sent a Range — required for

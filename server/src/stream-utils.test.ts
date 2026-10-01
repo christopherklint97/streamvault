@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { fetchWithRedirects, requestStream, safeProxyChannelId, safeProxyMime, safeProxyLength,
-  safeProxyContentRange, safeProxyAcceptRanges, safeRequestLogPath } from './stream-utils';
+  safeProxyContentRange, safeProxyAcceptRanges, safeRequestLogPath, isUpstreamHtmlResponse } from './stream-utils';
 
 let server: Server;
 let origin: string;
@@ -33,6 +33,13 @@ describe('proxy log hygiene', () => {
     expect(safeProxyAcceptRanges('token=hidden')).toBeNull();
     expect(safeRequestLogPath('/api/stream/live_44115')).toBe('/api/stream/:channelId');
     expect(safeRequestLogPath('/api/stream/token%3Dhidden')).toBe('/api/stream/:channelId');
+    expect(safeRequestLogPath('/API/STREAM/token%3Dhidden')).toBe('/api/stream/:channelId');
+    expect(isUpstreamHtmlResponse('TEXT/HTML; charset=UTF-8')).toBe(true);
+    expect(isUpstreamHtmlResponse('application/xhtml+xml')).toBe(true);
+    expect(isUpstreamHtmlResponse('video/mp2t')).toBe(false);
+    expect(safeProxyMime('TEXT/HTML; charset=UTF-8')).toBe('other');
+    expect(safeProxyMime('application/javascript')).toBe('other');
+    expect(safeProxyMime('application/vnd.apple.mpegurl; charset=UTF-8')).toBe('application/vnd.apple.mpegurl');
     expect(safeRequestLogPath('/api/health')).toBe('/api/health');
   });
 });

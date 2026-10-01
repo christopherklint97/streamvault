@@ -13,8 +13,11 @@ export function safeProxyChannelId(value: string): string {
 }
 export function safeProxyMime(value?: string): string {
   const mime = value?.trim().toLowerCase();
-  const match = mime && /^((?:audio|video|application|text)\/[a-z0-9.+-]+)(?:;\s*charset=[a-z0-9_-]+)?$/.exec(mime);
+  const match = mime && /^((?:audio|video)\/[a-z0-9.+-]+|application\/(?:vnd\.apple\.mpegurl|x-mpegurl|octet-stream)|text\/plain)(?:;\s*charset=[a-z0-9_-]+)?$/.exec(mime);
   return match?.[1] ?? 'other';
+}
+export function isUpstreamHtmlResponse(value?: string): boolean {
+  return Boolean(value && /^\s*(?:text\/html|application\/xhtml\+xml)(?:\s*;|\s*$)/i.test(value));
 }
 export function safeProxyLength(value?: string): string {
   return value && /^\d{1,12}$/.test(value) ? value : 'unknown';
@@ -26,7 +29,7 @@ export function safeProxyAcceptRanges(value?: string): string | null {
   return value && /^(?:bytes|none)$/i.test(value) ? value.toLowerCase() : null;
 }
 export function safeRequestLogPath(value: string): string {
-  return value.startsWith('/api/stream') ? '/api/stream/:channelId' : value;
+  return value.toLowerCase().startsWith('/api/stream') ? '/api/stream/:channelId' : value;
 }
 
 /** Standard VLC-like headers to get past CDN restrictions */
