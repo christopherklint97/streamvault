@@ -41,7 +41,8 @@ import type { XtreamConfig } from './xtream.js';
 import { logger } from './logger.js';
 import { startEventLoopMonitor } from './event-loop-monitor.js';
 import { requestStream, pickHeader, VLC_HEADERS, safeProxyChannelId, safeProxyMime, safeProxyLength,
-  safeProxyContentRange, safeProxyAcceptRanges, safeRequestLogPath, isUpstreamHtmlResponse } from './stream-utils.js';
+  safeProxyContentRange, safeProxyAcceptRanges, safeRequestLogPath, isUpstreamHtmlResponse,
+  isLoopbackCaptureSession } from './stream-utils.js';
 import { pipeBinaryStream, clearProxyMediaHeaders } from './binary-stream-lifecycle.js';
 import { prewarmUpstream } from './http-agent.js';
 import {
@@ -1552,7 +1553,11 @@ app.get('/api/stream/:channelId', async (req, res) => {
       });
     } else {
       logger.info(`Stream proxy: piping binary stream for ${safeId} (content-type: ${safeProxyMime(contentType)}, content-length: ${safeProxyLength(upstreamCL)})`);
+      const captureSession = isLoopbackCaptureSession(req.socket.remoteAddress,
+        req.get('x-streamvault-capture-session'));
       pipeBinaryStream(upstream.body, res, summary => {
+        if (captureSession) archiveCapture.noteProxyLifecycle(channelId, captureSession,
+          summary.firstCause, summary.responseFinished);
         // Never include the upstream URL, error text, headers, or signed ticket.
         logger.info(`Stream proxy lifecycle ${safeId}: first=${summary.firstCause} upstreamEnd=${summary.upstreamEnded}` +
           ` responseFinish=${summary.responseFinished} bytes=${summary.bytes} elapsedMs=${summary.elapsedMs}`);

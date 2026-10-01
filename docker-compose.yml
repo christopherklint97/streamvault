@@ -21,6 +21,8 @@ services:
       # Opt-in bounded, low-priority frame-accurate repair for fresh reconnects only.
       - STREAMVAULT_FRAME_ACCURATE_SEAMS=${STREAMVAULT_FRAME_ACCURATE_SEAMS:-0}
       - STREAMVAULT_FRAME_ACCURATE_CHANNEL_IDS=${STREAMVAULT_FRAME_ACCURATE_CHANNEL_IDS:-}
+      # Optional per-channel fast retry only after a clean, publishing archive EOF.
+      - STREAMVAULT_FAST_EOF_CHANNEL_IDS=${STREAMVAULT_FAST_EOF_CHANNEL_IDS:-}
       # Optional hardening. If set, browser clients must enter the same value
       # in Settings under Backend token.
       - STREAMVAULT_AUTH_TOKEN=${STREAMVAULT_AUTH_TOKEN:-}
