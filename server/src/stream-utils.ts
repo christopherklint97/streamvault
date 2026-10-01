@@ -29,7 +29,13 @@ export function safeProxyAcceptRanges(value?: string): string | null {
   return value && /^(?:bytes|none)$/i.test(value) ? value.toLowerCase() : null;
 }
 export function safeRequestLogPath(value: string): string {
-  return value.toLowerCase().startsWith('/api/stream') ? '/api/stream/:channelId' : value;
+  // Request paths are untrusted even if a route does not match (including encoded
+  // static segments); never log arbitrary path bytes or signed media tickets.
+  if (value === '/') return '/';
+  if (/^\/api\/health$/i.test(value)) return '/api/health';
+  if (value.toLowerCase().startsWith('/api/stream')) return '/api/stream/:channelId';
+  if (value.toLowerCase().startsWith('/api/')) return '/api/:route';
+  return '/:path';
 }
 
 /** Standard VLC-like headers to get past CDN restrictions */
