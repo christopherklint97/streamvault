@@ -96,6 +96,23 @@ describe('finite HLS DVR player', () => {
     vi.useRealTimers();
     expect(hls.loadSource).toHaveBeenCalledTimes(2);
   });
+  it('does not mistake healthy progress after a backward seek for a stalled archive', async () => {
+    Object.defineProperty(video, 'paused', { configurable: true, value: false });
+    await act(async () => { hookRef.current?.play(); await vi.waitFor(() => expect(hls.loadSource).toHaveBeenCalledTimes(1)); });
+    vi.useFakeTimers();
+    video.currentTime = 120;
+    await act(async () => video.dispatchEvent(new Event('timeupdate')));
+    await act(async () => vi.advanceTimersByTime(14_000));
+    video.currentTime = 30;
+    await act(async () => video.dispatchEvent(new Event('seeked')));
+    await act(async () => vi.advanceTimersByTime(2_000));
+    expect(hls.loadSource).toHaveBeenCalledTimes(1);
+    video.currentTime = 31;
+    await act(async () => video.dispatchEvent(new Event('timeupdate')));
+    await act(async () => vi.advanceTimersByTime(14_000));
+    expect(hls.loadSource).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
   it('lets a viewer explicitly seek away from an errored archive section using a new transport', async () => {
     const log = vi.spyOn(clientLogger, 'info');
     await act(async () => { hookRef.current?.play(); await vi.waitFor(() => expect(hls.loadSource).toHaveBeenCalledTimes(1)); });

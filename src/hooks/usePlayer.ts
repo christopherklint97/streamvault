@@ -898,6 +898,13 @@ export function usePlayer(): {
           canPlay = true;
           attemptPlay();
         };
+        video.onseeked = () => {
+          if (!channel.dvrHls || !isCurrentPlayback() || !Number.isFinite(video.currentTime)) return;
+          // A backward seek resets the progress baseline; old high-water marks
+          // must not make healthy playback look stalled at the new position.
+          lastMediaTime = video.currentTime;
+          armFiniteHlsStallTimer(true);
+        };
         video.onplay = () => { recoverDrainedLiveStream(); armFiniteHlsStallTimer(); };
         video.onpause = clearFiniteHlsStallTimer;
         video.onwaiting = () => {
