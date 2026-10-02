@@ -77,6 +77,15 @@ it('issues finite scoped playback and denies cross-snapshot and forged segment r
     fs.writeFileSync(path.join(root, 'two.ts'), Buffer.alloc(188, 0x47));
     store.publish({ id: 'two', channelId: 'other', start: 1000, end: 21000, duration: 20, path: 'two.ts', size: 188, epoch: 1 });
     expect((await fetch(base + segment.replace('/one.ts', '/two.ts'))).status).toBe(404);
+    vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '1');
+    vi.stubEnv('STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS', 'c');
+    prioritize.mockClear();
+    const canary = await fetch(`${base}/api/archive/c/playback-ticket`, { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startTime: 1000, endTime: 21000 }) });
+    expect(canary.status).toBe(200);
+    expect(prioritize).toHaveBeenCalledWith('c', 1000, 21000);
+    vi.unstubAllEnvs();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(ticket.expiresAt - 3_600_000);
     try {
       expect((await fetch(base + ticket.url)).status).toBe(200);
@@ -88,7 +97,8 @@ it('issues finite scoped playback and denies cross-snapshot and forged segment r
       body: JSON.stringify({ enabled: false, retentionHours: 24 }) });
     expect(disabled.status).toBe(200);
     expect(stop).toHaveBeenCalledWith('c');
-  } finally { await new Promise<void>(resolve => server.close(() => resolve())); db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  } finally { vi.unstubAllEnvs(); await new Promise<void>(resolve => server.close(() => resolve()));
+    db.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 it('serves prior raw masters and hidden chunks to new archive tickets when emergency fallback is enabled', async () => {
