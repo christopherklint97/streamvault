@@ -176,6 +176,14 @@ async function continuityPair(first: string, second: string, rawNext: string): P
     if (last !== tail.get(pid)) throw new Error('Pair transport end did not match captured session');
 }
 
+export function audioClockMatchesSource(outputFirst: number, outputNext: number,
+  sourceFirst: number, sourceCut: number): boolean {
+  // AAC packet cadence is quantized independently from video frame cadence.
+  // Retain the captured AAC splice interval instead of forcing the first
+  // successor AAC packet onto the video's cut time.
+  return Math.abs((outputNext - outputFirst) - (sourceCut - sourceFirst)) <= 0.04;
+}
+
 /** Scratch-only bit-exact construction. Caller must reserve storage and atomically
  * pin BOTH files before allowing live playback. This function cannot change DB. */
 export async function prepareLosslessPair(previous: string, next: string,
@@ -247,7 +255,8 @@ export async function prepareLosslessPair(previous: string, next: string,
         a.video.length !== cut.videoBefore || b.video.length !== cut.videoAfter ||
         a.audio.length !== cut.audioBefore || b.audio.length !== cut.audioAfter ||
         Math.abs(b.video[0].pts - a.video[0].pts - cut.previousOffset) > 0.04 ||
-        Math.abs(b.audio[0].pts - a.audio[0].pts - cut.previousOffset) > 0.04)
+        !audioClockMatchesSource(a.audio[0].pts, b.audio[0].pts,
+          before.audio[0].pts, before.audio[cut.audioBefore].pts))
       return undefined;
     const sizes = [await fs.stat(priorPart), await fs.stat(nextPart)];
     const originals = [await fs.stat(previous), await fs.stat(next)];

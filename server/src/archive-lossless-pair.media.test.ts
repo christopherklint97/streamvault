@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { prepareLosslessPair, lowPriorityMediaCommand, rawTransportContinues,
+import { prepareLosslessPair, audioClockMatchesSource, lowPriorityMediaCommand, rawTransportContinues,
   rawMediaClockContinues } from './archive-lossless-pair-media.js';
 
 const ffmpeg = (args: string[]) => execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', ...args], { timeout: 30000 });
@@ -65,6 +65,11 @@ const verifyFollowingRaw = (dir: string, first: string, second: string, followin
 };
 
 describe('verified stream-copy pair', () => {
+  it('preserves the AAC packet clock rather than forcing it onto the video frame boundary', () => {
+    // The exact AAC splice can fall 53.333 ms after the 12 s video splice.
+    expect(audioClockMatchesSource(1.4, 13.453333, 100, 112.053333)).toBe(true);
+    expect(audioClockMatchesSource(1.4, 13.4, 100, 112.053333)).toBe(false);
+  });
   it('runs packet inventories and remuxes below capture CPU and IO priority', () => {
     for (const tool of ['ffprobe', 'ffmpeg'] as const)
       expect(lowPriorityMediaCommand(tool, ['-v', 'error'])).toEqual({
@@ -139,6 +144,23 @@ describe('verified stream-copy pair', () => {
         verifyFiniteJoin(dir, first, second, [result!.cut.offset, 21.12 - result!.cut.offset]);
         verifyFollowingRaw(dir, first, second, path.join(base, 'after.ts'),
           [result!.cut.previousOffset, 21.12 - result!.cut.offset, 19.2]);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }, 120000);
+  it.skipIf(!process.env.STREAMVAULT_F1_REPORTED_SEAM_SAMPLE)(
+    'removes the reported 1:11:29 F1 replay without losing video or AAC across a quantized audio splice', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-f1-reported-'));
+      try {
+        const base = process.env.STREAMVAULT_F1_REPORTED_SEAM_SAMPLE!;
+        const previous = path.join(base, 'prev.ts'); const next = path.join(base, 'next.ts');
+        const first = path.join(dir, 'prior.playback.ts'); const second = path.join(dir, 'next.playback.ts');
+        const result = await prepareLosslessPair(previous, next, first, second);
+        expect(result?.cut).toMatchObject({ videoBefore: 600, audioBefore: 565,
+          videoAfter: 400, audioAfter: 373, offset: 12, previousOffset: 12,
+          droppedDamagedPictures: 1 });
+        for (const stream of [0, 1]) expect([...hashes(first, stream), ...hashes(second, stream)])
+          .toEqual(hashes(next, stream));
+        verifyFiniteJoin(dir, first, second, [12, 8]);
+        verifyFollowingRaw(dir, first, second, path.join(base, 'after.ts'), [12, 8, 20]);
       } finally { fs.rmSync(dir, { recursive: true, force: true }); }
     }, 120000);
   it.skipIf(!process.env.STREAMVAULT_ESPN_SEAM_SAMPLE)(
