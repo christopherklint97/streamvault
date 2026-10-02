@@ -3,6 +3,7 @@ import type { ArchiveStore } from './archive-store.js';
 import type { DBRecording } from './db.js';
 import { createArchiveTicket, verifyArchiveTicket, buildArchiveVod, archiveGaps,
   playableStart, playableEnd, playableDuration } from './archive-hls.js';
+import { pairEnabledFor } from './archive-pair-worker.js';
 import { requireAuth } from './security.js';
 import { pruneArchive } from './archive-retention.js';
 import fs from 'node:fs';
@@ -82,7 +83,9 @@ export function createArchiveRouter(deps: {
     const snapshot = store.createSnapshot(channelId, startTime, endTime, now, expiresAt, raw);
     const effectiveStart = playableStart(snapshot.chunks[0]);
     const effectiveEnd = playableEnd(snapshot.chunks.at(-1)!);
-    if (!raw) deps.prioritize?.(channelId, startTime, endTime);
+    if (!raw || pairEnabledFor(channelId, process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK,
+      process.env.STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS))
+      deps.prioritize?.(channelId, startTime, endTime);
     const ticket = createArchiveTicket(snapshot.id, secret, expiresAt);
     res.set('Cache-Control', 'no-store').json({ url: `/api/archive/snapshots/${snapshot.id}/index.m3u8?ticket=${ticket}`,
       snapshotId: snapshot.id, expiresAt, startTime: effectiveStart, endTime: effectiveEnd,

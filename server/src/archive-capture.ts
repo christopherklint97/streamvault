@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { logger } from './logger.js';
 import { processArchiveSeam } from './archive-seam.js';
+import { pairEnabledFor, processArchivePair } from './archive-pair-worker.js';
 import type { ArchiveStore } from './archive-store.js';
 
 const GIB = 1024 * 1024 * 1024;
@@ -104,6 +105,7 @@ export class ArchiveCapture {
   private stopping = false;
   private seamQueue: string[] = [];
   private seamQueued = new Set<string>();
+  private seamPairChannels = new Map<string, string>();
   private seamUrgent = new Set<string>();
   private seamTimer: ReturnType<typeof setTimeout> | null = null;
   private seamWork: Promise<void> | null = null;
@@ -113,7 +115,12 @@ export class ArchiveCapture {
   constructor(private readonly store: ArchiveStore, private readonly root: string, private readonly port: number,
     private readonly onPublished: (channelId: string) => void = () => {},
     private readonly spawnWriter: typeof spawn = spawn,
-    private readonly processSeam: typeof processArchiveSeam = processArchiveSeam) {}
+    private readonly processSeam: typeof processArchiveSeam = processArchiveSeam,
+    private readonly processPair: typeof processArchivePair = processArchivePair) {}
+  private pairCanRun(channelId: string): boolean {
+    return pairEnabledFor(channelId, process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK,
+      process.env.STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS);
+  }
   /** Correlate a loopback capture's completed response with its active writer. */
   noteProxyLifecycle(channelId: string, session: string, cause: string, responseFinished: boolean): void {
     if (cause !== 'upstream_end' || !responseFinished) return;
@@ -124,8 +131,10 @@ export class ArchiveCapture {
   /** Keep FFprobe/stream-copy work off the synchronous two-second capture poll.
    * New archive segments jump ahead of historical backfill; one job runs at a time. */
   private enqueueSeam(id: string, urgent = false): void {
-    if (this.stopping || process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1' ||
-        !id.endsWith('-chunk-000000000.ts')) return;
+    if (this.stopping || !id.endsWith('-chunk-000000000.ts')) return;
+    const rawMode = process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1';
+    const channel = rawMode ? this.store.getChunk(id)?.channelId : undefined;
+    if (rawMode && !this.pairCanRun(channel ?? '')) return;
     if (this.seamQueued.has(id)) {
       if (!urgent || this.seamUrgent.has(id)) return;
       const index = this.seamQueue.indexOf(id);
@@ -134,9 +143,11 @@ export class ArchiveCapture {
     } else if (this.seamQueue.length >= 2_000) {
       if (!urgent) return;
       const dropped = this.seamQueue.pop();
-      if (dropped) { this.seamQueued.delete(dropped); this.seamUrgent.delete(dropped); }
+      if (dropped) { this.seamQueued.delete(dropped); this.seamUrgent.delete(dropped);
+        this.seamPairChannels.delete(dropped); }
     }
     this.seamQueued.add(id);
+    if (channel) this.seamPairChannels.set(id, channel);
     if (urgent) {
       this.seamUrgent.add(id);
       this.seamQueue.unshift(id);
@@ -150,9 +161,11 @@ export class ArchiveCapture {
   /** New playback tickets can lift an existing historical seam ahead of backfill.
    * The ticket's pinned media is unchanged; reopening later selects repaired copies. */
   prioritizeWindow(channelId: string, start: number, end: number): void {
-    if (this.stopping || process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1' ||
-        !this.store.getArchive(channelId)?.enabled || end <= start) return;
-    const candidates = this.store.seamCandidates(channelId, start)
+    if (this.stopping || (process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1' &&
+        !this.pairCanRun(channelId)) || !this.store.getArchive(channelId)?.enabled || end <= start) return;
+    const candidates = (process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1'
+      ? this.store.pairCandidates(channelId, start)
+      : this.store.seamCandidates(channelId, start))
       .filter(chunk => chunk.start < end).slice(0, 200);
     for (const chunk of candidates.reverse()) this.enqueueSeam(chunk.id, true);
   }
@@ -162,10 +175,13 @@ export class ArchiveCapture {
     this.seamTimer = setTimeout(() => {
       this.seamTimer = null;
       if (this.stopping) return;
-      if (process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1') {
+      if (process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1' &&
+          (!process.env.STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS?.trim() ||
+            !this.seamQueue.some(id => this.pairCanRun(this.seamPairChannels.get(id) ?? '')))) {
         this.seamQueue = [];
         this.seamQueued.clear();
         this.seamUrgent.clear();
+        this.seamPairChannels.clear();
         return;
       }
       const reserve = gigabytes(process.env.STREAMVAULT_ARCHIVE_RESERVE_GB, 20) * GIB;
@@ -179,22 +195,27 @@ export class ArchiveCapture {
       const id = this.seamQueue.shift();
       if (!id) return;
       const chunk = this.store.getChunk(id);
-      if (!chunk || !this.store.getArchive(chunk.channelId)?.enabled) {
+      if (!chunk || !this.store.getArchive(chunk.channelId)?.enabled ||
+          (process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1' &&
+            (!this.seamPairChannels.has(id) || !this.pairCanRun(chunk.channelId)))) {
         this.seamQueued.delete(id);
         this.seamUrgent.delete(id);
+        this.seamPairChannels.delete(id);
         this.scheduleSeam(); return;
       }
       const controller = new AbortController();
       this.seamWorkAbort = controller;
       this.seamWorkChannel = chunk.channelId;
       const signal = AbortSignal.any([this.seamAbort.signal, controller.signal]);
-      const work = this.processSeam(this.store, this.root, id, Date.now(), reserve, maximum, signal)
+      const work = (process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1' ? this.processPair : this.processSeam)
+        (this.store, this.root, id, Date.now(), reserve, maximum, signal)
         .then(() => {}, () => {
           if (!this.stopping) logger.warn('Archive seam check failed; captured media preserved');
         })
         .finally(() => {
           this.seamQueued.delete(id);
           this.seamUrgent.delete(id);
+          this.seamPairChannels.delete(id);
           if (this.seamWork === work) {
             this.seamWork = null;
             this.seamWorkAbort = null;
@@ -329,12 +350,30 @@ export class ArchiveCapture {
       const rawValid = validFile(chunk.path);
       const playbackValid = !chunk.playbackPath || validFile(chunk.playbackPath);
       if (!rawValid || !playbackValid) {
-        const result = rawValid ? this.store.reconcilePlaybackMissing(chunk.id) : this.store.reconcileMissing(chunk.id);
+        const result = rawValid
+          ? chunk.pairId && this.store.restorePlaybackPairRaw(chunk.id, validFile)
+            ? 'restored_raw_pair' : this.store.reconcilePlaybackMissing(chunk.id)
+          : this.store.reconcileMissing(chunk.id);
         logger.warn(`Archive ${chunk.channelId}: missing indexed segment ${chunk.id} (${result})`);
       } else if (chunk.unavailable) this.store.markAvailable(chunk.id);
     }
     const base = path.join(this.root, 'archive');
-    if (!fs.existsSync(base)) return;
+    const releaseDetached = () => {
+      const root = fs.realpathSync(this.root);
+      for (const detached of this.store.detachedPlayback()) {
+        const absolute = path.resolve(root, detached.path);
+        if (!absolute.startsWith(root + path.sep)) continue;
+        try {
+          if (fs.existsSync(absolute)) {
+            const parent = fs.realpathSync(path.dirname(absolute));
+            if (!parent.startsWith(root + path.sep)) continue;
+            fs.rmSync(absolute, { force: true });
+          }
+          this.store.releaseDetachedPlayback(detached.path);
+        } catch { logger.warn('Archive detached presentation cleanup deferred'); }
+      }
+    };
+    if (!fs.existsSync(base)) { releaseDetached(); return; }
     for (const channelDir of fs.readdirSync(base, { withFileTypes: true })) {
       if (!channelDir.isDirectory()) continue;
       let channelId: string;
@@ -346,7 +385,7 @@ export class ArchiveCapture {
         if (this.writers.get(channelId)?.directory === directory) continue;
         const admitted = this.importSession(channelId, directory, undefined, true);
         for (const name of fs.readdirSync(directory)) {
-          const playbackMaster = /^chunk-(\d{9})\.playback\.ts$/.exec(name);
+          const playbackMaster = /^chunk-(\d{9})(?:\.[0-9a-f-]{36}\.pair)?\.playback\.ts$/.exec(name);
           const indexedPlayback = playbackMaster && this.store.getChunk(
             `${session.name}-chunk-${playbackMaster[1]}.ts`)?.playbackPath ===
             path.relative(this.root, path.join(directory, name));
@@ -360,6 +399,7 @@ export class ArchiveCapture {
         }
       }
     }
+    releaseDetached();
   }
 
   private importSession(channelId: string, directory: string, writer?: ArchiveWriter, recovering = false): Set<string> {
@@ -455,6 +495,7 @@ export class ArchiveCapture {
       if (this.store.getChunk(id)?.channelId !== channelId) return true;
       this.seamQueued.delete(id);
       this.seamUrgent.delete(id);
+      this.seamPairChannels.delete(id);
       return false;
     });
     if (!this.seamQueue.length && this.seamTimer) {
@@ -470,8 +511,11 @@ export class ArchiveCapture {
     // Backfill every configured channel while prioritizing newly captured seams.
     // Derived copies never overwrite the masters or an existing snapshot pin.
     const now = Date.now();
-    const candidates = this.store.archives().filter(archive => archive.enabled).flatMap(archive =>
-      this.store.seamCandidates(archive.channelId, now - archive.retentionHours * 3_600_000));
+    const candidates = this.store.archives().filter(archive => archive.enabled &&
+      (process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK !== '1' || this.pairCanRun(archive.channelId)))
+      .flatMap(archive => process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1'
+        ? this.store.pairCandidates(archive.channelId, now - archive.retentionHours * 3_600_000)
+        : this.store.seamCandidates(archive.channelId, now - archive.retentionHours * 3_600_000));
     const windows = this.store.recentViewerWindows(now, 60 * 60_000);
     const focused = new Set(candidates.filter(chunk => windows.some(w => w.channelId === chunk.channelId &&
       chunk.end > w.startTime && chunk.start < w.endTime)).map(chunk => chunk.id));
@@ -487,6 +531,7 @@ export class ArchiveCapture {
     this.seamQueue = [];
     this.seamQueued.clear();
     this.seamUrgent.clear();
+    this.seamPairChannels.clear();
     const channels = new Set([...this.writers.keys(), ...this.retry.keys()]);
     await Promise.all([...channels].map(id => this.stop(id)));
     // Wait for the abortable child and its staged-file cleanup before the

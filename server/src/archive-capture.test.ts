@@ -31,6 +31,51 @@ describe('stream-copy HLS capture', () => {
     expect(fs.existsSync(path.join(dir, 'chunk-000000020.ts'))).toBe(false);
     db.close(); fs.rmSync(root, { recursive: true, force: true });
   });
+  it('removes crash-orphaned pair presentations but retains both committed pair files', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-pair-restart-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('c', 'C', true, 24);
+    const priorSession = '11111111-1111-4111-8111-111111111111';
+    const nextSession = '22222222-2222-4222-8222-222222222222';
+    const token = '33333333-3333-4333-8333-333333333333';
+    const priorId = `${priorSession}-chunk-000000006.ts`;
+    const nextId = `${nextSession}-chunk-000000000.ts`;
+    const raw = (session: string, name: string) => path.join('archive', 'c', session, name);
+    const priorRaw = raw(priorSession, 'chunk-000000006.ts');
+    const nextRaw = raw(nextSession, 'chunk-000000000.ts');
+    const priorPair = raw(priorSession, `chunk-000000006.${token}.pair.playback.ts`);
+    const nextPair = raw(nextSession, `chunk-000000000.${token}.pair.playback.ts`);
+    const orphan = raw(nextSession, `chunk-000000000.44444444-4444-4444-8444-444444444444.pair.playback.ts`);
+    try {
+      for (const relative of [priorRaw, nextRaw, priorPair, nextPair, orphan]) {
+        fs.mkdirSync(path.dirname(path.join(root, relative)), { recursive: true });
+        fs.writeFileSync(path.join(root, relative), Buffer.alloc(188, 0x47));
+      }
+      store.publish({ id: priorId, channelId: 'c', start: 100_000, end: 120_000,
+        duration: 20, path: priorRaw, size: 188, epoch: 1 });
+      store.publish({ id: nextId, channelId: 'c', start: 108_000, end: 128_000,
+        duration: 20, path: nextRaw, size: 188, epoch: 2 });
+      expect(store.publishPlaybackPair({ priorId, nextId, priorRawPath: priorRaw, nextRawPath: nextRaw,
+        priorPath: priorPair, priorSize: 188, priorCut: 14,
+        nextPath: nextPair, nextSize: 188, nextOffset: 6, nextDuration: 14 })).toBe(true);
+      new ArchiveCapture(store, root, 1).recover();
+      expect(fs.existsSync(path.join(root, priorPair))).toBe(true);
+      expect(fs.existsSync(path.join(root, nextPair))).toBe(true);
+      expect(fs.existsSync(path.join(root, orphan))).toBe(false);
+      const now = Date.now();
+      const pinned = store.createSnapshot('c', 100_000, 130_000, now, now + 60_000, true);
+      fs.unlinkSync(path.join(root, nextPair));
+      new ArchiveCapture(store, root, 1).recover();
+      expect(store.getChunk(priorId)?.pairId).toBeNull();
+      expect(store.getChunk(nextId)?.pairId).toBeNull();
+      expect(store.snapshot(pinned.id)).toBeUndefined();
+      expect(fs.existsSync(path.join(root, priorPair))).toBe(false);
+      expect(store.detachedPlayback()).toEqual([]);
+      expect(store.totalUsageBytes()).toBe(2 * 188);
+      const rawTicket = store.createSnapshot('c', 100_000, 130_000, now, now + 60_000, true);
+      expect(rawTicket.chunks.every(chunk => !chunk.playbackPath)).toBe(true);
+    } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
   it('sends the capture session tag alongside authentication on a real FFmpeg HTTP request', async () => {
     const session = '11111111-1111-4111-8111-111111111111';
     let observed: { session?: string; auth?: string } = {};
@@ -480,6 +525,33 @@ describe('stream-copy HLS capture', () => {
       db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  it('serializes an explicitly allowlisted pair job while keeping legacy seam jobs disabled in raw mode', async () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('espn', 'ESPN', true, 24);
+    const id = 'fresh-chunk-000000000.ts';
+    store.publish({ id, channelId: 'espn', start: 0, end: 20_000,
+      duration: 20, path: 'raw.ts', size: 188, epoch: 1 });
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-pair-queue-'));
+    const processSeam = vi.fn(async () => false);
+    const processPair = vi.fn(async () => false);
+    const capture = new ArchiveCapture(store, root, 1, undefined, undefined,
+      processSeam as unknown as typeof import('./archive-seam.js').processArchiveSeam,
+      processPair as unknown as typeof import('./archive-pair-worker.js').processArchivePair);
+    vi.useFakeTimers(); vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '1');
+    vi.stubEnv('STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS', 'espn');
+    try {
+      const internals = capture as unknown as { seamQueue: string[];
+        enqueueSeam: (id: string, urgent: boolean) => void };
+      internals.enqueueSeam(id, true);
+      expect(internals.seamQueue).toEqual([id]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(processPair).toHaveBeenCalledTimes(1);
+      expect(processSeam).not.toHaveBeenCalled();
+      await capture.stopAll();
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllEnvs();
+      db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('drops queued repair work when raw fallback activates before dispatch', async () => {
     const db = new Database(':memory:'); ensureArchiveSchema(db);
     const store = createArchiveStore(db); store.configure('espn', 'ESPN', true, 24);
@@ -532,6 +604,33 @@ describe('stream-copy HLS capture', () => {
       db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  it('queues a historical single-file derivative for pair repair only after its last pin expires', async () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('espn', 'ESPN', true, 24);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-pair-backfill-'));
+    const prior = '11111111-1111-4111-8111-111111111111-chunk-000000006.ts';
+    const next = '22222222-2222-4222-8222-222222222222-chunk-000000000.ts';
+    store.publish({ id: prior, channelId: 'espn', start: 0, end: 20_000,
+      duration: 20, path: 'prior.ts', size: 188, epoch: 1 });
+    store.publish({ id: next, channelId: 'espn', start: 15_000, end: 35_000,
+      duration: 20, path: 'next.ts', size: 188, epoch: 2 });
+    expect(store.setPlaybackMedia(next, 'old.playback.ts', 188, 5, 15, Date.now())).toBe(true);
+    const now = Date.now();
+    store.createSnapshot('espn', 0, 40_000, now, now + 500, false);
+    const capture = new ArchiveCapture(store, root, 1);
+    vi.useFakeTimers(); vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '1');
+    vi.stubEnv('STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS', 'espn');
+    try {
+      const internals = capture as unknown as { seamQueue: string[] };
+      capture.prioritizeWindow('espn', 0, 40_000);
+      expect(internals.seamQueue).not.toContain(next);
+      store.clearExpired(now + 501);
+      capture.prioritizeWindow('espn', 0, 40_000);
+      expect(internals.seamQueue).toContain(next);
+      await capture.stopAll();
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllEnvs();
+      db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
   it('promotes a queued historical seam when a viewer requests that window', async () => {
     const db = new Database(':memory:'); ensureArchiveSchema(db);
     const store = createArchiveStore(db); store.configure('espn', 'ESPN', true, 24);
