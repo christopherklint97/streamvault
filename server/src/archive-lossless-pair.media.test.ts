@@ -86,4 +86,24 @@ describe('verified stream-copy pair', () => {
         verifyFiniteJoin(dir, first, second, [result!.cut.offset, 21.12 - result!.cut.offset]);
       } finally { fs.rmSync(dir, { recursive: true, force: true }); }
     }, 120000);
+  it.skipIf(!process.env.STREAMVAULT_ESPN_SEAM_SAMPLE)(
+    'removes a short ESPN replay and one terminal damaged picture without losing prior unique frames', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-espn-pair-'));
+      try {
+        const base = process.env.STREAMVAULT_ESPN_SEAM_SAMPLE!;
+        const previous = path.join(base, 'prev.ts');
+        const next = path.join(base, 'next.ts');
+        const first = path.join(dir, 'previous.ts');
+        const second = path.join(dir, 'next.ts');
+        const result = await prepareLosslessPair(previous, next, first, second);
+        expect(result?.cut).toMatchObject({ videoBefore: 443, audioBefore: 694,
+          videoAfter: 478, audioAfter: 747, videoOverlapStart: 300,
+          audioOverlapStart: 469, droppedDamagedPictures: 1 });
+        if (!result) return;
+        for (const [stream, overlapStart] of [[0, 300], [1, 469]] as const)
+          expect([...hashes(first, stream), ...hashes(second, stream)])
+            .toEqual([...hashes(previous, stream).slice(0, overlapStart), ...hashes(next, stream)]);
+        verifyFiniteJoin(dir, first, second, [result.cut.previousOffset, 20.7207 - result.cut.offset]);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }, 120000);
 });

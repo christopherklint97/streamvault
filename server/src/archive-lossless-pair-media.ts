@@ -41,6 +41,14 @@ async function ffmpeg(args: string[], signal?: AbortSignal): Promise<void> {
 }
 function hashes(items: Array<VideoSignature | AudioSignature>): string[] { return items.map(item => item.hash); }
 function equals(a: string[], b: string[]): boolean { return a.length === b.length && a.every((x, i) => x === b[i]); }
+async function firstAudioTime(file: string, signal?: AbortSignal): Promise<number> {
+  const { stdout } = await exec('ffprobe', ['-v', 'error', '-select_streams', 'a:0',
+    '-show_packets', '-read_intervals', '%+#1', '-show_entries', 'packet=pts_time', '-of', 'json', file],
+  { timeout: 15_000, maxBuffer: 2048, signal });
+  const pts = Number((JSON.parse(stdout) as { packets?: Array<{ pts_time?: string }> }).packets?.[0]?.pts_time);
+  if (!Number.isFinite(pts)) throw new Error('No AAC presentation clock');
+  return pts;
+}
 
 /** Alter continuity counters only on staged presentation files, never masters. */
 async function continuityPair(first: string, second: string): Promise<void> {
@@ -74,11 +82,14 @@ export async function prepareLosslessPair(previous: string, next: string,
         fs.stat(file).then(() => true, () => false)))).some(Boolean))
     throw new Error('Archive presentation output must be new and distinct from masters');
   const [before, after] = await Promise.all([inventory(previous, signal), inventory(next, signal)]);
-  const matched = before.video.findIndex((packet, i) => packet.hash !== after.video[i]?.hash);
-  const unmatched = matched < 0 ? 0 : before.video.length - matched;
+  const candidate = selectLosslessPairCut(before.video, after.video, before.audio, after.audio, true);
+  if (!candidate) return undefined;
   let damaged = false;
-  if (unmatched === 1) {
-    const fps = 1 / (before.video[1].pts - before.video[0].pts);
+  if (candidate.droppedDamagedPictures === 1) {
+    const pts = before.video.slice(0, 120).map(packet => packet.pts).sort((a, b) => a - b);
+    const steps = pts.slice(1).map((time, index) => time - pts[index])
+      .filter(step => step > 0.001 && step < 0.1).sort((a, b) => a - b);
+    const fps = 1 / steps[Math.floor(steps.length / 2)];
     const { stderr } = await exec('ffmpeg', ['-hide_banner', '-loglevel', 'info', '-debug_ts',
       '-nostdin', '-threads', '1', '-i', previous, '-map', '0:v:0', '-an', '-vsync', '0', '-f', 'null', '-'],
     { timeout: 45_000, maxBuffer: 4 * 1024 * 1024, signal });
@@ -86,6 +97,8 @@ export async function prepareLosslessPair(previous: string, next: string,
   }
   const cut = selectLosslessPairCut(before.video, after.video, before.audio, after.audio, damaged);
   if (!cut) return undefined;
+  const priorVideo = `${previousOutput}.video.part.ts`;
+  const priorAudio = `${previousOutput}.audio.part.ts`;
   const video = `${nextOutput}.video.part.ts`;
   const audio = `${nextOutput}.audio.part.ts`;
   const joined = `${nextOutput}.joined.part.ts`;
@@ -93,32 +106,43 @@ export async function prepareLosslessPair(previous: string, next: string,
   const nextPart = `${nextOutput}.part.ts`;
   let published = false;
   try {
-    await ffmpeg(['-i', previous, '-t', cut.offset.toFixed(6), '-map', '0:v:0', '-map', '0:a:0',
-      '-c', 'copy', '-f', 'mpegts', '-y', priorPart], signal);
-    await ffmpeg(['-ss', cut.offset.toFixed(6), '-i', next, '-map', '0:v:0',
-      '-c', 'copy', '-f', 'mpegts', '-y', video], signal);
-    await ffmpeg(['-i', next, '-ss', cut.offset.toFixed(6), '-map', '0:a:0',
-      '-c', 'copy', '-f', 'mpegts', '-y', audio], signal);
-    await ffmpeg(['-i', video, '-i', audio, '-map', '0:v:0', '-map', '1:a:0',
-      '-c', 'copy', '-f', 'mpegts', '-y', joined], signal);
+    // Count elementary packets, not a wall-clock -t: B-frame DTS ordering and
+    // AAC preroll can otherwise retain a duplicate or drop a unique packet.
+    await ffmpeg(['-copyts', '-i', previous, '-map', '0:v:0', '-c', 'copy',
+      '-frames:v', String(cut.videoBefore), '-mpegts_copyts', '1', '-f', 'mpegts', '-y', priorVideo], signal);
+    await ffmpeg(['-copyts', '-i', previous, '-map', '0:a:0', '-c', 'copy',
+      '-frames:a', String(cut.audioBefore), '-mpegts_copyts', '1', '-f', 'mpegts', '-y', priorAudio], signal);
+    await ffmpeg(['-copyts', '-i', priorVideo, '-i', priorAudio, '-map', '0:v:0', '-map', '1:a:0',
+      '-c', 'copy', '-mpegts_copyts', '1', '-f', 'mpegts', '-y', priorPart], signal);
+    await ffmpeg(['-copyts', '-ss', cut.offset.toFixed(6), '-i', next, '-map', '0:v:0',
+      '-c', 'copy', '-frames:v', String(cut.videoAfter), '-mpegts_copyts', '1', '-f', 'mpegts', '-y', video], signal);
+    const nextAudioIndex = cut.audioBefore - cut.audioOverlapStart;
+    const audioSeek = after.audio[nextAudioIndex].pts - after.audio[0].pts;
+    await ffmpeg(['-i', next, '-ss', audioSeek.toFixed(6), '-map', '0:a:0',
+      '-c', 'copy', '-frames:a', String(cut.audioAfter), '-f', 'mpegts', '-y', audio], signal);
+    const audioShift = after.audio[nextAudioIndex].pts - await firstAudioTime(audio, signal);
+    await ffmpeg(['-copyts', '-i', video, '-itsoffset', audioShift.toFixed(6), '-i', audio,
+      '-map', '0:v:0', '-map', '1:a:0', '-c', 'copy', '-mpegts_copyts', '1', '-f', 'mpegts', '-y', joined], signal);
     // FFmpeg can give the independently muxed output a different initial video
     // clock than the predecessor (AAC priming). Align video timestamps to its
     // original frame cadence rather than blindly adding the overlap duration.
     const [initialPrior, initialNext] = await Promise.all([inventory(priorPart, signal), inventory(joined, signal)]);
-    const shift = initialPrior.video[0].pts + cut.offset - initialNext.video[0].pts;
-    if (!Number.isFinite(shift) || Math.abs(shift - cut.offset) > 0.05) return undefined;
+    const shift = initialPrior.video[0].pts + cut.previousOffset - initialNext.video[0].pts;
+    if (!Number.isFinite(shift) || Math.abs(shift) > 6 * 3600) return undefined;
     await ffmpeg(['-itsoffset', shift.toFixed(6), '-i', joined, '-map', '0:v:0', '-map', '0:a:0',
       '-c', 'copy', '-copyts', '-mpegts_copyts', '1', '-f', 'mpegts', '-y', nextPart], signal);
     const [a, b] = await Promise.all([inventory(priorPart, signal), inventory(nextPart, signal)]);
-    if (!equals([...hashes(a.video), ...hashes(b.video)], hashes(after.video)) ||
-        !equals([...hashes(a.audio), ...hashes(b.audio)], hashes(after.audio)) ||
+    if (!equals([...hashes(a.video), ...hashes(b.video)],
+      [...hashes(before.video.slice(0, cut.videoOverlapStart)), ...hashes(after.video)]) ||
+        !equals([...hashes(a.audio), ...hashes(b.audio)],
+          [...hashes(before.audio.slice(0, cut.audioOverlapStart)), ...hashes(after.audio)]) ||
         !b.video[0].key ||
         a.video.at(-1)!.dts >= b.video[0].dts ||
         a.audio.at(-1)!.dts >= b.audio[0].dts ||
         a.video.length !== cut.videoBefore || b.video.length !== cut.videoAfter ||
         a.audio.length !== cut.audioBefore || b.audio.length !== cut.audioAfter ||
-        Math.abs(b.video[0].pts - a.video[0].pts - cut.offset) > 0.04 ||
-        Math.abs(b.audio[0].pts - a.audio[0].pts - cut.offset) > 0.04)
+        Math.abs(b.video[0].pts - a.video[0].pts - cut.previousOffset) > 0.04 ||
+        Math.abs(b.audio[0].pts - a.audio[0].pts - cut.previousOffset) > 0.04)
       return undefined;
     const sizes = [await fs.stat(priorPart), await fs.stat(nextPart)];
     const originals = [await fs.stat(previous), await fs.stat(next)];
@@ -130,7 +154,8 @@ export async function prepareLosslessPair(previous: string, next: string,
     published = true;
     return { cut, sizes: [sizes[0].size, sizes[1].size] };
   } finally {
-    await Promise.all([video, audio, joined, priorPart, nextPart].map(file => fs.rm(file, { force: true })));
+    await Promise.all([priorVideo, priorAudio, video, audio, joined, priorPart, nextPart]
+      .map(file => fs.rm(file, { force: true })));
     if (!published) await Promise.all([previousOutput, nextOutput].map(file => fs.rm(file, { force: true })));
   }
 }
