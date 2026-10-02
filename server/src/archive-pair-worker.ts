@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ArchiveStore, ArchiveChunk } from './archive-store.js';
-import { prepareLosslessPair } from './archive-lossless-pair-media.js';
+import { prepareLosslessPair, rawTransportContinues } from './archive-lossless-pair-media.js';
 
 const MAX_INPUT_BYTES = 64 * 1024 * 1024;
 const EXTRA_WORK_MULTIPLIER = 8; // staged elementary streams, muxes and two final copies
@@ -30,6 +30,10 @@ export async function processArchivePair(store: ArchiveStore, root: string, id: 
   const previous = store.previousChunk(id);
   if (!previous || previous.unavailable || previous.playbackHidden || previous.pairId ||
       previous.id.split('-chunk-')[0] === current.id.split('-chunk-')[0]) return false;
+  const followingId = id.replace(/-chunk-000000000\.ts$/, '-chunk-000000001.ts');
+  const following = store.getChunk(followingId);
+  if (!following || following.unavailable || following.channelId !== current.channelId ||
+      following.epoch !== current.epoch || following.end <= current.end) return false;
   const realRoot = await fs.realpath(root);
   const source = async (chunk: ArchiveChunk) => {
     const absolute = path.resolve(realRoot, chunk.path);
@@ -40,7 +44,8 @@ export async function processArchivePair(store: ArchiveStore, root: string, id: 
       throw new Error('Unsafe archive source size');
     return { absolute, stat };
   };
-  const [prior, next] = await Promise.all([source(previous), source(current)]);
+  const [prior, next, after] = await Promise.all([source(previous), source(current), source(following)]);
+  if (!await rawTransportContinues(next.absolute, after.absolute)) return false;
   const maximumWork = Math.ceil((prior.stat.size + next.stat.size) * EXTRA_WORK_MULTIPLIER);
   const free = async () => { const disk = await fs.statfs(realRoot); return disk.bavail * disk.bsize; };
   if ((await free()) <= reserveBytes + maximumWork ||
@@ -61,17 +66,20 @@ export async function processArchivePair(store: ArchiveStore, root: string, id: 
     const result = await prepare(prior.absolute, next.absolute, priorOut.absolute, nextOut.absolute, signal);
     if (!result || !canRun()) return false;
     const currentPrior = store.getChunk(previous.id), currentNext = store.getChunk(current.id);
-    if (!store.getArchive(current.channelId)?.enabled || !currentPrior || !currentNext ||
-        currentPrior.unavailable || currentNext.unavailable ||
+    const currentAfter = store.getChunk(followingId);
+    if (!store.getArchive(current.channelId)?.enabled || !currentPrior || !currentNext || !currentAfter ||
+        currentPrior.unavailable || currentNext.unavailable || currentAfter.unavailable ||
         currentPrior.path !== previous.path || currentNext.path !== current.path ||
+        currentAfter.path !== following.path || currentAfter.size !== following.size ||
         currentPrior.size !== previous.size || currentNext.size !== current.size) return false;
-    const [priorAfter, nextAfter, first, second] = await Promise.all([
-      fs.stat(prior.absolute), fs.stat(next.absolute), fs.stat(priorOut.absolute), fs.stat(nextOut.absolute),
+    const [priorAfter, nextAfter, followingAfter, first, second] = await Promise.all([
+      fs.stat(prior.absolute), fs.stat(next.absolute), fs.stat(after.absolute),
+      fs.stat(priorOut.absolute), fs.stat(nextOut.absolute),
     ]);
-    if (![priorAfter, nextAfter].every((stat, index) =>
-        stat.isFile() && stat.size === [prior, next][index].stat.size &&
-        stat.mtimeMs === [prior, next][index].stat.mtimeMs &&
-        stat.ino === [prior, next][index].stat.ino) ||
+    if (![priorAfter, nextAfter, followingAfter].every((stat, index) =>
+        stat.isFile() && stat.size === [prior, next, after][index].stat.size &&
+        stat.mtimeMs === [prior, next, after][index].stat.mtimeMs &&
+        stat.ino === [prior, next, after][index].stat.ino) ||
         !first.isFile() || !second.isFile() ||
         first.size !== result.sizes[0] || second.size !== result.sizes[1] ||
         !Number.isSafeInteger(first.size) || !Number.isSafeInteger(second.size) ||

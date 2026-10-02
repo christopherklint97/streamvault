@@ -6,6 +6,34 @@ import { localizedTerminalDecoderError } from './archive-seam.js';
 import { selectLosslessPairCut, type VideoSignature, type AudioSignature, type LosslessPairCut } from './archive-lossless-pair.js';
 
 const exec = promisify(execFile);
+/** Prove that the next HLS chunk resumes the same elementary TS streams and
+ * continuity counters. Do not publish a pair at a session's first chunk alone:
+ * a later segment can otherwise reveal an unverified discontinuity. */
+export async function rawTransportContinues(current: string, following: string): Promise<boolean> {
+  const readBounded = async (file: string) => {
+    const stat = await fs.stat(file);
+    if (!stat.isFile() || !stat.size || stat.size > 64 * 1024 * 1024 || stat.size % 188)
+      return undefined;
+    return fs.readFile(file);
+  };
+  const [before, after] = await Promise.all([readBounded(current), readBounded(following)]);
+  if (!before || !after) return false;
+  const tail = new Map<number, number>(), first = new Map<number, number>();
+  const scan = (bytes: Buffer, output: Map<number, number>, initial: boolean): boolean => {
+    for (let i = 0; i < bytes.length; i += 188) {
+      if (bytes[i] !== 0x47) return false;
+      const pid = ((bytes[i + 1] & 31) << 8) | bytes[i + 2];
+      const adaptation = (bytes[i + 3] >> 4) & 3;
+      if (!adaptation) return false;
+      if (pid < 32 || pid >= 8191 || !(adaptation & 1)) continue;
+      if (initial) { if (!output.has(pid)) output.set(pid, bytes[i + 3] & 15); }
+      else output.set(pid, bytes[i + 3] & 15);
+    }
+    return true;
+  };
+  if (!scan(before, tail, false) || !scan(after, first, true) || tail.size < 2) return false;
+  return [...tail].every(([pid, cc]) => first.get(pid) === ((cc + 1) & 15));
+}
 export function lowPriorityMediaCommand(tool: 'ffprobe' | 'ffmpeg', args: string[]) {
   return { file: 'nice', args: ['-n', '15', 'ionice', '-c', '3', tool, ...args] };
 }

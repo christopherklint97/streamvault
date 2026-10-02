@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { prepareLosslessPair, lowPriorityMediaCommand } from './archive-lossless-pair-media.js';
+import { prepareLosslessPair, lowPriorityMediaCommand, rawTransportContinues } from './archive-lossless-pair-media.js';
 
 const ffmpeg = (args: string[]) => execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', ...args], { timeout: 30000 });
 const hashes = (file: string, stream: number): string[] => {
@@ -70,6 +70,23 @@ describe('verified stream-copy pair', () => {
         file: 'nice', args: ['-n', '15', 'ionice', '-c', '3', tool, '-v', 'error'],
       });
   });
+  it.skipIf(!process.env.STREAMVAULT_F1_SEAM_SAMPLE || !process.env.STREAMVAULT_ESPN_SEAM_SAMPLE)(
+    'requires real successor TS continuity before choosing a future raw segment', async () => {
+      for (const base of [process.env.STREAMVAULT_F1_SEAM_SAMPLE!, process.env.STREAMVAULT_ESPN_SEAM_SAMPLE!]) {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-following-'));
+        try {
+          expect(await rawTransportContinues(path.join(base, 'next.ts'), path.join(base, 'after.ts'))).toBe(true);
+          const changed = fs.readFileSync(path.join(base, 'after.ts'));
+          const packet = changed.findIndex((byte, index) => index % 188 === 0 && byte === 0x47 &&
+            ((((changed[index + 1] ?? 0) & 31) << 8) | (changed[index + 2] ?? 0)) === 256 &&
+            (((changed[index + 3] ?? 0) >> 4) & 1) === 1);
+          expect(packet).toBeGreaterThanOrEqual(0);
+          changed[packet + 3] ^= 1;
+          const broken = path.join(dir, 'broken.ts'); fs.writeFileSync(broken, changed);
+          expect(await rawTransportContinues(path.join(base, 'next.ts'), broken)).toBe(false);
+        } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+      }
+    }, 20000);
   it('retains each H.264 and AAC packet exactly once across an overlapping reconnect', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-lossless-pair-'));
     try {
