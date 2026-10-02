@@ -12,6 +12,53 @@ import { createArchiveStore, ensureArchiveSchema } from './archive-store.js';
 const run = (args: string[]) => execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', ...args], { timeout: 30_000 });
 
 describe('conservative TS seam copy', () => {
+  it('does not create a new playback derivative under raw fallback and preserves existing copies and pins', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-raw-fallback-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('channel', 'Channel', true, 24);
+    vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '1');
+    try {
+      const oldId = 'old-chunk-000000000.ts';
+      const newId = 'new-chunk-000000000.ts';
+      fs.writeFileSync(path.join(root, 'old.ts'), 'RAW');
+      fs.writeFileSync(path.join(root, 'old.playback.ts'), 'COPY');
+      fs.writeFileSync(path.join(root, 'new.ts'), 'RAW');
+      store.publish({ id: oldId, channelId: 'channel', start: 0, end: 10_000,
+        duration: 10, path: 'old.ts', size: 3, epoch: 1 });
+      store.setPlaybackMedia(oldId, 'old.playback.ts', 4, 1, 9, 1);
+      store.publish({ id: newId, channelId: 'channel', start: 10_000, end: 20_000,
+        duration: 10, path: 'new.ts', size: 3, epoch: 2 });
+      const pin = store.createSnapshot('channel', 0, 20_000, 2, 100);
+      expect(await processArchiveSeam(store, root, newId, 2, 0)).toBe(false);
+      expect(fs.existsSync(path.join(root, 'new.playback.ts'))).toBe(false);
+      expect(fs.readFileSync(path.join(root, 'old.playback.ts'), 'utf8')).toBe('COPY');
+      expect(store.snapshot(pin.id)?.chunks[0].playbackPath).toBe('old.playback.ts');
+      expect(fs.readFileSync(path.join(root, 'new.ts'), 'utf8')).toBe('RAW');
+    } finally { vi.unstubAllEnvs(); db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+  it('aborts a queued seam when raw fallback activates during its async checks', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-raw-race-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('channel', 'Channel', true, 24);
+    const prior = 'old-chunk-000000000.ts';
+    const current = 'new-chunk-000000000.ts';
+    for (const [id, name, start] of [[prior, 'old.ts', 0], [current, 'new.ts', 10_000]] as const) {
+      fs.writeFileSync(path.join(root, name), 'RAW');
+      store.publish({ id, channelId: 'channel', start, end: start + 10_000,
+        duration: 10, path: name, size: 3, epoch: 1 });
+    }
+    const statfs = vi.spyOn(fsPromises, 'statfs').mockImplementation(async (...args) => {
+      vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '1');
+      return fs.statfsSync(args[0]);
+    });
+    try {
+      expect(await processArchiveSeam(store, root, current, 2, 0)).toBe(false);
+      expect(fs.existsSync(path.join(root, 'new.playback.ts'))).toBe(false);
+      expect(store.getChunk(current)?.playbackPath).toBeNull();
+    } finally { statfs.mockRestore(); vi.unstubAllEnvs(); db.close();
+      fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('localizes a single decoder error to the final picture rather than an earlier or mixed error', () => {
     const damaged = '[h264 @ 0x1234] error while decoding MB 51 5, bytestream -6';
     const terminal = '[dec:h264] decoder -> pts:1404000 pts_time:15.6 pkt_dts:1404000';

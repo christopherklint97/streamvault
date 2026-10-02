@@ -12,6 +12,9 @@ export async function measureDiskUsage(root: string): Promise<number> {
       throw error;
     }
     for (const entry of entries) {
+      // Continuous archive chunks (including playback copies) have their own
+      // archive cap and retention; they must not consume the show quota.
+      if (directory === root && entry.name === 'archive' && entry.isDirectory()) continue;
       const full = path.join(directory, entry.name);
       if (entry.isDirectory()) await walk(full);
       else if (entry.isFile()) {

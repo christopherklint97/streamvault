@@ -399,7 +399,7 @@ export function frameAccurateEnabledFor(channelId: string, end: number, now: num
 export async function processArchiveSeam(store: ArchiveStore, root: string, id: string,
   now = Date.now(), reserveBytes = 20 * 1024 ** 3, maximumBytes = 400 * 1024 ** 3,
   signal?: AbortSignal): Promise<boolean> {
-  if (signal?.aborted) return false;
+  if (signal?.aborted || process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1') return false;
   const current = store.getChunk(id);
   const previous = store.previousChunk(id);
   if (!current || !previous || !store.getArchive(current.channelId) || current.unavailable ||
@@ -428,7 +428,8 @@ export async function processArchiveSeam(store: ArchiveStore, root: string, id: 
   });
   const disk = await fs.statfs(root);
   const maximumCopy = Math.ceil(before.size * 1.5);
-  if (disk.bavail * disk.bsize <= reserveBytes + maximumCopy ||
+  if (signal?.aborted || process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1' ||
+      disk.bavail * disk.bsize <= reserveBytes + maximumCopy ||
       store.totalUsageBytes() + maximumCopy >= maximumBytes) return false;
   const relative = current.path.replace(/\.ts$/, '.playback.ts');
   const output = path.resolve(root, relative);
@@ -440,7 +441,7 @@ export async function processArchiveSeam(store: ArchiveStore, root: string, id: 
     }
     const result = await prepareSeamCopy(preceding, input, staged, signal,
       frameAccurateEnabledFor(current.channelId, current.end, now));
-    if (signal?.aborted) return false;
+    if (signal?.aborted || process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1') return false;
     if (!result) return false;
     const after = await fs.stat(input);
     if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) return false;
@@ -450,9 +451,9 @@ export async function processArchiveSeam(store: ArchiveStore, root: string, id: 
     const remaining = await fs.statfs(root);
     if (remaining.bavail * remaining.bsize <= reserveBytes ||
         store.totalUsageBytes() + result.size >= maximumBytes) return false;
-    if (signal?.aborted) return false;
+    if (signal?.aborted || process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1') return false;
     await fs.rename(staged, output);
-    if (signal?.aborted) return false;
+    if (signal?.aborted || process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1') return false;
     // Rename yielded to retention/disable handlers: never publish a trim if
     // any media used to prove the overlap disappeared during that await.
     if (!predecessorsIntact()) return false;

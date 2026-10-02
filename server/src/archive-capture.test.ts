@@ -456,6 +456,55 @@ describe('stream-copy HLS capture', () => {
       fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  it('does not enqueue or run seam repairs during raw playback fallback', async () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('espn', 'ESPN', true, 24);
+    const id = 'fresh-chunk-000000000.ts';
+    store.publish({ id, channelId: 'espn', start: 0, end: 20_000,
+      duration: 20, path: 'raw.ts', size: 188, epoch: 1 });
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-raw-queue-'));
+    const processSeam = vi.fn(async () => false);
+    const capture = new ArchiveCapture(store, root, 1, undefined, undefined,
+      processSeam as unknown as typeof import('./archive-seam.js').processArchiveSeam);
+    vi.useFakeTimers(); vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '1');
+    try {
+      const internals = capture as unknown as { seamQueue: string[];
+        enqueueSeam: (id: string, urgent: boolean) => void };
+      internals.enqueueSeam(id, true);
+      capture.prioritizeWindow('espn', 0, 20_000);
+      vi.advanceTimersByTime(60_000);
+      expect(internals.seamQueue).toEqual([]);
+      expect(processSeam).not.toHaveBeenCalled();
+      await capture.stopAll();
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllEnvs();
+      db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('drops queued repair work when raw fallback activates before dispatch', async () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('espn', 'ESPN', true, 24);
+    const id = 'fresh-chunk-000000000.ts';
+    store.publish({ id, channelId: 'espn', start: 0, end: 20_000,
+      duration: 20, path: 'raw.ts', size: 188, epoch: 1 });
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-queued-raw-'));
+    const processSeam = vi.fn(async () => false);
+    const capture = new ArchiveCapture(store, root, 1, undefined, undefined,
+      processSeam as unknown as typeof import('./archive-seam.js').processArchiveSeam);
+    vi.useFakeTimers();
+    try {
+      const internals = capture as unknown as { seamQueue: string[];
+        enqueueSeam: (id: string, urgent: boolean) => void };
+      internals.enqueueSeam(id, true);
+      expect(internals.seamQueue).toEqual([id]);
+      vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '1');
+      vi.advanceTimersByTime(60_000);
+      expect(internals.seamQueue).toEqual([]);
+      expect(processSeam).not.toHaveBeenCalled();
+      await capture.stopAll();
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllEnvs();
+      db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('pauses derivative repair before it crowds the capture disk cap, then resumes', async () => {
     const db = new Database(':memory:'); ensureArchiveSchema(db);
     const store = createArchiveStore(db); store.configure('espn', 'ESPN', true, 24);
