@@ -6,6 +6,15 @@ import { localizedTerminalDecoderError } from './archive-seam.js';
 import { selectLosslessPairCut, type VideoSignature, type AudioSignature, type LosslessPairCut } from './archive-lossless-pair.js';
 
 const exec = promisify(execFile);
+export function lowPriorityMediaCommand(tool: 'ffprobe' | 'ffmpeg', args: string[]) {
+  return { file: 'nice', args: ['-n', '15', 'ionice', '-c', '3', tool, ...args] };
+}
+function execMedia(tool: 'ffprobe' | 'ffmpeg', args: string[], options: {
+  timeout: number; maxBuffer: number; signal?: AbortSignal;
+}) {
+  const { file, args: argv } = lowPriorityMediaCommand(tool, args);
+  return exec(file, argv, options);
+}
 type Packet = { stream_index: number; pts_time: string; dts_time: string; flags: string; data_hash: string };
 type Inventory = { video: Array<VideoSignature & { dts: number }>; audio: Array<AudioSignature & { dts: number }> };
 
@@ -13,7 +22,7 @@ async function inventory(file: string, signal?: AbortSignal): Promise<Inventory>
   const stat = await fs.stat(file);
   if (!stat.isFile() || stat.size <= 0 || stat.size > 64 * 1024 * 1024)
     throw new Error('Unbounded archive candidate');
-  const { stdout } = await exec('ffprobe', ['-v', 'error', '-show_streams', '-show_packets',
+  const { stdout } = await execMedia('ffprobe', ['-v', 'error', '-show_streams', '-show_packets',
     '-show_data_hash', 'sha256', '-show_entries',
     'stream=index,codec_type,codec_name:packet=stream_index,pts_time,dts_time,flags,data_hash',
     '-of', 'json', file], { timeout: 20_000, maxBuffer: 5 * 1024 * 1024, signal });
@@ -36,13 +45,13 @@ async function inventory(file: string, signal?: AbortSignal): Promise<Inventory>
 }
 
 async function ffmpeg(args: string[], signal?: AbortSignal): Promise<void> {
-  await exec('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', '-threads', '1', ...args],
+  await execMedia('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', '-threads', '1', ...args],
     { timeout: 40_000, maxBuffer: 64 * 1024, signal });
 }
 function hashes(items: Array<VideoSignature | AudioSignature>): string[] { return items.map(item => item.hash); }
 function equals(a: string[], b: string[]): boolean { return a.length === b.length && a.every((x, i) => x === b[i]); }
 async function firstAudioTime(file: string, signal?: AbortSignal): Promise<number> {
-  const { stdout } = await exec('ffprobe', ['-v', 'error', '-select_streams', 'a:0',
+  const { stdout } = await execMedia('ffprobe', ['-v', 'error', '-select_streams', 'a:0',
     '-show_packets', '-read_intervals', '%+#1', '-show_entries', 'packet=pts_time', '-of', 'json', file],
   { timeout: 15_000, maxBuffer: 2048, signal });
   const pts = Number((JSON.parse(stdout) as { packets?: Array<{ pts_time?: string }> }).packets?.[0]?.pts_time);
@@ -50,11 +59,21 @@ async function firstAudioTime(file: string, signal?: AbortSignal): Promise<numbe
   return pts;
 }
 
-/** Alter continuity counters only on staged presentation files, never masters. */
-async function continuityPair(first: string, second: string): Promise<void> {
-  const state = new Map<number, number>();
-  for (const file of [first, second]) {
-    const buffer = await fs.readFile(file);
+/** Preserve packet order and payloads while aligning the pair's LAST per-PID
+ * continuity counters with its original second master. The next raw chunk in
+ * that same capture session therefore resumes with its original counters. */
+async function continuityPair(first: string, second: string, rawNext: string): Promise<void> {
+  const source = await fs.readFile(rawNext);
+  if (!source.length || source.length % 188) throw new Error('Invalid source transport packets');
+  const tail = new Map<number, number>();
+  for (let i = 0; i < source.length; i += 188) {
+    if (source[i] !== 0x47) throw new Error('Invalid source transport sync');
+    const pid = ((source[i + 1] & 31) << 8) | source[i + 2];
+    if (pid !== 8191) tail.set(pid, source[i + 3] & 15);
+  }
+  const buffers = await Promise.all([first, second].map(file => fs.readFile(file)));
+  const payloadCounts = new Map<number, number>();
+  for (const buffer of buffers) {
     if (!buffer.length || buffer.length % 188) throw new Error('Invalid transport packet count');
     for (let i = 0; i < buffer.length; i += 188) {
       if (buffer[i] !== 0x47) throw new Error('Invalid TS sync');
@@ -62,13 +81,33 @@ async function continuityPair(first: string, second: string): Promise<void> {
       const adaptation = (buffer[i + 3] >> 4) & 3;
       if (adaptation === 0) throw new Error('Invalid TS adaptation');
       if (pid === 8191) continue;
+      if (!tail.has(pid)) throw new Error('Cannot anchor pair transport stream');
+      if (adaptation & 1) payloadCounts.set(pid, (payloadCounts.get(pid) ?? 0) + 1);
+    }
+  }
+  const state = new Map<number, number>();
+  for (const [pid, count] of payloadCounts) {
+    if (count < 1) throw new Error('Missing pair transport payload');
+    state.set(pid, (tail.get(pid)! - count) & 15);
+  }
+  for (const [index, file] of [first, second].entries()) {
+    const buffer = buffers[index];
+    for (let i = 0; i < buffer.length; i += 188) {
+      if (buffer[i] !== 0x47) throw new Error('Invalid TS sync');
+      const pid = ((buffer[i + 1] & 31) << 8) | buffer[i + 2];
+      const adaptation = (buffer[i + 3] >> 4) & 3;
+      if (adaptation === 0) throw new Error('Invalid TS adaptation');
+      if (pid === 8191) continue;
       const prior = state.get(pid);
-      const cc = prior === undefined ? buffer[i + 3] & 15 : (prior + (adaptation & 1 ? 1 : 0)) & 15;
+      if (prior === undefined) throw new Error('Missing pair transport counter');
+      const cc = (prior + (adaptation & 1 ? 1 : 0)) & 15;
       buffer[i + 3] = (buffer[i + 3] & 0xf0) | cc;
       state.set(pid, cc);
     }
     await fs.writeFile(file, buffer);
   }
+  for (const [pid, last] of state)
+    if (last !== tail.get(pid)) throw new Error('Pair transport end did not match captured session');
 }
 
 /** Scratch-only bit-exact construction. Caller must reserve storage and atomically
@@ -90,7 +129,7 @@ export async function prepareLosslessPair(previous: string, next: string,
     const steps = pts.slice(1).map((time, index) => time - pts[index])
       .filter(step => step > 0.001 && step < 0.1).sort((a, b) => a - b);
     const fps = 1 / steps[Math.floor(steps.length / 2)];
-    const { stderr } = await exec('ffmpeg', ['-hide_banner', '-loglevel', 'info', '-debug_ts',
+    const { stderr } = await execMedia('ffmpeg', ['-hide_banner', '-loglevel', 'info', '-debug_ts',
       '-nostdin', '-threads', '1', '-i', previous, '-map', '0:v:0', '-an', '-vsync', '0', '-f', 'null', '-'],
     { timeout: 45_000, maxBuffer: 4 * 1024 * 1024, signal });
     damaged = localizedTerminalDecoderError(stderr, before.video.at(-1)!.pts - before.video[0].pts, fps);
@@ -148,7 +187,7 @@ export async function prepareLosslessPair(previous: string, next: string,
     const originals = [await fs.stat(previous), await fs.stat(next)];
     if (sizes[0].size + sizes[1].size > (originals[0].size + originals[1].size) * 1.5)
       return undefined;
-    await continuityPair(priorPart, nextPart);
+    await continuityPair(priorPart, nextPart, next);
     await fs.rename(priorPart, previousOutput);
     await fs.rename(nextPart, nextOutput);
     published = true;

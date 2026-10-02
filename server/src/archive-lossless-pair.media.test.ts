@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { prepareLosslessPair } from './archive-lossless-pair-media.js';
+import { prepareLosslessPair, lowPriorityMediaCommand } from './archive-lossless-pair-media.js';
 
 const ffmpeg = (args: string[]) => execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', ...args], { timeout: 30000 });
 const hashes = (file: string, stream: number): string[] => {
@@ -39,7 +39,37 @@ const verifyFiniteJoin = (dir: string, first: string, second: string, durations:
   }
 };
 
+const verifyFollowingRaw = (dir: string, first: string, second: string, following: string,
+  durations: [number, number, number]) => {
+  const manifest = path.join(dir, 'through-following.m3u8');
+  fs.writeFileSync(manifest, '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:' +
+    Math.ceil(Math.max(...durations)) + '\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n' +
+    `#EXTINF:${durations[0].toFixed(3)},\n${first}\n` +
+    `#EXTINF:${durations[1].toFixed(3)},\n${second}\n` +
+    `#EXT-X-DISCONTINUITY\n#EXTINF:${durations[2].toFixed(3)},\n${following}\n#EXT-X-ENDLIST\n`);
+  const run = (args: string[]) => spawnSync('ffmpeg', ['-hide_banner', '-nostdin', '-threads', '1',
+    '-allowed_extensions', 'ALL', '-i', manifest, ...args],
+  { timeout: 60000, encoding: 'utf8', maxBuffer: 128 * 1024 });
+  const decode = run(['-v', 'warning', '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-']);
+  expect(decode.status).toBe(0);
+  expect(decode.stderr).not.toMatch(/Packet corrupt|corrupt input packet|error while decoding|corrupt decoded frame/i);
+  const boundary = durations[0] + durations[1];
+  for (const time of [boundary - 0.4, boundary + 0.4]) {
+    const seek = run(['-v', 'error', '-ss', time.toFixed(3), '-t', '0.5',
+      '-map', '0:v:0', '-an', '-f', 'framemd5', '-']);
+    expect(seek.status).toBe(0);
+    expect(seek.stdout.split('\n').filter(line => line && !line.startsWith('#')).length).toBeGreaterThan(5);
+    expect(seek.stderr).not.toMatch(/Packet corrupt|corrupt input packet|error while decoding|corrupt decoded frame/i);
+  }
+};
+
 describe('verified stream-copy pair', () => {
+  it('runs packet inventories and remuxes below capture CPU and IO priority', () => {
+    for (const tool of ['ffprobe', 'ffmpeg'] as const)
+      expect(lowPriorityMediaCommand(tool, ['-v', 'error'])).toEqual({
+        file: 'nice', args: ['-n', '15', 'ionice', '-c', '3', tool, '-v', 'error'],
+      });
+  });
   it('retains each H.264 and AAC packet exactly once across an overlapping reconnect', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-lossless-pair-'));
     try {
@@ -84,6 +114,8 @@ describe('verified stream-copy pair', () => {
         for (const stream of [0, 1]) expect([...hashes(first, stream), ...hashes(second, stream)])
           .toEqual(hashes(next, stream));
         verifyFiniteJoin(dir, first, second, [result!.cut.offset, 21.12 - result!.cut.offset]);
+        verifyFollowingRaw(dir, first, second, path.join(base, 'after.ts'),
+          [result!.cut.previousOffset, 21.12 - result!.cut.offset, 19.2]);
       } finally { fs.rmSync(dir, { recursive: true, force: true }); }
     }, 120000);
   it.skipIf(!process.env.STREAMVAULT_ESPN_SEAM_SAMPLE)(
@@ -104,6 +136,8 @@ describe('verified stream-copy pair', () => {
           expect([...hashes(first, stream), ...hashes(second, stream)])
             .toEqual([...hashes(previous, stream).slice(0, overlapStart), ...hashes(next, stream)]);
         verifyFiniteJoin(dir, first, second, [result.cut.previousOffset, 20.7207 - result.cut.offset]);
+        verifyFollowingRaw(dir, first, second, path.join(base, 'after.ts'),
+          [result.cut.previousOffset, 20.7207 - result.cut.offset, 20.02]);
       } finally { fs.rmSync(dir, { recursive: true, force: true }); }
     }, 120000);
 });
