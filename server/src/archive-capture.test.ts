@@ -69,11 +69,51 @@ describe('stream-copy HLS capture', () => {
       expect(store.getChunk(priorId)?.pairId).toBeNull();
       expect(store.getChunk(nextId)?.pairId).toBeNull();
       expect(store.snapshot(pinned.id)).toBeUndefined();
-      expect(fs.existsSync(path.join(root, priorPair))).toBe(false);
+      expect(fs.existsSync(path.join(root, priorPair))).toBe(true);
       expect(store.detachedPlayback()).toEqual([]);
-      expect(store.totalUsageBytes()).toBe(2 * 188);
+      expect(store.totalUsageBytes()).toBe(4 * 188);
       const rawTicket = store.createSnapshot('c', 100_000, 130_000, now, now + 60_000, true);
       expect(rawTicket.chunks.every(chunk => !chunk.playbackPath)).toBe(true);
+      store.clearExpired(now + 60_000);
+      new ArchiveCapture(store, root, 1).recover();
+      expect(fs.existsSync(path.join(root, priorPair))).toBe(false);
+      expect(store.totalUsageBytes()).toBe(2 * 188);
+    } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+  it('quarantines an unpinned pair with a missing raw master without breaking startup or quota', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-pair-raw-missing-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('c', 'C', true, 24);
+    const sessions = ['11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222'];
+    const ids = sessions.map((session, index) => `${session}-chunk-${index ? '000000000' : '000000006'}.ts`);
+    const raw = sessions.map((session, index) => path.join('archive', 'c', session,
+      `chunk-${index ? '000000000' : '000000006'}.ts`));
+    const copies = raw.map(file => file.replace(/\.ts$/, '.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.pair.playback.ts'));
+    try {
+      for (const file of [...raw, ...copies]) {
+        fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+        fs.writeFileSync(path.join(root, file), Buffer.alloc(188, 0x47));
+      }
+      store.publish({ id: ids[0], channelId: 'c', start: 100_000, end: 120_000,
+        duration: 20, path: raw[0], size: 188, epoch: 1 });
+      store.publish({ id: ids[1], channelId: 'c', start: 108_000, end: 128_000,
+        duration: 20, path: raw[1], size: 188, epoch: 2 });
+      expect(store.publishPlaybackPair({ priorId: ids[0], nextId: ids[1], priorRawPath: raw[0],
+        nextRawPath: raw[1], priorPath: copies[0], priorSize: 188, priorCut: 14,
+        nextPath: copies[1], nextSize: 188, nextOffset: 6, nextDuration: 14 })).toBe(true);
+      fs.unlinkSync(path.join(root, raw[0]));
+      expect(() => new ArchiveCapture(store, root, 1).recover()).not.toThrow();
+      expect(store.getChunk(ids[0])?.unavailable).toBe(1);
+      expect(store.getChunk(ids[0])?.pairId).toBeTruthy();
+      expect(store.totalUsageBytes()).toBe(3 * 188);
+      expect(store.overlap('c', 100_000, 128_000, true)).toEqual([]);
+      fs.writeFileSync(path.join(root, raw[0]), Buffer.alloc(188, 0x47));
+      new ArchiveCapture(store, root, 1).recover();
+      expect(store.getChunk(ids[0])?.unavailable).toBe(0);
+      expect(store.totalUsageBytes()).toBe(4 * 188);
+      expect(store.createSnapshot('c', 100_000, 128_000, Date.now(), Date.now() + 60000, true)
+        .chunks.every(chunk => !!chunk.playbackPath)).toBe(true);
     } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
   it('restores a broken upstream pair and its dependent downstream pair as one raw chain', () => {

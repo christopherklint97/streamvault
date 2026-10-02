@@ -26,6 +26,49 @@ function fixture(priorStart: number, nextStart: number, priorCut: number, nextOf
 }
 
 describe('verified archive pair presentation', () => {
+  it('holds detached pair copies until a preexisting snapshot pin expires', () => {
+    const { db, store, pair } = fixture(100_000, 108_000, 14, 6);
+    try {
+      const now = Date.now();
+      expect(store.publishPlaybackPair(pair)).toBe(true);
+      store.createSnapshot('one', 100_000, 128_000, now, now + 60_000, true);
+      expect(store.restorePlaybackPairRaw(pair.nextId, () => true)).toBe(true);
+      expect(store.detachedPlayback()).toEqual([]);
+      store.clearExpired(now + 60_000);
+      expect(store.detachedPlayback().map(copy => copy.path).sort())
+        .toEqual([pair.priorPath, pair.nextPath].sort());
+    } finally { db.close(); }
+  });
+  it('retains seekable coverage across more than 32 consecutive verified sessions', () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('one', 'One', true, 24);
+    let priorId = 'session0-chunk-000000001.ts';
+    store.publish({ id: priorId, channelId: 'one', start: 100_000, end: 120_000,
+      duration: 20, path: 'session0-1.ts', size: 188, epoch: 0 });
+    try {
+      for (let index = 1; index <= 40; index++) {
+        const prior = store.getChunk(priorId)!;
+        const nextId = `session${index}-chunk-000000000.ts`;
+        const tailId = `session${index}-chunk-000000001.ts`;
+        const start = prior.end - 12_000;
+        store.publish({ id: nextId, channelId: 'one', start, end: start + 20_000,
+          duration: 20, path: `session${index}-0.ts`, size: 188, epoch: index });
+        store.publish({ id: tailId, channelId: 'one', start: start + 25_000,
+          end: start + 45_000, duration: 20, path: `session${index}-1.ts`, size: 188, epoch: index });
+        expect(store.publishPlaybackPair({ priorId, nextId, priorRawPath: prior.path,
+          nextRawPath: `session${index}-0.ts`, priorPath: `session${index}-prior.playback.ts`,
+          priorSize: 180, priorCut: 14, nextPath: `session${index}-next.playback.ts`,
+          nextSize: 170, nextOffset: 6, nextDuration: 14 })).toBe(true);
+        priorId = tailId;
+      }
+      const newest = store.getChunk('session40-chunk-000000000.ts')!;
+      expect(store.overlap('one', newest.presentationStart! + 2_000,
+        newest.presentationStart! + 3_000, true).map(c => c.id)).toContain(newest.id);
+      expect(store.restorePlaybackChainRaw('session1-chunk-000000000.ts', () => true)).toBe(true);
+      expect(store.getChunk(newest.id)?.pairId).toBeNull();
+      expect(store.getChunk('session1-chunk-000000000.ts')?.pairId).toBeNull();
+    } finally { db.close(); }
+  });
   it('retires a later dependent pair before its source pair without corrupting the clock', () => {
     const { db, store, pair } = fixture(100_000, 108_000, 14, 6);
     try {
@@ -73,6 +116,10 @@ describe('verified archive pair presentation', () => {
       const selected = store.createSnapshot('one', 100_000, 160_000, 1, 100, true).chunks;
       expect(selected.map(playableStart)).toEqual([100_000, 114_000, 128_000, 142_000]);
       expect(archiveGaps(selected, 100_000, 156_000)).toEqual([]);
+      expect(store.reconcileMissing(pair.nextId)).toBe('quarantined');
+      expect(store.overlap('one', 149_000, 151_000, true)).toEqual([]);
+      store.markAvailable(pair.nextId);
+      expect(store.overlap('one', 149_000, 151_000, true)).toHaveLength(1);
       expect(store.restorePlaybackPairRaw(pair.nextId, () => true)).toBe(false);
       expect(store.restorePlaybackPairRaw(lastId, () => true)).toBe(true);
       expect(store.getChunk(tailId)?.presentationStart).toBe(128_000);

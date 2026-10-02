@@ -396,7 +396,9 @@ export class ArchiveCapture {
             path.relative(this.root, path.join(directory, name));
           if (((/^chunk-\d{9}\.ts(?:\.tmp)?$/.test(name) && !admitted.has(name) &&
             !this.store.getChunk(`${session.name}-${name}`)) || name.endsWith('.part') ||
-            (playbackMaster && !indexedPlayback)) && !fs.lstatSync(path.join(directory, name)).isSymbolicLink()) {
+            (playbackMaster && !indexedPlayback && !this.store.isDetachedPlayback(
+              path.relative(this.root, path.join(directory, name))))) &&
+            !fs.lstatSync(path.join(directory, name)).isSymbolicLink()) {
             try { fs.unlinkSync(path.join(directory, name)); } catch (error) {
               logger.warn(`Archive recovery could not clean ${channelId}/${session.name}/${name}: ${error}`);
             }

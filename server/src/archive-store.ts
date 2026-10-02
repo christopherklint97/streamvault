@@ -24,8 +24,12 @@ export interface ArchiveSnapshot {
   expiresAt: number; createdAt: number; chunks: ArchiveChunk[];
 }
 
-/** Only additive tables; never migrate or remove legacy recording media. */
+/** Only additive tables; never migrate or remove legacy recording media.
+ * Apply migration and quota reconciliation atomically to avoid repeated fsyncs. */
 export function ensureArchiveSchema(db: Db): void {
+  db.transaction(() => ensureArchiveSchemaWithinTransaction(db)).immediate();
+}
+function ensureArchiveSchemaWithinTransaction(db: Db): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS channel_archives (
       channelId TEXT PRIMARY KEY, channelName TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0,
@@ -115,7 +119,8 @@ export function ensureArchiveSchema(db: Db): void {
       singleton INTEGER PRIMARY KEY CHECK(singleton = 1), bytes INTEGER NOT NULL DEFAULT 0
     );
     INSERT OR IGNORE INTO archive_storage_usage(singleton,bytes)
-      SELECT 1, (SELECT COALESCE(SUM(size + playbackSize),0) FROM media_chunks WHERE unavailable = 0)
+      SELECT 1, (SELECT COALESCE(SUM(CASE WHEN unavailable = 0 THEN size ELSE 0 END + playbackSize),0)
+        FROM media_chunks)
         + (SELECT COALESCE(SUM(size),0) FROM archive_detached_playback);
     DROP TRIGGER IF EXISTS archive_usage_insert;
     DROP TRIGGER IF EXISTS archive_usage_delete;
@@ -126,19 +131,26 @@ export function ensureArchiveSchema(db: Db): void {
     CREATE TRIGGER IF NOT EXISTS archive_detached_usage_delete AFTER DELETE ON archive_detached_playback BEGIN
       UPDATE archive_storage_usage SET bytes = bytes - OLD.size WHERE singleton = 1;
     END;
-    CREATE TRIGGER archive_usage_insert AFTER INSERT ON media_chunks
-      WHEN NEW.unavailable = 0 BEGIN
-      UPDATE archive_storage_usage SET bytes = bytes + NEW.size + NEW.playbackSize WHERE singleton = 1;
+    CREATE TRIGGER archive_usage_insert AFTER INSERT ON media_chunks BEGIN
+      UPDATE archive_storage_usage SET bytes = bytes +
+        CASE WHEN NEW.unavailable = 0 THEN NEW.size ELSE 0 END + NEW.playbackSize WHERE singleton = 1;
     END;
-    CREATE TRIGGER archive_usage_delete AFTER DELETE ON media_chunks
-      WHEN OLD.unavailable = 0 BEGIN
-      UPDATE archive_storage_usage SET bytes = bytes - OLD.size - OLD.playbackSize WHERE singleton = 1;
+    CREATE TRIGGER archive_usage_delete AFTER DELETE ON media_chunks BEGIN
+      UPDATE archive_storage_usage SET bytes = bytes -
+        CASE WHEN OLD.unavailable = 0 THEN OLD.size ELSE 0 END - OLD.playbackSize WHERE singleton = 1;
     END;
     CREATE TRIGGER archive_usage_update AFTER UPDATE OF size,unavailable,playbackSize ON media_chunks BEGIN
-      UPDATE archive_storage_usage SET bytes = bytes - CASE WHEN OLD.unavailable = 0 THEN OLD.size + OLD.playbackSize ELSE 0 END
-        + CASE WHEN NEW.unavailable = 0 THEN NEW.size + NEW.playbackSize ELSE 0 END WHERE singleton = 1;
+      UPDATE archive_storage_usage SET bytes = bytes -
+        CASE WHEN OLD.unavailable = 0 THEN OLD.size ELSE 0 END - OLD.playbackSize
+        + CASE WHEN NEW.unavailable = 0 THEN NEW.size ELSE 0 END + NEW.playbackSize WHERE singleton = 1;
     END;
   `);
+  // A missing raw master can coexist with an intact, still-pinned pair copy.
+  // Reconcile one-time startup accounting after upgrading older unavailable rows.
+  db.exec(`UPDATE archive_storage_usage SET bytes =
+    (SELECT COALESCE(SUM(CASE WHEN unavailable = 0 THEN size ELSE 0 END + playbackSize),0)
+      FROM media_chunks)
+    + (SELECT COALESCE(SUM(size),0) FROM archive_detached_playback) WHERE singleton = 1`);
 }
 
 export function createArchiveStore(db: Db) {
@@ -158,11 +170,30 @@ export function createArchiveStore(db: Db) {
   } : raw && !c.pairId ? {
     ...c, playbackPath: null, playbackSize: 0, playbackOffset: 0, playbackDuration: null,
   } : c;
-  const pairValid = (pairId: string): boolean => !!db.prepare(`SELECT 1 FROM archive_playback_pairs p
-    JOIN media_chunks a ON a.id = p.priorId JOIN media_chunks b ON b.id = p.nextId
-    WHERE p.id = ? AND a.unavailable = 0 AND b.unavailable = 0
-      AND a.pairId = p.id AND b.pairId = p.id
-      AND a.playbackPath = p.priorPath AND b.playbackPath = p.nextPath`).get(pairId);
+  const pairValid = (pairId: string, memo = new Map<string, boolean>()): boolean => {
+    const chain: string[] = [], seen = new Set<string>();
+    let current: string | undefined = pairId;
+    let valid = true;
+    while (current) {
+      const cached = memo.get(current);
+      if (cached !== undefined) { valid = cached; break; }
+      if (seen.has(current) || chain.length >= 20_000) { valid = false; break; }
+      seen.add(current);
+      const pair = db.prepare(`SELECT p.priorId FROM archive_playback_pairs p
+        JOIN media_chunks a ON a.id = p.priorId JOIN media_chunks b ON b.id = p.nextId
+        WHERE p.id = ? AND a.unavailable = 0 AND b.unavailable = 0
+          AND a.pairId = p.id AND b.pairId = p.id
+          AND a.playbackPath = p.priorPath AND b.playbackPath = p.nextPath`)
+        .get(current) as { priorId: string } | undefined;
+      if (!pair) { valid = false; break; }
+      chain.push(current);
+      const priorSession = sessionOf(pair.priorId);
+      current = priorSession ? (db.prepare('SELECT id FROM archive_playback_pairs WHERE session = ?')
+        .get(priorSession) as { id: string } | undefined)?.id : undefined;
+    }
+    for (const id of chain) memo.set(id, valid);
+    return valid;
+  };
   const overlap = (channelId: string, start: number, end: number, raw = false, selectPairs = true) => {
     // A broken seam invalidates the clock of later chunks in that session too;
     // do not issue a partial raw/shifted ticket while recovery is pending.
@@ -170,7 +201,8 @@ export function createArchiveStore(db: Db) {
       LEFT JOIN media_chunks a ON a.id = p.priorId LEFT JOIN media_chunks b ON b.id = p.nextId
       WHERE a.channelId = ? OR b.channelId = ?`).all(channelId, channelId) as
       Array<{ id: string; priorId: string; session: string }>;
-    const broken = selectPairs ? pairs.filter(p => !pairValid(p.id)) : [];
+    const validity = new Map<string, boolean>();
+    const broken = selectPairs ? pairs.filter(p => !pairValid(p.id, validity)) : [];
     const selected = chunks(
       `SELECT * FROM media_chunks WHERE channelId = ? AND unavailable = 0
         AND (? = 1 OR playbackHidden = 0) ORDER BY end,rowid`, channelId, raw ? 1 : 0,
@@ -286,21 +318,24 @@ export function createArchiveStore(db: Db) {
         if (!selected?.pairId) return false;
         const order: Array<{ id: string; priorId: string; nextId: string; session: string }> = [];
         const seen = new Set<string>();
-        const visit = (pairId: string): boolean => {
-          if (seen.has(pairId) || seen.size >= 32) return false;
-          seen.add(pairId);
+        const pending: Array<{ id: string; pair?: (typeof order)[number] }> = [
+          { id: selected.pairId },
+        ];
+        while (pending.length) {
+          const item = pending.pop()!;
+          if (item.pair) { order.push(item.pair); continue; }
+          if (seen.has(item.id) || seen.size >= 20_000) return false;
+          seen.add(item.id);
           const pair = db.prepare(`SELECT id,priorId,nextId,session FROM archive_playback_pairs WHERE id = ?`)
-            .get(pairId) as (typeof order)[number] | undefined;
+            .get(item.id) as (typeof order)[number] | undefined;
           if (!pair) return false;
+          pending.push({ id: item.id, pair });
           const prefix = `${pair.session}-chunk-`;
           const dependents = db.prepare(`SELECT id FROM archive_playback_pairs WHERE id != ?
             AND substr(priorId,1,length(?)) = ? ORDER BY id`)
-            .all(pairId, prefix, prefix) as Array<{ id: string }>;
-          for (const dependent of dependents) if (!visit(dependent.id)) return false;
-          order.push(pair);
-          return true;
-        };
-        if (!visit(selected.pairId)) return false;
+            .all(item.id, prefix, prefix) as Array<{ id: string }>;
+          for (const dependent of dependents.reverse()) pending.push({ id: dependent.id });
+        }
         for (const pair of order) {
           const prior = getChunk(pair.priorId), next = getChunk(pair.nextId);
           if (!prior || !next || prior.unavailable || next.unavailable ||
@@ -469,7 +504,8 @@ export function createArchiveStore(db: Db) {
       return db.transaction(() => {
         if (!getChunk(id)) return 'absent';
         const referenced = db.prepare(`SELECT 1 FROM recording_chunk_refs WHERE chunkId = ? UNION ALL
-          SELECT 1 FROM archive_snapshot_chunks WHERE chunkId = ? LIMIT 1`).get(id, id);
+          SELECT 1 FROM archive_snapshot_chunks WHERE chunkId = ? UNION ALL
+          SELECT 1 FROM archive_playback_pairs WHERE priorId = ? OR nextId = ? LIMIT 1`).get(id, id, id, id);
         if (referenced) {
           db.prepare('UPDATE media_chunks SET unavailable = 1 WHERE id = ?').run(id);
           return 'quarantined';
@@ -497,8 +533,15 @@ export function createArchiveStore(db: Db) {
     totalUsageBytes(): number {
       return (db.prepare('SELECT bytes FROM archive_storage_usage WHERE singleton = 1').get() as { bytes: number }).bytes;
     },
-    detachedPlayback(): Array<{ path: string; size: number }> {
-      return db.prepare('SELECT path,size FROM archive_detached_playback ORDER BY path').all() as Array<{ path: string; size: number }>;
+    detachedPlayback(now = Date.now()): Array<{ path: string; size: number }> {
+      return db.prepare(`SELECT d.path,d.size FROM archive_detached_playback d
+        WHERE NOT EXISTS (SELECT 1 FROM archive_snapshot_chunks sc
+          JOIN archive_snapshots s ON s.id = sc.snapshotId
+          WHERE sc.playbackPath = d.path AND s.expiresAt > ?)
+        ORDER BY d.path`).all(now) as Array<{ path: string; size: number }>;
+    },
+    isDetachedPlayback(relative: string): boolean {
+      return !!db.prepare('SELECT 1 FROM archive_detached_playback WHERE path = ?').get(relative);
     },
     /** Call ONLY after deleting the detached file (or confirming it missing). */
     releaseDetachedPlayback(relative: string): void {
