@@ -225,8 +225,9 @@ export function createArchiveStore(db: Db) {
       ORDER BY s.ordinal`, id);
     const expected = (db.prepare('SELECT COUNT(*) AS count FROM archive_snapshot_chunks WHERE snapshotId = ?')
       .get(id) as { count: number }).count;
+    const validity = new Map<string, boolean>();
     return selected.length === expected && selected.length > 0 &&
-      selected.every(c => !c.pairId || pairValid(c.pairId)) ? { ...row, chunks: selected } : undefined;
+      selected.every(c => !c.pairId || pairValid(c.pairId, validity)) ? { ...row, chunks: selected } : undefined;
   };
   return {
     configure(channelId: string, channelName: string, enabled: boolean, retentionHours: number): ArchiveRow {
@@ -516,19 +517,53 @@ export function createArchiveStore(db: Db) {
     },
     overlap,
     coverage(channelId: string, raw = false, selectPairs = true) {
-      if (raw && !selectPairs) return db.prepare(`SELECT MIN(start) availableFrom, MAX(end) availableTo,
-        COALESCE(SUM(size + playbackSize),0) diskUsageBytes
+      const diskUsageBytes = (db.prepare(`SELECT COALESCE(SUM(
+        CASE WHEN unavailable = 0 THEN size ELSE 0 END + playbackSize),0) bytes
+        FROM media_chunks WHERE channelId = ?`).get(channelId) as { bytes: number }).bytes;
+      const rawRange = () => db.prepare(`SELECT MIN(start) availableFrom, MAX(end) availableTo
         FROM media_chunks WHERE channelId = ? AND unavailable = 0`).get(channelId) as
-        { availableFrom: number | null; availableTo: number | null; diskUsageBytes: number };
-      return db.prepare(`SELECT
-        MIN(CASE WHEN playbackHidden = 0 THEN COALESCE(presentationStart, start +
-          CASE WHEN playbackPath IS NOT NULL THEN playbackOffset * 1000 ELSE 0 END) END) availableFrom,
-        MAX(CASE WHEN playbackHidden = 0 THEN
-          COALESCE(presentationStart, start + CASE WHEN playbackPath IS NOT NULL THEN playbackOffset * 1000 ELSE 0 END)
-            + CASE WHEN playbackPath IS NOT NULL THEN COALESCE(playbackDuration,duration) ELSE duration END * 1000 END) availableTo,
-        COALESCE(SUM(size + playbackSize),0) diskUsageBytes
-        FROM media_chunks WHERE channelId = ? AND unavailable = 0`)
-        .get(channelId) as { availableFrom: number | null; availableTo: number | null; diskUsageBytes: number };
+        { availableFrom: number | null; availableTo: number | null };
+      if (raw && !selectPairs) return { ...rawRange(), diskUsageBytes };
+      const hasPair = db.prepare(`SELECT 1 FROM archive_playback_pairs p
+        JOIN media_chunks c ON c.id = p.nextId WHERE c.channelId = ? LIMIT 1`).get(channelId);
+      if (!hasPair) {
+        if (raw) return { ...rawRange(), diskUsageBytes };
+        const range = db.prepare(`SELECT
+          MIN(CASE WHEN playbackHidden = 0 THEN COALESCE(presentationStart, start +
+            CASE WHEN playbackPath IS NOT NULL THEN playbackOffset * 1000 ELSE 0 END) END) availableFrom,
+          MAX(CASE WHEN playbackHidden = 0 THEN
+            COALESCE(presentationStart, start + CASE WHEN playbackPath IS NOT NULL THEN playbackOffset * 1000 ELSE 0 END)
+              + CASE WHEN playbackPath IS NOT NULL THEN COALESCE(playbackDuration,duration) ELSE duration END * 1000 END) availableTo
+          FROM media_chunks WHERE channelId = ? AND unavailable = 0`).get(channelId) as
+          { availableFrom: number | null; availableTo: number | null };
+        return { ...range, diskUsageBytes };
+      }
+      // An unavailable pair also invalidates the shifted clock of its whole
+      // successor session and any descendant pair. Never advertise a range a
+      // ticket cannot select; keep unrelated earlier/later raw footage visible.
+      const validity = new Map<string, boolean>();
+      const sessions = new Map<string, string | null>();
+      let availableFrom: number | null = null, availableTo: number | null = null;
+      for (const row of chunks(`SELECT * FROM media_chunks WHERE channelId = ? AND unavailable = 0
+        AND (? = 1 OR playbackHidden = 0) ORDER BY end,rowid`, channelId, raw ? 1 : 0)) {
+        const session = sessionOf(row.id);
+        let sessionPair = session ? sessions.get(session) : null;
+        if (session && sessionPair === undefined) {
+          sessionPair = (db.prepare('SELECT id FROM archive_playback_pairs WHERE session = ?')
+            .get(session) as { id: string } | undefined)?.id ?? null;
+          sessions.set(session, sessionPair);
+        }
+        if ((row.pairId && !pairValid(row.pairId, validity)) ||
+            (sessionPair && !pairValid(sessionPair, validity))) continue;
+        const chunk = presentation(row, raw, selectPairs);
+        const start = chunk.presentationStart ?? chunk.start +
+          (chunk.playbackPath ? (chunk.playbackOffset ?? 0) * 1000 : 0);
+        const end = start + (chunk.playbackPath ?
+          (chunk.playbackDuration ?? chunk.duration) : chunk.duration) * 1000;
+        availableFrom = availableFrom === null ? start : Math.min(availableFrom, start);
+        availableTo = availableTo === null ? end : Math.max(availableTo, end);
+      }
+      return { availableFrom, availableTo, diskUsageBytes };
     },
     totalUsageBytes(): number {
       return (db.prepare('SELECT bytes FROM archive_storage_usage WHERE singleton = 1').get() as { bytes: number }).bytes;
@@ -563,7 +598,9 @@ export function createArchiveStore(db: Db) {
       db.transaction(() => {
         const selected = overlap(channelId, startTime, endTime, raw, selectPairs);
         if (!selected.length) throw new Error('No published chunks in this interval');
-        if (selected.some(c => c.pairId && !pairValid(c.pairId))) throw new Error('Archive pair is unavailable');
+        const validity = new Map<string, boolean>();
+        if (selected.some(c => c.pairId && !pairValid(c.pairId, validity)))
+          throw new Error('Archive pair is unavailable');
         if (selectPairs && db.prepare(`SELECT 1 FROM archive_playback_pairs p JOIN media_chunks a ON a.id = p.priorId
           JOIN media_chunks b ON b.id = p.nextId WHERE a.channelId = ? AND
           (a.start < ? AND a.end > ? OR b.start < ? AND b.end > ?) AND

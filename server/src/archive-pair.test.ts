@@ -46,7 +46,8 @@ describe('verified archive pair presentation', () => {
     store.publish({ id: priorId, channelId: 'one', start: 100_000, end: 120_000,
       duration: 20, path: 'session0-1.ts', size: 188, epoch: 0 });
     try {
-      for (let index = 1; index <= 40; index++) {
+      const count = process.env.STREAMVAULT_ARCHIVE_PAIR_STRESS === '1' ? 1_000 : 40;
+      for (let index = 1; index <= count; index++) {
         const prior = store.getChunk(priorId)!;
         const nextId = `session${index}-chunk-000000000.ts`;
         const tailId = `session${index}-chunk-000000001.ts`;
@@ -61,14 +62,20 @@ describe('verified archive pair presentation', () => {
           nextSize: 170, nextOffset: 6, nextDuration: 14 })).toBe(true);
         priorId = tailId;
       }
-      const newest = store.getChunk('session40-chunk-000000000.ts')!;
+      const newest = store.getChunk(`session${count}-chunk-000000000.ts`)!;
       expect(store.overlap('one', newest.presentationStart! + 2_000,
         newest.presentationStart! + 3_000, true).map(c => c.id)).toContain(newest.id);
+      if (process.env.STREAMVAULT_ARCHIVE_PAIR_STRESS === '1') {
+        const began = performance.now();
+        expect(store.createSnapshot('one', 100_000, newest.presentationStart! + 14_000,
+          Date.now(), Date.now() + 60_000, true).chunks.length).toBeGreaterThan(300);
+        expect(performance.now() - began).toBeLessThan(5_000);
+      }
       expect(store.restorePlaybackChainRaw('session1-chunk-000000000.ts', () => true)).toBe(true);
       expect(store.getChunk(newest.id)?.pairId).toBeNull();
       expect(store.getChunk('session1-chunk-000000000.ts')?.pairId).toBeNull();
     } finally { db.close(); }
-  });
+  }, 60_000);
   it('retires a later dependent pair before its source pair without corrupting the clock', () => {
     const { db, store, pair } = fixture(100_000, 108_000, 14, 6);
     try {
@@ -118,8 +125,10 @@ describe('verified archive pair presentation', () => {
       expect(archiveGaps(selected, 100_000, 156_000)).toEqual([]);
       expect(store.reconcileMissing(pair.nextId)).toBe('quarantined');
       expect(store.overlap('one', 149_000, 151_000, true)).toEqual([]);
+      expect(store.coverage('one').availableTo).toBe(100_000);
       store.markAvailable(pair.nextId);
       expect(store.overlap('one', 149_000, 151_000, true)).toHaveLength(1);
+      expect(store.coverage('one').availableTo).toBe(156_000);
       expect(store.restorePlaybackPairRaw(pair.nextId, () => true)).toBe(false);
       expect(store.restorePlaybackPairRaw(lastId, () => true)).toBe(true);
       expect(store.getChunk(tailId)?.presentationStart).toBe(128_000);

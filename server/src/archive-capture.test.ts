@@ -108,10 +108,12 @@ describe('stream-copy HLS capture', () => {
       expect(store.getChunk(ids[0])?.pairId).toBeTruthy();
       expect(store.totalUsageBytes()).toBe(3 * 188);
       expect(store.overlap('c', 100_000, 128_000, true)).toEqual([]);
+      expect(store.coverage('c').availableTo).toBeNull();
       fs.writeFileSync(path.join(root, raw[0]), Buffer.alloc(188, 0x47));
       new ArchiveCapture(store, root, 1).recover();
       expect(store.getChunk(ids[0])?.unavailable).toBe(0);
       expect(store.totalUsageBytes()).toBe(4 * 188);
+      expect(store.coverage('c').availableTo).toBe(128_000);
       expect(store.createSnapshot('c', 100_000, 128_000, Date.now(), Date.now() + 60000, true)
         .chunks.every(chunk => !!chunk.playbackPath)).toBe(true);
     } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
