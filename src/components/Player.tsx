@@ -685,6 +685,13 @@ export default function Player() {
       resetOSDTimer();
       switch (e.keyCode) {
         case KEY_CODES.ENTER:
+          // Let a focused action use the browser's native Enter-to-click.
+          // The player-wide retry shortcut must not steal the archive escape.
+          if (e.target instanceof HTMLButtonElement) return;
+          e.preventDefault();
+          if (playerState.status === 'error') retry();
+          else togglePlay();
+          break;
         case KEY_CODES.PLAY:
           e.preventDefault();
           if (playerState.status === 'error') retry();
@@ -798,7 +805,7 @@ export default function Player() {
 
         {/* Error display */}
         {playerState.status === 'error' && (
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center text-[#ff4757] animate-fade-in px-6 lg:px-0">
+          <div className="absolute z-[4] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center text-[#ff4757] animate-fade-in px-6 lg:px-0">
             <div className="text-48 mb-3">{'\u26A0'}</div>
             <h2 className="text-20 lg:text-26 font-bold mb-2">Playback Error</h2>
             <p className="text-15 lg:text-18 text-[#888] mb-2">{playerState.errorMessage}</p>
@@ -897,7 +904,7 @@ export default function Player() {
         )}
 
         {/* Click/tap/swipe zone — toggles OSD; mobile also handles channel-switch swipes */}
-        {SHOW_OSD_CONTROLS && (
+        {SHOW_OSD_CONTROLS && playerState.status !== 'error' && (
           <div
             className="absolute inset-0 z-[2]"
             onClick={handleTapZone}
