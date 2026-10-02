@@ -207,8 +207,8 @@ export class ArchiveCapture {
       this.seamWorkAbort = controller;
       this.seamWorkChannel = chunk.channelId;
       const signal = AbortSignal.any([this.seamAbort.signal, controller.signal]);
-      const work = (process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1' ? this.processPair : this.processSeam)
-        (this.store, this.root, id, Date.now(), reserve, maximum, signal)
+      const processor = process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1' ? this.processPair : this.processSeam;
+      const work = processor(this.store, this.root, id, Date.now(), reserve, maximum, signal)
         .then(() => {}, () => {
           if (!this.stopping) logger.warn('Archive seam check failed; captured media preserved');
         })
@@ -467,7 +467,21 @@ export class ArchiveCapture {
     const id = `${session}-${name}`;
     this.store.publish({ id, channelId, start, end, duration,
       path: path.relative(this.root, absolute), size: stat.size, epoch });
-    if (this.store.getArchive(channelId)?.enabled && name === 'chunk-000000000.ts') this.enqueueSeam(id, true);
+    if (this.store.getArchive(channelId)?.enabled && name === 'chunk-000000000.ts') {
+      this.enqueueSeam(id, true);
+      // The previous session's first chunk was initially queued while that
+      // session was still open. Its finite timeline becomes provable only
+      // after this new session publishes its first chunk.
+      if (this.pairCanRun(channelId)) {
+        const previousChunk = this.store.previousChunk(id);
+        const previousSession = previousChunk?.id.split('-chunk-')[0];
+        if (previousSession && previousSession !== session) {
+          const first = this.store.getChunk(`${previousSession}-chunk-000000000.ts`);
+          if (first && !first.pairId && !first.unavailable && first.channelId === channelId)
+            this.enqueueSeam(first.id, true);
+        }
+      }
+    }
     if (writer) {
       writer.epoch = epoch;
       writer.lastPublishedAt = Date.now();

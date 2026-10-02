@@ -595,6 +595,36 @@ describe('stream-copy HLS capture', () => {
       db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  it('requeues the previous completed session when the next session first chunk closes it', async () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('one', 'One', true, 24);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-pair-handoff-'));
+    const older = '11111111-1111-4111-8111-111111111111';
+    const newer = '22222222-2222-4222-8222-222222222222';
+    const first = `${older}-chunk-000000000.ts`;
+    const tail = `${older}-chunk-000000001.ts`;
+    const now = Date.now();
+    store.publish({ id: first, channelId: 'one', start: now - 60_000,
+      end: now - 40_000, duration: 20, path: 'first.ts', size: 188, epoch: 1 });
+    store.publish({ id: tail, channelId: 'one', start: now - 40_000,
+      end: now - 20_000, duration: 20, path: 'tail.ts', size: 188, epoch: 1 });
+    const dir = path.join(root, 'archive', 'one', newer);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'chunk-000000000.ts'), Buffer.alloc(188, 0x47));
+    const capture = new ArchiveCapture(store, root, 1);
+    vi.useFakeTimers({ now }); vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '1');
+    vi.stubEnv('STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS', 'one');
+    try {
+      (capture as unknown as { publishFile: (channelId: string, directory: string,
+        name: string, duration: number, discontinuity: boolean) => void })
+        .publishFile('one', dir, 'chunk-000000000.ts', 20, false);
+      const queued = (capture as unknown as { seamQueue: string[] }).seamQueue;
+      expect(queued).toContain(first);
+      expect(queued).toContain(`${newer}-chunk-000000000.ts`);
+      await capture.stopAll();
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllEnvs();
+      db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
   it('drops queued repair work when raw fallback activates before dispatch', async () => {
     const db = new Database(':memory:'); ensureArchiveSchema(db);
     const store = createArchiveStore(db); store.configure('espn', 'ESPN', true, 24);
