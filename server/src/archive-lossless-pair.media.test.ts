@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { prepareLosslessPair, lowPriorityMediaCommand, rawTransportContinues } from './archive-lossless-pair-media.js';
+import { prepareLosslessPair, lowPriorityMediaCommand, rawTransportContinues,
+  rawMediaClockContinues } from './archive-lossless-pair-media.js';
 
 const ffmpeg = (args: string[]) => execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', ...args], { timeout: 30000 });
 const hashes = (file: string, stream: number): string[] => {
@@ -76,6 +77,11 @@ describe('verified stream-copy pair', () => {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-following-'));
         try {
           expect(await rawTransportContinues(path.join(base, 'next.ts'), path.join(base, 'after.ts'))).toBe(true);
+          expect(await rawMediaClockContinues(path.join(base, 'next.ts'), path.join(base, 'after.ts'))).toBe(true);
+          const delayed = path.join(dir, 'delayed.ts');
+          ffmpeg(['-itsoffset', '2', '-i', path.join(base, 'after.ts'), '-map', '0:v:0', '-map', '0:a:0',
+            '-c', 'copy', '-f', 'mpegts', delayed]);
+          expect(await rawMediaClockContinues(path.join(base, 'next.ts'), delayed)).toBe(false);
           const changed = fs.readFileSync(path.join(base, 'after.ts'));
           const packet = changed.findIndex((byte, index) => index % 188 === 0 && byte === 0x47 &&
             ((((changed[index + 1] ?? 0) & 31) << 8) | (changed[index + 2] ?? 0)) === 256 &&

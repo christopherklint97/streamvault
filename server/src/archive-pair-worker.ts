@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ArchiveStore, ArchiveChunk } from './archive-store.js';
-import { prepareLosslessPair, rawTransportContinues } from './archive-lossless-pair-media.js';
+import { prepareLosslessPair, rawTransportContinues,
+  rawMediaClockContinues } from './archive-lossless-pair-media.js';
+import { planVerifiedPairTimeline } from './archive-pair-timeline.js';
 
 const MAX_INPUT_BYTES = 64 * 1024 * 1024;
 const EXTRA_WORK_MULTIPLIER = 8; // staged elementary streams, muxes and two final copies
@@ -19,7 +21,8 @@ export function pairEnabledFor(channelId: string, rawMode: string | undefined,
 export async function processArchivePair(store: ArchiveStore, root: string, id: string,
   _now = Date.now(), reserveBytes = 20 * 1024 ** 3, maximumBytes = 400 * 1024 ** 3,
   signal?: AbortSignal, prepare: typeof prepareLosslessPair = prepareLosslessPair,
-  flags?: { rawMode?: string; allowlist?: string }): Promise<boolean> {
+  flags?: { rawMode?: string; allowlist?: string;
+    clockContinues?: typeof rawMediaClockContinues }): Promise<boolean> {
   const current = store.getChunk(id);
   if (!current || !id.endsWith('-chunk-000000000.ts')) return false;
   const canRun = () => !signal?.aborted && pairEnabledFor(current.channelId,
@@ -34,6 +37,15 @@ export async function processArchivePair(store: ArchiveStore, root: string, id: 
   const following = store.getChunk(followingId);
   if (!following || following.unavailable || following.channelId !== current.channelId ||
       following.epoch !== current.epoch || following.end <= current.end) return false;
+  const sessionId = id.split('-chunk-')[0];
+  const session = store.indexedChunks().filter(chunk => chunk.channelId === current.channelId &&
+    chunk.id.startsWith(`${sessionId}-chunk-`)).sort((a, b) => a.id.localeCompare(b.id));
+  if (session.length < 2 || session.length > 14 || session[0].id !== id) return false;
+  // Do not pin a clock for a session that can still append another chunk.
+  // A newly indexed first chunk in a different epoch proves a handoff.
+  if (!store.indexedChunks().some(chunk => chunk.channelId === current.channelId &&
+      chunk.epoch !== current.epoch && chunk.id.endsWith('-chunk-000000000.ts') &&
+      chunk.end > session.at(-1)!.end && !chunk.unavailable)) return false;
   const realRoot = await fs.realpath(root);
   const source = async (chunk: ArchiveChunk) => {
     const absolute = path.resolve(realRoot, chunk.path);
@@ -44,8 +56,12 @@ export async function processArchivePair(store: ArchiveStore, root: string, id: 
       throw new Error('Unsafe archive source size');
     return { absolute, stat };
   };
-  const [prior, next, after] = await Promise.all([source(previous), source(current), source(following)]);
-  if (!await rawTransportContinues(next.absolute, after.absolute)) return false;
+  const [prior, sources] = await Promise.all([source(previous), Promise.all(session.map(source))]);
+  const next = sources[0];
+  for (let index = 1; index < sources.length; index++)
+    if (!await rawTransportContinues(sources[index - 1].absolute, sources[index].absolute) ||
+        !await (flags?.clockContinues ?? rawMediaClockContinues)(
+          sources[index - 1].absolute, sources[index].absolute)) return false;
   const maximumWork = Math.ceil((prior.stat.size + next.stat.size) * EXTRA_WORK_MULTIPLIER);
   const free = async () => { const disk = await fs.statfs(realRoot); return disk.bavail * disk.bsize; };
   if ((await free()) <= reserveBytes + maximumWork ||
@@ -65,6 +81,9 @@ export async function processArchivePair(store: ArchiveStore, root: string, id: 
     if (!canRun()) return false;
     const result = await prepare(prior.absolute, next.absolute, priorOut.absolute, nextOut.absolute, signal);
     if (!result || !canRun()) return false;
+    const starts = planVerifiedPairTimeline(previous.presentationStart ?? previous.start, result.cut.previousOffset,
+      result.cut.offset, session, session.slice(1).map(() => true));
+    if (!starts) return false;
     const currentPrior = store.getChunk(previous.id), currentNext = store.getChunk(current.id);
     const currentAfter = store.getChunk(followingId);
     if (!store.getArchive(current.channelId)?.enabled || !currentPrior || !currentNext || !currentAfter ||
@@ -72,14 +91,22 @@ export async function processArchivePair(store: ArchiveStore, root: string, id: 
         currentPrior.path !== previous.path || currentNext.path !== current.path ||
         currentAfter.path !== following.path || currentAfter.size !== following.size ||
         currentPrior.size !== previous.size || currentNext.size !== current.size) return false;
-    const [priorAfter, nextAfter, followingAfter, first, second] = await Promise.all([
-      fs.stat(prior.absolute), fs.stat(next.absolute), fs.stat(after.absolute),
+    const [priorAfter, finalSources, first, second] = await Promise.all([
+      fs.stat(prior.absolute), Promise.all(sources.map(item => fs.stat(item.absolute))),
       fs.stat(priorOut.absolute), fs.stat(nextOut.absolute),
     ]);
-    if (![priorAfter, nextAfter, followingAfter].every((stat, index) =>
-        stat.isFile() && stat.size === [prior, next, after][index].stat.size &&
-        stat.mtimeMs === [prior, next, after][index].stat.mtimeMs &&
-        stat.ino === [prior, next, after][index].stat.ino) ||
+    const finalSession = store.indexedChunks().filter(chunk => chunk.channelId === current.channelId &&
+      chunk.id.startsWith(`${sessionId}-chunk-`)).sort((a, b) => a.id.localeCompare(b.id));
+    if (!priorAfter.isFile() || priorAfter.size !== prior.stat.size ||
+        priorAfter.mtimeMs !== prior.stat.mtimeMs || priorAfter.ino !== prior.stat.ino ||
+        finalSession.length !== session.length ||
+        finalSession.some((chunk, index) => chunk.id !== session[index].id ||
+          chunk.path !== session[index].path || chunk.size !== session[index].size ||
+          chunk.duration !== session[index].duration || chunk.epoch !== session[index].epoch ||
+          chunk.unavailable) ||
+        !finalSources.every((stat, index) =>
+          stat.isFile() && stat.size === sources[index].stat.size &&
+          stat.mtimeMs === sources[index].stat.mtimeMs && stat.ino === sources[index].stat.ino) ||
         !first.isFile() || !second.isFile() ||
         first.size !== result.sizes[0] || second.size !== result.sizes[1] ||
         !Number.isSafeInteger(first.size) || !Number.isSafeInteger(second.size) ||
@@ -92,6 +119,7 @@ export async function processArchivePair(store: ArchiveStore, root: string, id: 
       priorPath: priorOut.relative, priorSize: first.size, priorCut: result.cut.previousOffset,
       nextPath: nextOut.relative, nextSize: second.size, nextOffset: result.cut.offset,
       nextDuration: current.duration - result.cut.offset,
+      sessionTimeline: session.map((chunk, index) => ({ id: chunk.id, presentationStart: starts[index] })),
     });
     if (committed) for (const old of [previous.playbackPath, current.playbackPath]) {
       if (!old || !old.endsWith('.playback.ts')) continue;

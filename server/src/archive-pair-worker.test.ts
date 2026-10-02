@@ -6,7 +6,7 @@ import path from 'node:path';
 import { pairEnabledFor, processArchivePair } from './archive-pair-worker.js';
 import { createArchiveStore, ensureArchiveSchema } from './archive-store.js';
 
-function fixture(sample?: string, kind: 'f1' | 'espn' = 'f1', following = true) {
+function fixture(sample?: string, kind: 'f1' | 'espn' = 'f1', following = true, closed = true) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-pair-worker-'));
   const db = new Database(':memory:'); ensureArchiveSchema(db);
   const store = createArchiveStore(db); store.configure('one', 'One', true, 24);
@@ -51,6 +51,15 @@ function fixture(sample?: string, kind: 'f1' | 'espn' = 'f1', following = true) 
     store.publish({ id: nextId.replace('000000000.ts', '000000001.ts'), channelId: 'one',
       start: afterStart, end: afterStart + 20_000, duration: 20, path: afterPath,
       size: fs.statSync(path.join(root, afterPath)).size, epoch: 2 });
+    if (closed) {
+      const laterId = '33333333-3333-4333-8333-333333333333-chunk-000000000.ts';
+      const laterPath = raw(laterId);
+      fs.mkdirSync(path.dirname(path.join(root, laterPath)), { recursive: true });
+      fs.writeFileSync(path.join(root, laterPath), Buffer.alloc(188, 0x47));
+      store.publish({ id: laterId, channelId: 'one', start: afterStart + 40_000,
+        end: afterStart + 60_000, duration: 20, path: laterPath,
+        size: fs.statSync(path.join(root, laterPath)).size, epoch: 3 });
+    }
   }
   return { root, db, store, priorId, nextId, prior, next, close: () => {
     db.close(); fs.rmSync(root, { recursive: true, force: true });
@@ -84,7 +93,24 @@ describe('bounded archive pair canary', () => {
     try {
       const prepare = async () => { throw new Error('must not prepare before following chunk'); };
       expect(await processArchivePair(f.store, f.root, f.nextId, Date.now(), 1000, 100000,
-        undefined, prepare, { rawMode: '1', allowlist: 'one' })).toBe(false);
+        undefined, prepare, { rawMode: '1', allowlist: 'one', clockContinues: async () => true })).toBe(false);
+    } finally { f.close(); }
+  });
+  it('does not publish a timeline while the successor session is still open', async () => {
+    const f = fixture(undefined, 'f1', true, false);
+    try {
+      const prepare = async () => { throw new Error('must not prepare an open session'); };
+      expect(await processArchivePair(f.store, f.root, f.nextId, Date.now(), 1000, 100000,
+        undefined, prepare, { rawMode: '1', allowlist: 'one', clockContinues: async () => true })).toBe(false);
+    } finally { f.close(); }
+  });
+  it('rejects a successor whose video or audio presentation clock jumps despite intact TS counters', async () => {
+    const f = fixture();
+    try {
+      const prepare = async () => { throw new Error('must not prepare a timestamp jump'); };
+      expect(await processArchivePair(f.store, f.root, f.nextId, Date.now(), 1000, 100000,
+        undefined, prepare, { rawMode: '1', allowlist: 'one', clockContinues: async () => false })).toBe(false);
+      expect(f.store.getChunk(f.nextId)?.playbackPath).toBeNull();
     } finally { f.close(); }
   });
   it('publishes both immutable derivatives under one pair identity and preserves raw masters', async () => {
@@ -99,7 +125,7 @@ describe('bounded archive pair canary', () => {
           droppedDamagedPictures: 0 }, sizes: [188, 188] as [number, number] };
       };
       expect(await processArchivePair(f.store, f.root, f.nextId, Date.now(), 1000, 100000,
-        undefined, prepare, { rawMode: '1', allowlist: 'one' })).toBe(true);
+        undefined, prepare, { rawMode: '1', allowlist: 'one', clockContinues: async () => true })).toBe(true);
       const prior = f.store.getChunk(f.priorId)!; const next = f.store.getChunk(f.nextId)!;
       expect(prior.playbackPath).toMatch(/\.pair\.playback\.ts$/);
       expect(next.playbackPath).toMatch(/\.pair\.playback\.ts$/);
@@ -108,7 +134,25 @@ describe('bounded archive pair canary', () => {
       expect(fs.statSync(path.join(f.root, prior.playbackPath!)).size).toBe(188);
       expect(fs.statSync(path.join(f.root, next.playbackPath!)).size).toBe(188);
       expect(fs.readFileSync(path.join(f.root, f.prior))).toEqual(previousRaw);
-      expect(f.store.totalUsageBytes()).toBe(1316);
+      expect(f.store.totalUsageBytes()).toBe(1504);
+    } finally { f.close(); }
+  });
+  it('plans a successor against the predecessor’s shifted presentation clock', async () => {
+    const f = fixture();
+    try {
+      f.db.prepare('UPDATE media_chunks SET presentationStart = ? WHERE id = ?').run(95_000, f.priorId);
+      const prepare = async (_previous: string, _next: string, priorOut: string, nextOut: string) => {
+        fs.writeFileSync(priorOut, Buffer.alloc(188, 0x47));
+        fs.writeFileSync(nextOut, Buffer.alloc(188, 0x47));
+        return { cut: { videoBefore: 80, audioBefore: 120, videoAfter: 80, audioAfter: 120,
+          videoOverlapStart: 0, audioOverlapStart: 0, offset: 6, previousOffset: 14,
+          droppedDamagedPictures: 0 }, sizes: [188, 188] as [number, number] };
+      };
+      expect(await processArchivePair(f.store, f.root, f.nextId, Date.now(), 1000, 100000,
+        undefined, prepare, { rawMode: '1', allowlist: 'one', clockContinues: async () => true })).toBe(true);
+      expect(f.store.getChunk(f.priorId)?.presentationStart).toBe(95_000);
+      expect(f.store.getChunk(f.nextId)?.presentationStart).toBe(109_000);
+      expect(f.store.getChunk(f.nextId.replace('000000000.ts', '000000001.ts'))?.presentationStart).toBe(123_000);
     } finally { f.close(); }
   });
   it('releases a replaced unpinned legacy derivative from the physical quota only after unlink', async () => {
@@ -125,10 +169,10 @@ describe('bounded archive pair canary', () => {
           droppedDamagedPictures: 0 }, sizes: [188, 188] as [number, number] };
       };
       expect(await processArchivePair(f.store, f.root, f.nextId, Date.now(), 1000, 100000,
-        undefined, prepare, { rawMode: '1', allowlist: 'one' })).toBe(true);
+        undefined, prepare, { rawMode: '1', allowlist: 'one', clockContinues: async () => true })).toBe(true);
       expect(fs.existsSync(path.join(f.root, legacy))).toBe(false);
       expect(f.store.detachedPlayback()).toEqual([]);
-      expect(f.store.totalUsageBytes()).toBe(1316);
+      expect(f.store.totalUsageBytes()).toBe(1504);
     } finally { f.close(); }
   });
   it('does no work under a full disk reserve or exhausted indexed-media cap', async () => {
@@ -138,7 +182,7 @@ describe('bounded archive pair canary', () => {
       const prepare = async () => { called = true; throw new Error('must not run'); };
       for (const [reserve, cap] of [[Number.MAX_SAFE_INTEGER, 100000], [1000, 376]]) {
         expect(await processArchivePair(f.store, f.root, f.nextId, Date.now(), reserve, cap,
-          undefined, prepare, { rawMode: '1', allowlist: 'one' })).toBe(false);
+          undefined, prepare, { rawMode: '1', allowlist: 'one', clockContinues: async () => true })).toBe(false);
       }
       expect(called).toBe(false);
       expect(f.store.getChunk(f.nextId)?.playbackPath).toBeNull();
@@ -156,7 +200,7 @@ describe('bounded archive pair canary', () => {
           droppedDamagedPictures: 0 }, sizes: [188, 188] as [number, number] };
       };
       expect(await processArchivePair(f.store, f.root, f.nextId, Date.now(), 1000, 100000,
-        undefined, prepare, { rawMode: '1', allowlist: 'one' })).toBe(false);
+        undefined, prepare, { rawMode: '1', allowlist: 'one', clockContinues: async () => true })).toBe(false);
       expect(f.store.getChunk(f.priorId)?.playbackPath).toBeNull();
       expect(f.store.getChunk(f.nextId)?.playbackPath).toBeNull();
       const listed = fs.readdirSync(path.join(f.root, path.dirname(f.next)));
@@ -177,7 +221,7 @@ describe('bounded archive pair canary', () => {
         const ticket = f.store.createSnapshot('one', 100_000, 130_000, now, now + 60000, true);
         const followingId = f.nextId.replace('000000000.ts', '000000001.ts');
         expect(ticket.chunks.map(chunk => chunk.id)).toEqual([f.priorId, f.nextId, followingId]);
-        expect(ticket.chunks.map(chunk => chunk.presentationStart)).toEqual([100_000, 113_440, 126_120]);
+        expect(ticket.chunks.map(chunk => chunk.presentationStart)).toEqual([100_000, 113_440, 121_120]);
         expect(ticket.chunks.slice(0, 2).every(chunk => chunk.playbackPath?.endsWith('.pair.playback.ts'))).toBe(true);
         expect(ticket.chunks[2].playbackPath).toBeNull();
       } finally { f.close(); }
@@ -189,11 +233,13 @@ describe('bounded archive pair canary', () => {
         expect(await processArchivePair(f.store, f.root, f.nextId, Date.now(), 1000,
           400 * 1024 ** 3, undefined, undefined, { rawMode: '1', allowlist: 'one' })).toBe(true);
         const now = Date.now();
-        const ticket = f.store.createSnapshot('one', 100_000, 130_000, now, now + 60000, true);
-        expect(ticket.chunks.map(chunk => chunk.id)).toEqual([f.priorId, f.nextId]);
+        const ticket = f.store.createSnapshot('one', 100_000, 160_000, now, now + 60000, true);
+        expect(ticket.chunks.map(chunk => chunk.id)).toEqual([
+          f.priorId, f.nextId, f.nextId.replace('000000000.ts', '000000001.ts')]);
         expect(ticket.chunks[0].presentationStart).toBe(100_000);
         expect(ticket.chunks[1].presentationStart).toBeCloseTo(114_781.433, 3);
-        expect(ticket.chunks.every(chunk => chunk.playbackPath?.endsWith('.pair.playback.ts'))).toBe(true);
+        expect(ticket.chunks[2].presentationStart).toBeCloseTo(130_730.7, 3);
+        expect(ticket.chunks.slice(0, 2).every(chunk => chunk.playbackPath?.endsWith('.pair.playback.ts'))).toBe(true);
       } finally { f.close(); }
     }, 120000);
 });

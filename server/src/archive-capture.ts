@@ -351,7 +351,7 @@ export class ArchiveCapture {
       const playbackValid = !chunk.playbackPath || validFile(chunk.playbackPath);
       if (!rawValid || !playbackValid) {
         const result = rawValid
-          ? chunk.pairId && this.store.restorePlaybackPairRaw(chunk.id, validFile)
+          ? chunk.pairId && this.store.restorePlaybackChainRaw(chunk.id, validFile)
             ? 'restored_raw_pair' : this.store.reconcilePlaybackMissing(chunk.id)
           : this.store.reconcileMissing(chunk.id);
         logger.warn(`Archive ${chunk.channelId}: missing indexed segment ${chunk.id} (${result})`);
@@ -362,13 +362,18 @@ export class ArchiveCapture {
       const root = fs.realpathSync(this.root);
       for (const detached of this.store.detachedPlayback()) {
         const absolute = path.resolve(root, detached.path);
-        if (!absolute.startsWith(root + path.sep)) continue;
+        if (!absolute.startsWith(root + path.sep) || !detached.path.endsWith('.playback.ts')) continue;
         try {
-          if (fs.existsSync(absolute)) {
+          let exists = false;
+          try { fs.lstatSync(absolute); exists = true; }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          if (exists) {
             const parent = fs.realpathSync(path.dirname(absolute));
             if (!parent.startsWith(root + path.sep)) continue;
-            fs.rmSync(absolute, { force: true });
+            fs.unlinkSync(absolute);
           }
+          try { fs.lstatSync(absolute); throw new Error('Detached file remains'); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
           this.store.releaseDetachedPlayback(detached.path);
         } catch { logger.warn('Archive detached presentation cleanup deferred'); }
       }

@@ -76,6 +76,49 @@ describe('stream-copy HLS capture', () => {
       expect(rawTicket.chunks.every(chunk => !chunk.playbackPath)).toBe(true);
     } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
+  it('restores a broken upstream pair and its dependent downstream pair as one raw chain', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-pair-chain-restart-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('c', 'C', true, 24);
+    const sessions = [
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+      '33333333-3333-4333-8333-333333333333',
+    ];
+    const ids = [
+      `${sessions[0]}-chunk-000000006.ts`, `${sessions[1]}-chunk-000000000.ts`,
+      `${sessions[1]}-chunk-000000001.ts`, `${sessions[2]}-chunk-000000000.ts`,
+    ];
+    const relative = (id: string, derivative = false) => path.join('archive', 'c',
+      id.split('-chunk-')[0], `chunk-${id.split('-chunk-')[1].replace(/\.ts$/, '')}${derivative ? '.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.pair.playback' : ''}.ts`);
+    const raw = ids.map(id => relative(id));
+    const copy = ids.map(id => relative(id, true));
+    try {
+      for (const file of [...raw, ...copy]) {
+        fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+        fs.writeFileSync(path.join(root, file), Buffer.alloc(188, 0x47));
+      }
+      for (const [index, start, end, epoch] of [
+        [0, 100_000, 120_000, 1], [1, 108_000, 128_000, 2],
+        [2, 133_000, 153_000, 2], [3, 145_000, 165_000, 3],
+      ] as const) store.publish({ id: ids[index], channelId: 'c', start, end,
+        duration: 20, path: raw[index], size: 188, epoch });
+      expect(store.publishPlaybackPair({ priorId: ids[0], nextId: ids[1],
+        priorRawPath: raw[0], nextRawPath: raw[1], priorPath: copy[0], priorSize: 188, priorCut: 14,
+        nextPath: copy[1], nextSize: 188, nextOffset: 6, nextDuration: 14,
+        sessionTimeline: [{ id: ids[1], presentationStart: 114_000 },
+          { id: ids[2], presentationStart: 128_000 }] })).toBe(true);
+      expect(store.publishPlaybackPair({ priorId: ids[2], nextId: ids[3],
+        priorRawPath: raw[2], nextRawPath: raw[3], priorPath: copy[2], priorSize: 188, priorCut: 14,
+        nextPath: copy[3], nextSize: 188, nextOffset: 6, nextDuration: 14 })).toBe(true);
+      fs.unlinkSync(path.join(root, copy[0]));
+      new ArchiveCapture(store, root, 1).recover();
+      expect(ids.map(id => store.getChunk(id)?.pairId)).toEqual([null, null, null, null]);
+      expect(ids.map(id => store.getChunk(id)?.path)).toEqual(raw);
+      expect(store.detachedPlayback()).toEqual([]);
+      expect(store.totalUsageBytes()).toBe(4 * 188);
+    } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
   it('sends the capture session tag alongside authentication on a real FFmpeg HTTP request', async () => {
     const session = '11111111-1111-4111-8111-111111111111';
     let observed: { session?: string; auth?: string } = {};

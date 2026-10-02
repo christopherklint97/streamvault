@@ -31,7 +31,10 @@ export function createArchiveRouter(deps: {
     // database error is diagnostic-only and must never be returned to clients.
     const error = row.status === 'storage_low' ? 'Archive storage low or unavailable' :
       row.status === 'retrying' ? 'Archive source disconnected; reconnecting' : null;
-    return { ...row, error, enabled: row.enabled === 1, ...store.coverage(channelId) };
+    const raw = process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1';
+    const selectPairs = !raw || pairEnabledFor(channelId, process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK,
+      process.env.STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS);
+    return { ...row, error, enabled: row.enabled === 1, ...store.coverage(channelId, raw, selectPairs) };
   };
   router.get('/api/archives', requireAuth, (_req, res) => {
     res.json({ archives: store.archives().map(row => view(row.channelId)) });
@@ -77,14 +80,15 @@ export function createArchiveRouter(deps: {
     }
     const now = Date.now();
     const raw = process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1';
-    const selected = store.overlap(channelId, startTime, endTime, raw);
+    const selectPairs = !raw || pairEnabledFor(channelId, process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK,
+      process.env.STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS);
+    const selected = store.overlap(channelId, startTime, endTime, raw, selectPairs);
     if (!selected.length) { res.status(404).json({ error: 'No published archive coverage' }); return; }
     const expiresAt = now + LEASE_MS;
-    const snapshot = store.createSnapshot(channelId, startTime, endTime, now, expiresAt, raw);
+    const snapshot = store.createSnapshot(channelId, startTime, endTime, now, expiresAt, raw, selectPairs);
     const effectiveStart = playableStart(snapshot.chunks[0]);
     const effectiveEnd = playableEnd(snapshot.chunks.at(-1)!);
-    if (!raw || pairEnabledFor(channelId, process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK,
-      process.env.STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS))
+    if (selectPairs)
       deps.prioritize?.(channelId, startTime, endTime);
     const ticket = createArchiveTicket(snapshot.id, secret, expiresAt);
     res.set('Cache-Control', 'no-store').json({ url: `/api/archive/snapshots/${snapshot.id}/index.m3u8?ticket=${ticket}`,

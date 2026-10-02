@@ -43,6 +43,44 @@ function execMedia(tool: 'ffprobe' | 'ffmpeg', args: string[], options: {
   const { file, args: argv } = lowPriorityMediaCommand(tool, args);
   return exec(file, argv, options);
 }
+/** Reject a continuous TS counter sequence if either elementary presentation
+ * clock jumps or rewinds. A transport counter alone does not prove there is no
+ * missing or repeated video/audio between successor chunks. */
+export async function rawMediaClockContinues(current: string, following: string): Promise<boolean> {
+  const bounds = async (file: string) => {
+    const stat = await fs.stat(file);
+    if (!stat.isFile() || !stat.size || stat.size > 64 * 1024 * 1024) return undefined;
+    const { stdout } = await execMedia('ffprobe', ['-v', 'error', '-show_streams', '-show_packets',
+      '-show_entries', 'stream=index,codec_type,codec_name:packet=stream_index,pts_time',
+      '-of', 'json', file], { timeout: 20_000, maxBuffer: 4 * 1024 * 1024 });
+    const parsed = JSON.parse(stdout) as {
+      streams: Array<{ index: number; codec_type: string; codec_name: string }>;
+      packets: Array<{ stream_index: number; pts_time?: string }>;
+    };
+    if (parsed.streams.length !== 2 || !parsed.packets.length || parsed.packets.length > 20_000) return undefined;
+    const stream = (type: string, codec: string) => parsed.streams.find(s =>
+      s.codec_type === type && s.codec_name === codec)?.index;
+    const video = stream('video', 'h264'), audio = stream('audio', 'aac');
+    if (video === undefined || audio === undefined) return undefined;
+    const range = (index: number) => {
+      let first = Infinity, last = -Infinity, count = 0;
+      for (const packet of parsed.packets) if (packet.stream_index === index) {
+        const time = Number(packet.pts_time);
+        if (!Number.isFinite(time)) return undefined;
+        first = Math.min(first, time); last = Math.max(last, time); count++;
+      }
+      return count > 1 ? { first, last } : undefined;
+    };
+    const v = range(video), a = range(audio);
+    return v && a ? { video: v, audio: a } : undefined;
+  };
+  const [before, after] = await Promise.all([bounds(current), bounds(following)]);
+  if (!before || !after) return false;
+  return (['video', 'audio'] as const).every(stream => {
+    const gap = after[stream].first - before[stream].last;
+    return gap >= -0.1 && gap <= 0.125;
+  });
+}
 type Packet = { stream_index: number; pts_time: string; dts_time: string; flags: string; data_hash: string };
 type Inventory = { video: Array<VideoSignature & { dts: number }>; audio: Array<AudioSignature & { dts: number }> };
 

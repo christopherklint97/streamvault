@@ -38,7 +38,7 @@ export function verifyArchiveTicket(ticket: unknown, scope: string, secret: Buff
   } catch { return false; }
 }
 
-export function playableStart(chunk: ArchiveChunk): number { return chunk.start + (chunk.playbackPath ? (chunk.playbackOffset ?? 0) * 1000 : 0); }
+export function playableStart(chunk: ArchiveChunk): number { return chunk.presentationStart ?? chunk.start + (chunk.playbackPath ? (chunk.playbackOffset ?? 0) * 1000 : 0); }
 export function playableDuration(chunk: ArchiveChunk): number { return chunk.playbackPath ? (chunk.playbackDuration ?? chunk.duration) : chunk.duration; }
 export function playableEnd(chunk: ArchiveChunk): number { return playableStart(chunk) + playableDuration(chunk) * 1000; }
 
@@ -61,8 +61,12 @@ export function buildArchiveVod(chunks: ArchiveChunk[], segmentUrl: (id: string)
   for (const chunk of chunks) {
     const priorSession = previous?.id.split('-chunk-')[0];
     const session = chunk.id.split('-chunk-')[0];
-    if (previous && (chunk.epoch !== previous.epoch || session !== priorSession ||
-      Math.abs(playableStart(chunk) - playableEnd(previous)) > 1000)) lines.push('#EXT-X-DISCONTINUITY');
+    const insidePair = !!previous && previous.pairId != null && previous.pairId === chunk.pairId &&
+      previous.pairRole === 'prior' && chunk.pairRole === 'next';
+    if (previous && !insidePair && (chunk.pairRole === 'prior' ||
+      chunk.epoch !== previous.epoch || session !== priorSession ||
+      Math.abs(playableStart(chunk) - playableEnd(previous)) > 1000 ||
+      (previous.pairRole === 'next'))) lines.push('#EXT-X-DISCONTINUITY');
     lines.push(`#EXT-X-PROGRAM-DATE-TIME:${new Date(playableStart(chunk)).toISOString()}`);
     lines.push(`#EXTINF:${playableDuration(chunk).toFixed(3)},`);
     lines.push(segmentUrl(chunk.id));
