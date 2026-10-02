@@ -16,6 +16,20 @@ describe('recording disk usage', () => {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
 
+  it('excludes archive masters and derivatives but counts show media and seek packages', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'streamvault-show-usage-'));
+    try {
+      fs.mkdirSync(path.join(root, 'archive', 'channel', 'session'), { recursive: true });
+      fs.mkdirSync(path.join(root, '2026', '10', '02', 'show.vod'), { recursive: true });
+      fs.writeFileSync(path.join(root, 'archive', 'channel', 'session', 'chunk.ts'), Buffer.alloc(100));
+      fs.writeFileSync(path.join(root, 'archive', 'channel', 'session', 'chunk.playback.ts'), Buffer.alloc(100));
+      fs.writeFileSync(path.join(root, '2026', '10', '02', 'show.ts'), Buffer.alloc(10));
+      fs.writeFileSync(path.join(root, '2026', '10', '02', 'show.mp4'), Buffer.alloc(20));
+      fs.writeFileSync(path.join(root, '2026', '10', '02', 'show.vod', 'segment.ts'), Buffer.alloc(30));
+      expect(await measureDiskUsage(root)).toBe(60);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('returns immediately while a disk read is pending and coalesces refreshes', async () => {
     let finish!: (size: number) => void;
     const load = vi.fn(() => new Promise<number>(resolve => { finish = resolve; }));

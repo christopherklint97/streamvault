@@ -1,5 +1,8 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { DBProgram, DBRecording, DBRecordingRule } from './db.js';
 
 const state = vi.hoisted(() => ({
@@ -13,6 +16,7 @@ const state = vi.hoisted(() => ({
   ruleUpdates: [] as Array<{ id: string; updates: Partial<DBRecordingRule> }>,
   quotaGb: 50,
   usageBytes: 0,
+  usageRoot: null as string | null,
   activeViewers: new Set<string>(),
   deletedIds: [] as string[],
   cacheRemoved: [] as string[],
@@ -79,7 +83,8 @@ vi.mock('./recorder.js', () => ({
   startRecording: vi.fn(async (id: string) => { state.lifecycleCalls.push(`start:${id}`); }),
   stopRecording: vi.fn(async (id: string) => { state.lifecycleCalls.push(`stop:${id}`); }),
   getActiveCount: () => 0,
-  getRecordingsDiskUsageAsync: async () => state.usageBytes,
+  getRecordingsDiskUsageAsync: async () => state.usageRoot
+    ? (await import('./recording-disk-usage.js')).measureDiskUsage(state.usageRoot) : state.usageBytes,
   getRecordingMasterFilePath: (id: string) => state.recordings.find(item => item.id === id)?.master_file_path ? `${id}.ts` : null,
   deleteRecordingFile: vi.fn(async () => { state.usageBytes -= 1_073_741_824; return 1_073_741_824; }),
   enforceAllRuleRetentions: vi.fn(async () => {}),
@@ -137,12 +142,33 @@ beforeEach(() => {
   state.ruleUpdates = [];
   state.quotaGb = 50;
   state.usageBytes = 0;
+  state.usageRoot = null;
   state.activeViewers.clear();
   state.deletedIds = [];
   state.cacheRemoved = [];
 });
 
 describe('recording disk cleanup', () => {
+  it('does not evict a completed show when only continuous archives exceed the show quota', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'streamvault-cleanup-'));
+    try {
+      state.quotaGb = 1;
+      state.usageRoot = root;
+      state.recordings = [recording({ id: 'show', master_file_path: 'show.ts' })];
+      fs.writeFileSync(path.join(root, 'show.ts'), 'SHOW');
+      const archive = path.join(root, 'archive', 'channel', 'session');
+      fs.mkdirSync(archive, { recursive: true });
+      fs.writeFileSync(path.join(archive, 'chunk.ts'), 'A');
+      fs.truncateSync(path.join(archive, 'chunk.ts'), 2 * 1_073_741_824);
+      const { runCleanup } = await import('./recording-scheduler.js');
+      await runCleanup();
+      expect(state.deletedIds).toEqual([]);
+      expect(state.cacheRemoved).toEqual([]);
+      expect(state.recordings.map(rec => rec.id)).toEqual(['show']);
+      expect(fs.readFileSync(path.join(root, 'show.ts'), 'utf8')).toBe('SHOW');
+    } finally { state.usageRoot = null; fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('never deletes a completed recording with an active VOD viewer under disk pressure', async () => {
     state.quotaGb = 1;
     state.usageBytes = 3 * 1_073_741_824;

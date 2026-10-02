@@ -124,7 +124,8 @@ export class ArchiveCapture {
   /** Keep FFprobe/stream-copy work off the synchronous two-second capture poll.
    * New archive segments jump ahead of historical backfill; one job runs at a time. */
   private enqueueSeam(id: string, urgent = false): void {
-    if (this.stopping || !id.endsWith('-chunk-000000000.ts')) return;
+    if (this.stopping || process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1' ||
+        !id.endsWith('-chunk-000000000.ts')) return;
     if (this.seamQueued.has(id)) {
       if (!urgent || this.seamUrgent.has(id)) return;
       const index = this.seamQueue.indexOf(id);
@@ -149,7 +150,8 @@ export class ArchiveCapture {
   /** New playback tickets can lift an existing historical seam ahead of backfill.
    * The ticket's pinned media is unchanged; reopening later selects repaired copies. */
   prioritizeWindow(channelId: string, start: number, end: number): void {
-    if (this.stopping || !this.store.getArchive(channelId)?.enabled || end <= start) return;
+    if (this.stopping || process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1' ||
+        !this.store.getArchive(channelId)?.enabled || end <= start) return;
     const candidates = this.store.seamCandidates(channelId, start)
       .filter(chunk => chunk.start < end).slice(0, 200);
     for (const chunk of candidates.reverse()) this.enqueueSeam(chunk.id, true);
@@ -160,6 +162,12 @@ export class ArchiveCapture {
     this.seamTimer = setTimeout(() => {
       this.seamTimer = null;
       if (this.stopping) return;
+      if (process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1') {
+        this.seamQueue = [];
+        this.seamQueued.clear();
+        this.seamUrgent.clear();
+        return;
+      }
       const reserve = gigabytes(process.env.STREAMVAULT_ARCHIVE_RESERVE_GB, 20) * GIB;
       const maximum = gigabytes(process.env.STREAMVAULT_ARCHIVE_MAX_DISK_GB, 400) * GIB;
       try {
