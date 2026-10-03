@@ -113,6 +113,73 @@ describe('bounded archive pair canary', () => {
       expect(f.store.getChunk(f.nextId)?.playbackPath).toBeNull();
     } finally { f.close(); }
   });
+  it('falls back to a verified three-source copy while keeping the duplicate middle raw master', async () => {
+    const f = fixture();
+    const witnessId = f.priorId.replace('000000006.ts', '000000005.ts');
+    const witnessPath = path.join(path.dirname(f.prior), 'chunk-000000005.ts');
+    fs.copyFileSync(path.join(f.root, f.prior), path.join(f.root, witnessPath));
+    f.store.publish({ id: witnessId, channelId: 'one', start: 80_000, end: 100_000,
+      duration: 20, path: witnessPath, size: 188, epoch: 1 });
+    const raw = fs.readFileSync(path.join(f.root, f.prior));
+    const old = f.store.createSnapshot('one', 80_000, 128_000, 1, 100, true, false);
+    try {
+      let earlyCalled = false;
+      const prepare = async () => undefined;
+      const prepareEarly = async (witness: string, middle: string, next: string,
+        firstOut: string, secondOut: string) => {
+        earlyCalled = [witness, middle, next].every(file => fs.existsSync(file));
+        fs.writeFileSync(firstOut, Buffer.alloc(188, 0x47));
+        fs.writeFileSync(secondOut, Buffer.alloc(188, 0x47));
+        return { cut: { videoBefore: 480, audioBefore: 450, videoAfter: 1016,
+          audioAfter: 953, videoOverlapStart: 480, audioOverlapStart: 450,
+          offset: 0, previousOffset: 9.6, droppedDamagedPictures: 1 },
+        sizes: [188, 188] as [number, number] };
+      };
+      expect(await processArchivePair(f.store, f.root, f.nextId, Date.now(), 1000, 100000,
+        undefined, prepare, { rawMode: '1', allowlist: 'one',
+          clockContinues: async () => true, transportContinues: async () => true,
+          prepareEarly })).toBe(true);
+      expect(earlyCalled).toBe(true);
+      expect(f.store.getChunk(witnessId)).toMatchObject({ pairRole: 'prior', playbackDuration: 9.6 });
+      expect(f.store.getChunk(f.priorId)).toMatchObject({ pairRole: 'middle', playbackHidden: 1 });
+      expect(f.store.getChunk(f.nextId)).toMatchObject({ pairRole: 'next', playbackOffset: 0 });
+      expect(fs.readFileSync(path.join(f.root, f.prior))).toEqual(raw);
+      expect(f.store.snapshot(old.id)?.chunks.map(chunk => chunk.id)).toContain(f.priorId);
+      const fresh = f.store.createSnapshot('one', 80_000, 129_600, 2, 100, true);
+      expect(fresh.chunks.map(c => c.id)).toEqual([
+        witnessId, f.nextId, f.nextId.replace('000000000.ts', '000000001.ts')]);
+    } finally { f.close(); }
+  });
+  it('rejects a staged three-source pair if the unhidden witness changed', async () => {
+    const f = fixture();
+    const witnessId = f.priorId.replace('000000006.ts', '000000005.ts');
+    const relative = path.join(path.dirname(f.prior), 'chunk-000000005.ts');
+    fs.copyFileSync(path.join(f.root, f.prior), path.join(f.root, relative));
+    f.store.publish({ id: witnessId, channelId: 'one', start: 80_000, end: 100_000,
+      duration: 20, path: relative, size: 188, epoch: 1 });
+    try {
+      const early = async (witness: string, _middle: string, _next: string,
+        first: string, second: string) => {
+        fs.writeFileSync(first, Buffer.alloc(188, 0x47));
+        fs.writeFileSync(second, Buffer.alloc(188, 0x47));
+        fs.appendFileSync(witness, 'changed');
+        return { cut: { videoBefore: 480, audioBefore: 450, videoAfter: 1016,
+          audioAfter: 953, videoOverlapStart: 480, audioOverlapStart: 450,
+          offset: 0, previousOffset: 9.6, droppedDamagedPictures: 1 },
+        sizes: [188, 188] as [number, number] };
+      };
+      expect(await processArchivePair(f.store, f.root, f.nextId, Date.now(), 1000, 100000,
+        undefined, async () => undefined, { rawMode: '1', allowlist: 'one',
+          clockContinues: async () => true, transportContinues: async () => true,
+          prepareEarly: early })).toBe(false);
+      expect(f.store.getChunk(witnessId)?.pairId).toBeNull();
+      expect(f.store.getChunk(f.priorId)?.playbackHidden).toBe(0);
+      expect(f.store.getChunk(f.nextId)?.pairId).toBeNull();
+      for (const directory of [path.dirname(relative), path.dirname(f.next)])
+        expect(fs.readdirSync(path.join(f.root, directory)).some(name => name.endsWith('.pair.playback.ts')))
+          .toBe(false);
+    } finally { f.close(); }
+  });
   it('publishes both immutable derivatives under one pair identity and preserves raw masters', async () => {
     const f = fixture();
     const previousRaw = fs.readFileSync(path.join(f.root, f.prior));
@@ -207,6 +274,38 @@ describe('bounded archive pair canary', () => {
       expect(listed.some(name => name.endsWith('.pair.playback.ts'))).toBe(false);
     } finally { f.close(); }
   });
+  it.skipIf(!process.env.STREAMVAULT_F1_TWO_CHUNK_SAMPLE)(
+    'publishes the reported three-source F1 replay as a finite pinned ticket, preserving old raw pins', async () => {
+      const sample = process.env.STREAMVAULT_F1_TWO_CHUNK_SAMPLE!;
+      const f = fixture();
+      const witnessId = f.priorId.replace('000000006.ts', '000000005.ts');
+      const witnessPath = path.join(path.dirname(f.prior), 'chunk-000000005.ts');
+      try {
+        fs.copyFileSync(path.join(sample, 'chunk2.ts'), path.join(f.root, witnessPath));
+        fs.copyFileSync(path.join(sample, 'prev.ts'), path.join(f.root, f.prior));
+        fs.copyFileSync(path.join(sample, 'next.ts'), path.join(f.root, f.next));
+        const afterId = f.nextId.replace('000000000.ts', '000000001.ts');
+        const after = f.store.getChunk(afterId)!;
+        fs.copyFileSync(path.join(sample, 'after.ts'), path.join(f.root, after.path));
+        f.store.publish({ id: witnessId, channelId: 'one', start: 80_000, end: 99_720,
+          duration: 19.72, path: witnessPath,
+          size: fs.statSync(path.join(f.root, witnessPath)).size, epoch: 1 });
+        for (const [id, start, duration, relative] of [
+          [f.priorId, 100_000, 11.86, f.prior], [f.nextId, 108_000, 20.32, f.next],
+          [afterId, 128_320, 20, after.path],
+        ] as const) f.db.prepare('UPDATE media_chunks SET start = ?, end = ?, duration = ?, size = ? WHERE id = ?')
+          .run(start, start + Math.round(duration * 1000), duration,
+            fs.statSync(path.join(f.root, relative)).size, id);
+        const old = f.store.createSnapshot('one', 80_000, 148_320, 1, 100, true, false);
+        expect(await processArchivePair(f.store, f.root, f.nextId, Date.now(), 1000,
+          400 * 1024 ** 3, undefined, undefined, { rawMode: '1', allowlist: 'one' })).toBe(true);
+        const fresh = f.store.createSnapshot('one', 80_000, 129_600, 2, 100, true);
+        expect(fresh.chunks.map(c => c.id)).toEqual([witnessId, f.nextId, afterId]);
+        expect(fresh.chunks.slice(0, 2).map(c => c.playbackDuration)).toEqual([9.6, 20.32]);
+        expect(f.store.getChunk(f.priorId)).toMatchObject({ pairRole: 'middle', playbackHidden: 1 });
+        expect(f.store.snapshot(old.id)?.chunks.map(c => c.id)).toContain(f.priorId);
+      } finally { f.close(); }
+    }, 360000);
   it.skipIf(!process.env.STREAMVAULT_F1_SEAM_SAMPLE)(
     'publishes a real packet-verified F1 pair to a new raw-mode archive ticket', async () => {
       const sample = process.env.STREAMVAULT_F1_SEAM_SAMPLE!;

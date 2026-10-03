@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { prepareLosslessPair, audioClockMatchesSource, lowPriorityMediaCommand, rawTransportContinues,
+import { prepareLosslessPair, prepareEarlyThreeChunkPair, audioClockMatchesSource,
+  lowPriorityMediaCommand, rawTransportContinues,
   rawMediaClockContinues } from './archive-lossless-pair-media.js';
 
 const ffmpeg = (args: string[]) => execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', ...args], { timeout: 30000 });
@@ -12,6 +13,15 @@ const hashes = (file: string, stream: number): string[] => {
     '-show_entries', 'packet=stream_index,data_hash', '-of', 'json', file], { timeout: 15000 }).toString()) as
     { packets: Array<{ stream_index: number; data_hash: string }> };
   return p.packets.filter(packet => packet.stream_index === stream).map(packet => packet.data_hash);
+};
+const decodedFrames = (file: string): string[] => {
+  const result = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin',
+    '-threads', '1', '-i', file, '-map', '0:v:0', '-an', '-vsync', '0', '-f', 'framemd5', '-'],
+  { timeout: 60000, encoding: 'utf8', maxBuffer: 256 * 1024 });
+  expect(result.status).toBe(0);
+  expect(result.stderr).not.toMatch(/non-existing PPS|decode_slice_header error/i);
+  return result.stdout.split('\n').filter(line => line && !line.startsWith('#'))
+    .map(line => line.split(',').at(-1)!.trim());
 };
 const verifyFiniteJoin = (dir: string, first: string, second: string, durations: [number, number]) => {
   const manifest = path.join(dir, 'joined.m3u8');
@@ -65,6 +75,26 @@ const verifyFollowingRaw = (dir: string, first: string, second: string, followin
 };
 
 describe('verified stream-copy pair', () => {
+  it.skipIf(!process.env.STREAMVAULT_F1_TWO_CHUNK_SAMPLE)(
+    'removes the reported clock-gap replay without dropping a decoded frame or AAC packet', async () => {
+      const base = process.env.STREAMVAULT_F1_TWO_CHUNK_SAMPLE!;
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-three-source-'));
+      try {
+        const witness = path.join(base, 'chunk2.ts'), middle = path.join(base, 'prev.ts');
+        const next = path.join(base, 'next.ts');
+        const first = path.join(dir, 'first.playback.ts'), second = path.join(dir, 'second.playback.ts');
+        const result = await prepareEarlyThreeChunkPair(witness, middle, next, first, second);
+        expect(result?.cut).toMatchObject({ videoBefore: 480, audioBefore: 450,
+          videoAfter: 1016, audioAfter: 953, offset: 0, previousOffset: 9.6 });
+        expect(decodedFrames(first)).toEqual(decodedFrames(witness).slice(0, 480));
+        expect(decodedFrames(second)).toEqual(decodedFrames(next));
+        expect(hashes(first, 1)).toEqual(hashes(witness, 1).slice(0, 450));
+        expect(hashes(second, 1)).toEqual(hashes(next, 1));
+        verifyFiniteJoin(dir, first, second, [9.6, 20.32]);
+        fs.copyFileSync(path.join(base, 'after.ts'), path.join(dir, 'after.ts'));
+        verifyFollowingRaw(dir, path.basename(first), path.basename(second), 'after.ts', [9.6, 20.32, 20]);
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    }, 360000);
   it('preserves the AAC packet clock rather than forcing it onto the video frame boundary', () => {
     // The exact AAC splice can fall 53.333 ms after the 12 s video splice.
     expect(audioClockMatchesSource(1.4, 13.453333, 100, 112.053333)).toBe(true);

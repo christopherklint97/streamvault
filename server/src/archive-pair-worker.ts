@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ArchiveStore, ArchiveChunk } from './archive-store.js';
-import { prepareLosslessPair, rawTransportContinues,
+import { prepareLosslessPair, prepareEarlyThreeChunkPair, rawTransportContinues,
   rawMediaClockContinues } from './archive-lossless-pair-media.js';
 import { planVerifiedPairTimeline } from './archive-pair-timeline.js';
 
@@ -22,7 +22,8 @@ export async function processArchivePair(store: ArchiveStore, root: string, id: 
   _now = Date.now(), reserveBytes = 20 * 1024 ** 3, maximumBytes = 400 * 1024 ** 3,
   signal?: AbortSignal, prepare: typeof prepareLosslessPair = prepareLosslessPair,
   flags?: { rawMode?: string; allowlist?: string;
-    clockContinues?: typeof rawMediaClockContinues }): Promise<boolean> {
+    clockContinues?: typeof rawMediaClockContinues; transportContinues?: typeof rawTransportContinues;
+    prepareEarly?: typeof prepareEarlyThreeChunkPair }): Promise<boolean> {
   const current = store.getChunk(id);
   if (!current || !id.endsWith('-chunk-000000000.ts')) return false;
   const canRun = () => !signal?.aborted && pairEnabledFor(current.channelId,
@@ -33,6 +34,12 @@ export async function processArchivePair(store: ArchiveStore, root: string, id: 
   const previous = store.previousChunk(id);
   if (!previous || previous.unavailable || previous.playbackHidden || previous.pairId ||
       previous.id.split('-chunk-')[0] === current.id.split('-chunk-')[0]) return false;
+  const possibleWitness = store.previousChunk(previous.id);
+  const witness = possibleWitness && !possibleWitness.unavailable && !possibleWitness.playbackHidden &&
+    !possibleWitness.pairId && !possibleWitness.playbackPath &&
+    possibleWitness.epoch === previous.epoch &&
+    possibleWitness.id.split('-chunk-')[0] === previous.id.split('-chunk-')[0]
+      ? possibleWitness : undefined;
   const followingId = id.replace(/-chunk-000000000\.ts$/, '-chunk-000000001.ts');
   const following = store.getChunk(followingId);
   if (!following || following.unavailable || following.channelId !== current.channelId ||
@@ -59,7 +66,8 @@ export async function processArchivePair(store: ArchiveStore, root: string, id: 
   const [prior, sources] = await Promise.all([source(previous), Promise.all(session.map(source))]);
   const next = sources[0];
   for (let index = 1; index < sources.length; index++)
-    if (!await rawTransportContinues(sources[index - 1].absolute, sources[index].absolute) ||
+    if (!await (flags?.transportContinues ?? rawTransportContinues)(
+          sources[index - 1].absolute, sources[index].absolute) ||
         !await (flags?.clockContinues ?? rawMediaClockContinues)(
           sources[index - 1].absolute, sources[index].absolute)) return false;
   const maximumWork = Math.ceil((prior.stat.size + next.stat.size) * EXTRA_WORK_MULTIPLIER);
@@ -76,29 +84,58 @@ export async function processArchivePair(store: ArchiveStore, root: string, id: 
     return { relative, absolute };
   };
   const priorOut = presentation(previous), nextOut = presentation(current);
+  const witnessOut = witness ? presentation(witness) : undefined;
   let committed = false;
   try {
     if (!canRun()) return false;
-    const result = await prepare(prior.absolute, next.absolute, priorOut.absolute, nextOut.absolute, signal);
+    let result = await prepare(prior.absolute, next.absolute, priorOut.absolute, nextOut.absolute, signal);
+    let selectedPrior = previous, selectedInput = prior, selectedOut = priorOut;
+    let witnessInput: Awaited<ReturnType<typeof source>> | undefined;
+    if (!result && witness && witnessOut && !previous.playbackPath && canRun()) {
+      // The final raw chunk may begin without H.264 parameter sets. Only an
+      // independently proved, contiguous witness may replace its presentation.
+      witnessInput = await source(witness);
+      if (!await (flags?.transportContinues ?? rawTransportContinues)(
+          witnessInput.absolute, prior.absolute) ||
+          !await (flags?.clockContinues ?? rawMediaClockContinues)(
+            witnessInput.absolute, prior.absolute)) return false;
+      const work = Math.ceil((witnessInput.stat.size + prior.stat.size + next.stat.size) * EXTRA_WORK_MULTIPLIER);
+      if ((await free()) <= reserveBytes + work ||
+          store.totalUsageBytes() + Math.ceil((witnessInput.stat.size + next.stat.size) * 1.5) >= maximumBytes)
+        return false;
+      await Promise.all([priorOut.absolute, nextOut.absolute]
+        .map(file => fs.rm(file, { force: true })));
+      result = await (flags?.prepareEarly ?? prepareEarlyThreeChunkPair)(
+        witnessInput.absolute, prior.absolute, next.absolute,
+        witnessOut.absolute, nextOut.absolute, signal);
+      if (result) { selectedPrior = witness; selectedInput = witnessInput; selectedOut = witnessOut; }
+    }
     if (!result || !canRun()) return false;
-    const starts = planVerifiedPairTimeline(previous.presentationStart ?? previous.start, result.cut.previousOffset,
+    const starts = planVerifiedPairTimeline(selectedPrior.presentationStart ?? selectedPrior.start, result.cut.previousOffset,
       result.cut.offset, session, session.slice(1).map(() => true));
     if (!starts) return false;
-    const currentPrior = store.getChunk(previous.id), currentNext = store.getChunk(current.id);
+    const currentPrior = store.getChunk(selectedPrior.id), currentNext = store.getChunk(current.id);
+    const currentMiddle = witnessInput ? store.getChunk(previous.id) : undefined;
     const currentAfter = store.getChunk(followingId);
     if (!store.getArchive(current.channelId)?.enabled || !currentPrior || !currentNext || !currentAfter ||
         currentPrior.unavailable || currentNext.unavailable || currentAfter.unavailable ||
-        currentPrior.path !== previous.path || currentNext.path !== current.path ||
+        (witnessInput && (!currentMiddle || currentMiddle.unavailable || currentMiddle.pairId ||
+          currentMiddle.playbackPath || currentMiddle.path !== previous.path ||
+          currentMiddle.size !== previous.size)) ||
+        currentPrior.path !== selectedPrior.path || currentNext.path !== current.path ||
         currentAfter.path !== following.path || currentAfter.size !== following.size ||
-        currentPrior.size !== previous.size || currentNext.size !== current.size) return false;
-    const [priorAfter, finalSources, first, second] = await Promise.all([
-      fs.stat(prior.absolute), Promise.all(sources.map(item => fs.stat(item.absolute))),
-      fs.stat(priorOut.absolute), fs.stat(nextOut.absolute),
+        currentPrior.size !== selectedPrior.size || currentNext.size !== current.size) return false;
+    const [priorAfter, witnessAfter, finalSources, first, second] = await Promise.all([
+      fs.stat(prior.absolute), witnessInput ? fs.stat(witnessInput.absolute) : Promise.resolve(undefined),
+      Promise.all(sources.map(item => fs.stat(item.absolute))),
+      fs.stat(selectedOut.absolute), fs.stat(nextOut.absolute),
     ]);
     const finalSession = store.indexedChunks().filter(chunk => chunk.channelId === current.channelId &&
       chunk.id.startsWith(`${sessionId}-chunk-`)).sort((a, b) => a.id.localeCompare(b.id));
     if (!priorAfter.isFile() || priorAfter.size !== prior.stat.size ||
         priorAfter.mtimeMs !== prior.stat.mtimeMs || priorAfter.ino !== prior.stat.ino ||
+        (witnessInput && (!witnessAfter?.isFile() || witnessAfter.size !== witnessInput.stat.size ||
+          witnessAfter.mtimeMs !== witnessInput.stat.mtimeMs || witnessAfter.ino !== witnessInput.stat.ino)) ||
         finalSession.length !== session.length ||
         finalSession.some((chunk, index) => chunk.id !== session[index].id ||
           chunk.path !== session[index].path || chunk.size !== session[index].size ||
@@ -111,17 +148,19 @@ export async function processArchivePair(store: ArchiveStore, root: string, id: 
         first.size !== result.sizes[0] || second.size !== result.sizes[1] ||
         !Number.isSafeInteger(first.size) || !Number.isSafeInteger(second.size) ||
         first.size <= 0 || second.size <= 0 ||
-        first.size + second.size > (prior.stat.size + next.stat.size) * 1.5) return false;
+        first.size + second.size > (selectedInput.stat.size + next.stat.size) * 1.5) return false;
     if ((await free()) <= reserveBytes ||
         store.totalUsageBytes() + first.size + second.size >= maximumBytes || !canRun()) return false;
     committed = store.publishPlaybackPair({
-      priorId: previous.id, nextId: current.id, priorRawPath: previous.path, nextRawPath: current.path,
-      priorPath: priorOut.relative, priorSize: first.size, priorCut: result.cut.previousOffset,
+      priorId: selectedPrior.id, middleId: witnessInput ? previous.id : undefined,
+      nextId: current.id, priorRawPath: selectedPrior.path,
+      middleRawPath: witnessInput ? previous.path : undefined, nextRawPath: current.path,
+      priorPath: selectedOut.relative, priorSize: first.size, priorCut: result.cut.previousOffset,
       nextPath: nextOut.relative, nextSize: second.size, nextOffset: result.cut.offset,
       nextDuration: current.duration - result.cut.offset,
       sessionTimeline: session.map((chunk, index) => ({ id: chunk.id, presentationStart: starts[index] })),
     });
-    if (committed) for (const old of [previous.playbackPath, current.playbackPath]) {
+    if (committed) for (const old of [selectedPrior.playbackPath, current.playbackPath]) {
       if (!old || !old.endsWith('.playback.ts')) continue;
       const absolute = path.resolve(realRoot, old);
       if (absolute.startsWith(realRoot + path.sep)) {
@@ -134,7 +173,8 @@ export async function processArchivePair(store: ArchiveStore, root: string, id: 
     }
     return committed;
   } finally {
-    if (!committed) await Promise.all([priorOut.absolute, nextOut.absolute]
+    if (!committed) await Promise.all([priorOut.absolute, witnessOut?.absolute, nextOut.absolute]
+      .filter((file): file is string => !!file)
       .map(file => fs.rm(file, { force: true }).catch(() => undefined)));
   }
 }

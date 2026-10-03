@@ -82,3 +82,40 @@ export function selectLosslessPairCut(
     offset: Number(offset.toFixed(6)), previousOffset: Number(previousOffset.toFixed(6)),
     droppedDamagedPictures: video.unmatched };
 }
+
+/** A source gap at the first common picture is not footage: retaining the
+ * repeated tail keeps an empty clock interval and a long, hard-to-seek clip.
+ * Only hide a whole intermediate chunk when BOTH streams prove that every
+ * picture/AAC packet after the gap is present in the successor (apart from a
+ * separately proven damaged terminal picture). */
+export function selectEarlyThreeChunkCut(
+  witnessVideo: VideoSignature[], middleVideo: VideoSignature[], nextVideo: VideoSignature[],
+  witnessAudio: AudioSignature[], middleAudio: AudioSignature[], nextAudio: AudioSignature[],
+  provenTerminalDamage: boolean,
+): LosslessPairCut | undefined {
+  const selected = selectLosslessPairCut([...witnessVideo, ...middleVideo], nextVideo,
+    [...witnessAudio, ...middleAudio], nextAudio, provenTerminalDamage);
+  if (!selected || selected.droppedDamagedPictures !== 1 || !nextVideo[0]?.key ||
+      selected.videoOverlapStart <= 0 || selected.videoOverlapStart >= witnessVideo.length ||
+      selected.audioOverlapStart <= 0 || selected.audioOverlapStart >= witnessAudio.length) return undefined;
+  const v = selected.videoOverlapStart, a = selected.audioOverlapStart;
+  const videoSteps = witnessVideo.slice(0, Math.min(v, 120)).map((p, i, packets) =>
+    i ? p.pts - packets[i - 1].pts : NaN).filter(step => step > 0.001 && step < 0.1).sort((x, y) => x - y);
+  const audioSteps = witnessAudio.slice(0, Math.min(a, 120)).map((p, i, packets) =>
+    i ? p.pts - packets[i - 1].pts : NaN).filter(step => step > 0.001 && step < 0.1).sort((x, y) => x - y);
+  if (!videoSteps.length || !audioSteps.length) return undefined;
+  const videoStep = videoSteps[Math.floor(videoSteps.length / 2)];
+  const audioStep = audioSteps[Math.floor(audioSteps.length / 2)];
+  const videoDuration = witnessVideo[v - 1].pts + videoStep - witnessVideo[0].pts;
+  const audioDuration = witnessAudio[a - 1].pts + audioStep - witnessAudio[0].pts;
+  const videoGap = witnessVideo[v].pts - witnessVideo[v - 1].pts;
+  const audioGap = witnessAudio[a].pts - witnessAudio[a - 1].pts;
+  if (!Number.isFinite(videoDuration) || videoDuration <= 0 ||
+      Math.abs(videoDuration - audioDuration) > 0.04 ||
+      videoGap < 0.25 || audioGap < 0.25 || Math.abs(videoGap - audioGap) > 0.08 ||
+      Math.abs((witnessAudio[0].pts - witnessVideo[0].pts) -
+        (nextAudio[0].pts - nextVideo[0].pts)) > 0.1) return undefined;
+  return { videoBefore: v, audioBefore: a, videoAfter: nextVideo.length,
+    audioAfter: nextAudio.length, videoOverlapStart: v, audioOverlapStart: a,
+    offset: 0, previousOffset: Number(videoDuration.toFixed(6)), droppedDamagedPictures: 1 };
+}

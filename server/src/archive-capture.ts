@@ -391,11 +391,15 @@ export class ArchiveCapture {
         const admitted = this.importSession(channelId, directory, undefined, true);
         for (const name of fs.readdirSync(directory)) {
           const playbackMaster = /^chunk-(\d{9})(?:\.[0-9a-f-]{36}\.pair)?\.playback\.ts$/.exec(name);
+          // Interrupted pair remuxes use .part.ts rather than the older .part
+          // suffix. Only known pair-stage names in INACTIVE sessions are safe
+          // to remove; never infer a master from a generic .ts suffix.
+          const playbackStage = /^chunk-\d{9}\.[0-9a-f-]{36}\.pair\.playback\.ts(?:\.(?:prior-video|prior-audio|video|audio|joined))?\.part\.ts$/.test(name);
           const indexedPlayback = playbackMaster && this.store.getChunk(
             `${session.name}-chunk-${playbackMaster[1]}.ts`)?.playbackPath ===
             path.relative(this.root, path.join(directory, name));
           if (((/^chunk-\d{9}\.ts(?:\.tmp)?$/.test(name) && !admitted.has(name) &&
-            !this.store.getChunk(`${session.name}-${name}`)) || name.endsWith('.part') ||
+            !this.store.getChunk(`${session.name}-${name}`)) || name.endsWith('.part') || playbackStage ||
             (playbackMaster && !indexedPlayback && !this.store.isDetachedPlayback(
               path.relative(this.root, path.join(directory, name))))) &&
             !fs.lstatSync(path.join(directory, name)).isSymbolicLink()) {

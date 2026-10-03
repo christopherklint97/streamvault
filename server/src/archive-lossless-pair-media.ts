@@ -3,7 +3,8 @@ import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { localizedTerminalDecoderError } from './archive-seam.js';
-import { selectLosslessPairCut, type VideoSignature, type AudioSignature, type LosslessPairCut } from './archive-lossless-pair.js';
+import { selectLosslessPairCut, selectEarlyThreeChunkCut, type VideoSignature,
+  type AudioSignature, type LosslessPairCut } from './archive-lossless-pair.js';
 
 const exec = promisify(execFile);
 /** Prove that the next HLS chunk resumes the same elementary TS streams and
@@ -271,5 +272,107 @@ export async function prepareLosslessPair(previous: string, next: string,
     await Promise.all([priorVideo, priorAudio, video, audio, joined, priorPart, nextPart]
       .map(file => fs.rm(file, { force: true })));
     if (!published) await Promise.all([previousOutput, nextOutput].map(file => fs.rm(file, { force: true })));
+  }
+}
+
+/** Bounded three-source repair for a verified clock-gap replay. The witness
+ * keeps only its unique pre-gap prefix; the successor keeps every frame/AAC.
+ * The duplicate middle raw master remains immutable and is hidden only by
+ * the store's atomic three-source presentation transaction. */
+export async function prepareEarlyThreeChunkPair(witness: string, middle: string, next: string,
+  firstOutput: string, secondOutput: string, signal?: AbortSignal):
+  Promise<{ cut: LosslessPairCut; sizes: [number, number] } | undefined> {
+  const paths = [witness, middle, next, firstOutput, secondOutput].map(file => path.resolve(file));
+  if (new Set(paths).size !== 5 ||
+      (await Promise.all([firstOutput, secondOutput].map(async file =>
+        fs.stat(file).then(() => true, () => false)))).some(Boolean))
+    throw new Error('Archive presentation output must be new and distinct from masters');
+  if (![witness, middle, next].every(file => /^\/[\w./-]+$/.test(file)) ||
+      !await rawTransportContinues(witness, middle) ||
+      !await rawMediaClockContinues(witness, middle)) return undefined;
+  const [before, intervening, after] = await Promise.all([
+    inventory(witness, signal), inventory(middle, signal), inventory(next, signal),
+  ]);
+  const original = selectEarlyThreeChunkCut(before.video, intervening.video, after.video,
+    before.audio, intervening.audio, after.audio, true);
+  if (!original) return undefined;
+  const steps = before.video.slice(0, Math.min(original.videoBefore, 120)).map((packet, index, packets) =>
+    index ? packet.pts - packets[index - 1].pts : NaN)
+    .filter(step => step > 0.001 && step < 0.1).sort((a, b) => a - b);
+  const fps = 1 / steps[Math.floor(steps.length / 2)];
+  let terminalProofs = 0;
+  for (let attempt = 0; attempt < 3 && terminalProofs < 2; attempt++) {
+    const { stderr } = await execMedia('ffmpeg', ['-hide_banner', '-loglevel', 'info', '-debug_ts',
+      '-nostdin', '-threads', '1', '-i', `concat:${witness}|${middle}`, '-map', '0:v:0',
+      '-an', '-vsync', '0', '-f', 'null', '-'],
+    { timeout: 45_000, maxBuffer: 4 * 1024 * 1024, signal });
+    if (localizedTerminalDecoderError(stderr,
+      intervening.video.at(-1)!.pts - before.video[0].pts, fps)) terminalProofs++;
+    if (terminalProofs + 2 - attempt < 2) return undefined;
+  }
+  if (terminalProofs !== 2) return undefined;
+  const cut = selectEarlyThreeChunkCut(before.video, intervening.video, after.video,
+    before.audio, intervening.audio, after.audio, true);
+  if (!cut) return undefined;
+
+  const firstVideo = `${firstOutput}.video.part.ts`, firstAudio = `${firstOutput}.audio.part.ts`;
+  const firstPart = `${firstOutput}.part.ts`, secondPart = `${secondOutput}.part.ts`;
+  const staged = [firstVideo, firstAudio, firstPart, secondPart];
+  let published = false;
+  try {
+    await execMedia('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', '-copyts',
+      '-i', witness, '-map', '0:v:0', '-c', 'copy', '-frames:v', String(cut.videoBefore),
+      '-mpegts_copyts', '1', '-f', 'mpegts', firstVideo], { timeout: 45_000, maxBuffer: 4 * 1024 * 1024, signal });
+    await execMedia('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', '-copyts',
+      '-i', witness, '-map', '0:a:0', '-c', 'copy', '-frames:a', String(cut.audioBefore),
+      '-mpegts_copyts', '1', '-f', 'mpegts', firstAudio], { timeout: 45_000, maxBuffer: 4 * 1024 * 1024, signal });
+    await execMedia('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', '-copyts',
+      '-i', firstVideo, '-i', firstAudio, '-map', '0:v:0', '-map', '1:a:0', '-c', 'copy',
+      '-mpegts_copyts', '1', '-f', 'mpegts', firstPart], { timeout: 45_000, maxBuffer: 4 * 1024 * 1024, signal });
+    const shift = before.video[0].pts + cut.previousOffset - after.video[0].pts;
+    await execMedia('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin',
+      '-itsoffset', shift.toFixed(6), '-i', next, '-map', '0:v:0', '-map', '0:a:0',
+      '-c', 'copy', '-copyts', '-bsf:v', 'dump_extra=freq=keyframe',
+      '-mpegts_copyts', '1', '-f', 'mpegts', secondPart], { timeout: 45_000, maxBuffer: 4 * 1024 * 1024, signal });
+    const [a, b] = await Promise.all([inventory(firstPart, signal), inventory(secondPart, signal)]);
+    if (a.video.length !== cut.videoBefore || a.audio.length !== cut.audioBefore ||
+        b.video.length !== after.video.length || b.audio.length !== after.audio.length ||
+        !equals(hashes(a.audio), hashes(before.audio.slice(0, cut.audioBefore))) ||
+        !equals(hashes(b.audio), hashes(after.audio)) ||
+        Math.abs(b.video[0].pts - a.video[0].pts - cut.previousOffset) > 0.005) return undefined;
+    const audioSteps = before.audio.slice(0, Math.min(cut.audioBefore, 120)).map((packet, index, packets) =>
+      index ? packet.pts - packets[index - 1].pts : NaN)
+      .filter(step => step > 0.001 && step < 0.1).sort((x, y) => x - y);
+    const audioDuration = before.audio[cut.audioBefore - 1].pts +
+      audioSteps[Math.floor(audioSteps.length / 2)] - before.audio[0].pts;
+    if (!audioClockMatchesSource(a.audio[0].pts, b.audio[0].pts, 0, audioDuration)) return undefined;
+
+    const decoded = async (file: string) => {
+      const result = await execMedia('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin',
+        '-threads', '1', '-i', file, '-map', '0:v:0', '-an', '-vsync', '0', '-f', 'framemd5', '-'],
+      { timeout: 60_000, maxBuffer: 512 * 1024, signal });
+      if (/non-existing PPS|decode_slice_header error|error while decoding/i.test(result.stderr))
+        return undefined;
+      return result.stdout.split('\n').filter(line => line && !line.startsWith('#'))
+        .map(line => line.split(',').at(-1)!.trim());
+    };
+    const [sourceFirst, sourceSecond, copyFirst, copySecond] = await Promise.all([
+      decoded(witness), decoded(next), decoded(firstPart), decoded(secondPart),
+    ]);
+    if (!sourceFirst || !sourceSecond || !copyFirst || !copySecond ||
+        !equals(copyFirst, sourceFirst.slice(0, cut.videoBefore)) ||
+        !equals(copySecond, sourceSecond)) return undefined;
+    await continuityPair(firstPart, secondPart, next);
+    const sizes = await Promise.all([fs.stat(firstPart), fs.stat(secondPart)]);
+    const inputs = await Promise.all([fs.stat(witness), fs.stat(next)]);
+    if (sizes.some(stat => !stat.isFile() || stat.size <= 0) ||
+        sizes[0].size + sizes[1].size > (inputs[0].size + inputs[1].size) * 1.5) return undefined;
+    await fs.rename(firstPart, firstOutput);
+    await fs.rename(secondPart, secondOutput);
+    published = true;
+    return { cut, sizes: [sizes[0].size, sizes[1].size] };
+  } finally {
+    await Promise.all(staged.map(file => fs.rm(file, { force: true })));
+    if (!published) await Promise.all([firstOutput, secondOutput].map(file => fs.rm(file, { force: true })));
   }
 }
