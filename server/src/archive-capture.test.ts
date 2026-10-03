@@ -51,6 +51,17 @@ describe('stream-copy HLS capture', () => {
         fs.mkdirSync(path.dirname(path.join(root, relative)), { recursive: true });
         fs.writeFileSync(path.join(root, relative), Buffer.alloc(188, 0x47));
       }
+      const stages = [
+        `${priorPair}.prior-video.part.ts`, `${priorPair}.prior-audio.part.ts`,
+        `${priorPair}.joined.part.ts`, `${priorPair}.video.part.ts`,
+        `${priorPair}.audio.part.ts`, `${priorPair}.part.ts`,
+        `${nextPair}.video.part.ts`, `${nextPair}.audio.part.ts`,
+        `${nextPair}.joined.part.ts`, `${nextPair}.part.ts`,
+      ];
+      for (const relative of stages) fs.writeFileSync(path.join(root, relative), Buffer.alloc(188, 0x47));
+      const unrelated = path.join(path.dirname(path.join(root, priorPair)),
+        'chunk-000000006.not-a-pair.playback.ts.video.part.ts');
+      fs.writeFileSync(unrelated, Buffer.alloc(188, 0x47));
       store.publish({ id: priorId, channelId: 'c', start: 100_000, end: 120_000,
         duration: 20, path: priorRaw, size: 188, epoch: 1 });
       store.publish({ id: nextId, channelId: 'c', start: 108_000, end: 128_000,
@@ -58,10 +69,20 @@ describe('stream-copy HLS capture', () => {
       expect(store.publishPlaybackPair({ priorId, nextId, priorRawPath: priorRaw, nextRawPath: nextRaw,
         priorPath: priorPair, priorSize: 188, priorCut: 14,
         nextPath: nextPair, nextSize: 188, nextOffset: 6, nextDuration: 14 })).toBe(true);
-      new ArchiveCapture(store, root, 1).recover();
+      const capture = new ArchiveCapture(store, root, 1);
+      const active = (capture as unknown as { writers: Map<string, { directory: string }> }).writers;
+      active.set('c', { directory: path.dirname(path.join(root, priorPair)) });
+      capture.recover();
+      expect(fs.existsSync(path.join(root, stages[0]))).toBe(true);
+      expect(fs.existsSync(path.join(root, stages.at(-1)!))).toBe(false);
+      active.delete('c');
+      capture.recover();
       expect(fs.existsSync(path.join(root, priorPair))).toBe(true);
       expect(fs.existsSync(path.join(root, nextPair))).toBe(true);
       expect(fs.existsSync(path.join(root, orphan))).toBe(false);
+      expect(stages.every(relative => !fs.existsSync(path.join(root, relative)))).toBe(true);
+      expect(fs.existsSync(unrelated)).toBe(true);
+      expect(store.totalUsageBytes()).toBe(4 * 188);
       const now = Date.now();
       const pinned = store.createSnapshot('c', 100_000, 130_000, now, now + 60_000, true);
       fs.unlinkSync(path.join(root, nextPair));
