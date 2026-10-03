@@ -26,6 +26,74 @@ function fixture(priorStart: number, nextStart: number, priorCut: number, nextOf
 }
 
 describe('verified archive pair presentation', () => {
+  it('atomically hides a duplicated middle raw chunk while old raw pins and seekable coverage survive', () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('one', 'One', true, 24);
+    const witness = 'old-chunk-000000000.ts', middle = 'old-chunk-000000001.ts';
+    const next = 'new-chunk-000000000.ts', following = 'new-chunk-000000001.ts';
+    try {
+      for (const c of [
+        { id: witness, start: 84_000, end: 103_720, duration: 19.72, path: 'old0.ts', epoch: 1 },
+        { id: middle, start: 103_720, end: 115_560, duration: 11.84, path: 'old1.ts', epoch: 1 },
+        { id: next, start: 108_000, end: 128_000, duration: 20, path: 'new0.ts', epoch: 2 },
+        { id: following, start: 128_000, end: 148_000, duration: 20, path: 'new1.ts', epoch: 2 },
+      ]) store.publish({ channelId: 'one', size: 188, ...c });
+      const pinned = store.createSnapshot('one', 84_000, 148_000, 1, 100, true, false);
+      store.addRecordingRef('show', middle);
+      const show = store.createRecordingSnapshot('show', 'one', 103_720, 115_560, 2, 100);
+      expect(store.publishPlaybackPair({
+        priorId: witness, middleId: middle, nextId: next,
+        priorRawPath: 'old0.ts', middleRawPath: 'old1.ts', nextRawPath: 'new0.ts',
+        priorPath: 'old0.pair.playback.ts', priorSize: 180, priorCut: 9.6,
+        nextPath: 'new0.pair.playback.ts', nextSize: 170, nextOffset: 0, nextDuration: 20,
+        sessionTimeline: [{ id: next, presentationStart: 93_600 },
+          { id: following, presentationStart: 113_600 }],
+      })).toBe(true);
+      expect(store.getChunk(middle)).toMatchObject({ playbackHidden: 1, pairRole: 'middle' });
+      const fresh = store.createSnapshot('one', 84_000, 133_600, 3, 100, true);
+      expect(fresh.chunks.map(c => c.id)).toEqual([witness, next, following]);
+      expect(fresh.chunks.map(playableStart)).toEqual([84_000, 93_600, 113_600]);
+      expect(archiveGaps(fresh.chunks, 84_000, 133_600)).toEqual([]);
+      expect(buildArchiveVod(fresh.chunks, id => id)).toContain('#EXT-X-ENDLIST');
+      expect(store.snapshot(pinned.id)?.chunks.map(c => c.id)).toEqual([witness, middle, next, following]);
+      expect(store.snapshot(show.id)?.chunks[0]).toMatchObject({ id: middle, playbackPath: null });
+      const rollback = store.createSnapshot('one', 84_000, 148_000, 3, 100, true, false);
+      expect(rollback.chunks.map(c => c.id)).toEqual([witness, middle, next, following]);
+      expect(rollback.chunks.every(c => c.playbackPath == null && c.pairId == null)).toBe(true);
+      expect(store.totalUsageBytes()).toBe(4 * 188 + 350);
+      expect(store.retirablePairs('one', 200_000, 4)).toEqual([]);
+      expect(store.reconcileMissing(middle)).toBe('quarantined');
+      expect(store.snapshot(fresh.id)).toBeUndefined();
+      expect(store.overlap('one', 94_000, 96_000, true)).toEqual([]);
+      store.markAvailable(middle);
+      expect(store.snapshot(fresh.id)?.chunks).toHaveLength(3);
+      expect(store.restorePlaybackPairRaw(next, () => true)).toBe(true);
+      expect(store.getChunk(middle)).toMatchObject({ playbackHidden: 0, pairId: null });
+      expect(store.overlap('one', 104_000, 110_000, true, false).map(c => c.id))
+        .toEqual([middle, next]);
+    } finally { db.close(); }
+  });
+  it('keeps a hidden middle master until its saved-show pin expires, then retires all three roles', () => {
+    const { db, store, pair } = fixture(100_000, 108_000, 9.6, 0);
+    try {
+      store.addRecordingRef('show', pair.priorId);
+      const now = 90_000_000;
+      const pinned = store.createRecordingSnapshot('show', 'one', 100_000, 120_000, now, now + 5_000);
+      expect(store.publishPlaybackPair({ ...pair, priorId: 'old-chunk-000000000.ts',
+        middleId: pair.priorId, priorRawPath: 'old0.ts', middleRawPath: pair.priorRawPath,
+        priorPath: 'old0.pair.playback.ts', nextOffset: 0, nextDuration: 20 })).toBe(true);
+      const id = store.getChunk(pair.nextId)!.pairId!;
+      expect(store.retirablePairs('one', 1_000_000, now + 1)).toEqual([]);
+      expect(store.retirePlaybackPair('one', id, now + 1)).toBe(false);
+      expect(store.snapshot(pinned.id)?.chunks[0]).toMatchObject({ id: pair.priorId, playbackPath: null });
+      store.clearExpired(now + 5_000);
+      expect(store.retirablePairs('one', 1_000_000, now + 5_001)).toEqual([id]);
+      expect(store.retirePlaybackPair('one', id, now + 5_001)).toBe(true);
+      expect(store.getChunk(pair.priorId)).toMatchObject({ playbackHidden: 0, pairRole: null });
+      expect(store.detachedPlayback(now + 5_001).map(c => c.path).sort())
+        .toEqual(['old0.pair.playback.ts', pair.nextPath].sort());
+    } finally { db.close(); }
+  });
   it('holds detached pair copies until a preexisting snapshot pin expires', () => {
     const { db, store, pair } = fixture(100_000, 108_000, 14, 6);
     try {

@@ -81,6 +81,9 @@ function ensureArchiveSchemaWithinTransaction(db: Db): void {
     );
     CREATE INDEX IF NOT EXISTS idx_archive_program_history_time ON archive_program_history(channelId,startTime,endTime);
   `);
+  if (!(db.pragma('table_info(archive_playback_pairs)') as Array<{ name: string }>).some(c => c.name === 'middleId'))
+    db.exec('ALTER TABLE archive_playback_pairs ADD COLUMN middleId TEXT REFERENCES media_chunks(id)');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_archive_pair_middle ON archive_playback_pairs(middleId)');
   if (!(db.pragma('table_info(archive_snapshots)') as Array<{ name: string }>).some(c => c.name === 'createdAt')) {
     db.exec('ALTER TABLE archive_snapshots ADD COLUMN createdAt INTEGER NOT NULL DEFAULT 0');
   }
@@ -181,9 +184,12 @@ export function createArchiveStore(db: Db) {
       seen.add(current);
       const pair = db.prepare(`SELECT p.priorId FROM archive_playback_pairs p
         JOIN media_chunks a ON a.id = p.priorId JOIN media_chunks b ON b.id = p.nextId
+        LEFT JOIN media_chunks m ON m.id = p.middleId
         WHERE p.id = ? AND a.unavailable = 0 AND b.unavailable = 0
           AND a.pairId = p.id AND b.pairId = p.id
-          AND a.playbackPath = p.priorPath AND b.playbackPath = p.nextPath`)
+          AND a.playbackPath = p.priorPath AND b.playbackPath = p.nextPath
+          AND (p.middleId IS NULL OR (m.unavailable = 0 AND m.pairId = p.id
+            AND m.pairRole = 'middle' AND m.playbackHidden = 1 AND m.playbackPath IS NULL))`)
         .get(current) as { priorId: string } | undefined;
       if (!pair) { valid = false; break; }
       chain.push(current);
@@ -205,7 +211,8 @@ export function createArchiveStore(db: Db) {
     const broken = selectPairs ? pairs.filter(p => !pairValid(p.id, validity)) : [];
     const selected = chunks(
       `SELECT * FROM media_chunks WHERE channelId = ? AND unavailable = 0
-        AND (? = 1 OR playbackHidden = 0) ORDER BY end,rowid`, channelId, raw ? 1 : 0,
+        AND (? = 1 OR playbackHidden = 0 OR (? = 1 AND pairId IS NULL))
+        ORDER BY end,rowid`, channelId, raw && !selectPairs ? 1 : 0, raw ? 1 : 0,
     ).map(c => presentation(c, raw, selectPairs)).filter(chunk => {
       const playableStart = chunk.presentationStart ?? chunk.start + (chunk.playbackPath ? (chunk.playbackOffset ?? 0) * 1000 : 0);
       const playableEnd = playableStart + (chunk.playbackPath ? (chunk.playbackDuration ?? chunk.duration) : chunk.duration) * 1000;
@@ -284,14 +291,17 @@ export function createArchiveStore(db: Db) {
       return db.transaction(() => {
         const selected = getChunk(id);
         if (!selected?.pairId) return false;
-        const pair = db.prepare(`SELECT priorId,nextId,session FROM archive_playback_pairs WHERE id = ?`)
-          .get(selected.pairId) as { priorId: string; nextId: string; session: string } | undefined;
+        const pair = db.prepare(`SELECT priorId,middleId,nextId,session FROM archive_playback_pairs WHERE id = ?`)
+          .get(selected.pairId) as { priorId: string; middleId: string | null; nextId: string; session: string } | undefined;
         if (!pair) return false;
         const prefix = `${pair.session}-chunk-`;
         if (db.prepare(`SELECT 1 FROM archive_playback_pairs WHERE id != ?
           AND substr(priorId,1,length(?)) = ? LIMIT 1`).get(selected.pairId, prefix, prefix)) return false;
-        const prior = getChunk(pair.priorId), next = getChunk(pair.nextId);
+        const prior = getChunk(pair.priorId), middle = pair.middleId ? getChunk(pair.middleId) : undefined;
+        const next = getChunk(pair.nextId);
         if (!prior || !next || prior.unavailable || next.unavailable ||
+          (pair.middleId && (!middle || middle.unavailable || middle.pairId !== selected.pairId ||
+            !rawAvailable(middle.path))) ||
           prior.pairId !== selected.pairId || next.pairId !== selected.pairId ||
           !rawAvailable(prior.path) || !rawAvailable(next.path)) return false;
         detach(prior); detach(next);
@@ -301,6 +311,8 @@ export function createArchiveStore(db: Db) {
         db.prepare(`UPDATE media_chunks SET playbackPath = NULL, playbackSize = 0,
           playbackOffset = 0, playbackDuration = NULL, presentationStart = NULL,
           pairId = NULL, pairRole = NULL WHERE id IN (?,?)`).run(pair.priorId, pair.nextId);
+        if (middle) db.prepare(`UPDATE media_chunks SET playbackHidden = 0, pairId = NULL, pairRole = NULL
+          WHERE id = ? AND pairId = ?`).run(middle.id, selected.pairId);
         const priorSession = sessionOf(pair.priorId);
         if (priorSession && db.prepare('SELECT 1 FROM archive_playback_pairs WHERE session = ?').get(priorSession))
           db.prepare('UPDATE media_chunks SET presentationStart = ? WHERE id = ?')
@@ -317,7 +329,8 @@ export function createArchiveStore(db: Db) {
       return db.transaction(() => {
         const selected = getChunk(id);
         if (!selected?.pairId) return false;
-        const order: Array<{ id: string; priorId: string; nextId: string; session: string }> = [];
+        const order: Array<{ id: string; priorId: string; middleId: string | null;
+          nextId: string; session: string }> = [];
         const seen = new Set<string>();
         const pending: Array<{ id: string; pair?: (typeof order)[number] }> = [
           { id: selected.pairId },
@@ -327,7 +340,7 @@ export function createArchiveStore(db: Db) {
           if (item.pair) { order.push(item.pair); continue; }
           if (seen.has(item.id) || seen.size >= 20_000) return false;
           seen.add(item.id);
-          const pair = db.prepare(`SELECT id,priorId,nextId,session FROM archive_playback_pairs WHERE id = ?`)
+          const pair = db.prepare(`SELECT id,priorId,middleId,nextId,session FROM archive_playback_pairs WHERE id = ?`)
             .get(item.id) as (typeof order)[number] | undefined;
           if (!pair) return false;
           pending.push({ id: item.id, pair });
@@ -338,8 +351,11 @@ export function createArchiveStore(db: Db) {
           for (const dependent of dependents.reverse()) pending.push({ id: dependent.id });
         }
         for (const pair of order) {
-          const prior = getChunk(pair.priorId), next = getChunk(pair.nextId);
+          const prior = getChunk(pair.priorId), middle = pair.middleId ? getChunk(pair.middleId) : undefined;
+          const next = getChunk(pair.nextId);
           if (!prior || !next || prior.unavailable || next.unavailable ||
+              (pair.middleId && (!middle || middle.unavailable || middle.pairId !== pair.id ||
+                !rawAvailable(middle.path))) ||
               prior.pairId !== pair.id || next.pairId !== pair.id ||
               !rawAvailable(prior.path) || !rawAvailable(next.path)) return false;
         }
@@ -350,6 +366,8 @@ export function createArchiveStore(db: Db) {
           db.prepare(`UPDATE media_chunks SET playbackPath = NULL, playbackSize = 0,
             playbackOffset = 0, playbackDuration = NULL, presentationStart = NULL,
             pairId = NULL, pairRole = NULL WHERE id IN (?,?)`).run(pair.priorId, pair.nextId);
+          if (pair.middleId) db.prepare(`UPDATE media_chunks SET playbackHidden = 0,
+            pairId = NULL, pairRole = NULL WHERE id = ? AND pairId = ?`).run(pair.middleId, pair.id);
           const priorSession = sessionOf(pair.priorId);
           if (priorSession && db.prepare('SELECT 1 FROM archive_playback_pairs WHERE session = ?').get(priorSession))
             db.prepare('UPDATE media_chunks SET presentationStart = ? WHERE id = ?')
@@ -363,19 +381,22 @@ export function createArchiveStore(db: Db) {
     },
     /** Caller verifies and renames both existing media paths before this
      * metadata-only transaction. False leaves both staged files to the caller. */
-    publishPlaybackPair(pair: { priorId: string; nextId: string; priorRawPath: string; nextRawPath: string;
+    publishPlaybackPair(pair: { priorId: string; middleId?: string; nextId: string;
+      priorRawPath: string; middleRawPath?: string; nextRawPath: string;
       priorPath: string; priorSize: number;
       priorCut: number; nextPath: string; nextSize: number; nextOffset: number; nextDuration: number;
       sessionTimeline?: Array<{ id: string; presentationStart: number }> },
     now = Date.now()): boolean {
       const { priorId, nextId, priorPath, priorSize, priorCut, nextPath, nextSize, nextOffset, nextDuration } = pair;
-      if (priorId === nextId || priorPath === nextPath ||
+      if (priorId === nextId || (pair.middleId && [priorId, nextId].includes(pair.middleId)) ||
+        (!!pair.middleId !== !!pair.middleRawPath) || priorPath === nextPath ||
         ![priorPath, nextPath].every(p => typeof p === 'string' && p.endsWith('.playback.ts') && !p.startsWith('/')) ||
         ![priorSize, nextSize].every(n => Number.isSafeInteger(n) && n > 0) ||
         !Number.isSafeInteger(now) || ![priorCut, nextOffset, nextDuration].every(n => Number.isFinite(n)) ||
         priorCut <= 0 || nextOffset < 0 || nextDuration <= 0) return false;
       return db.transaction(() => {
-        const prior = getChunk(priorId), next = getChunk(nextId);
+        const prior = getChunk(priorId), middle = pair.middleId ? getChunk(pair.middleId) : undefined;
+        const next = getChunk(nextId);
         const session = sessionOf(nextId);
         if (!prior || !next || !session || !sessionOf(priorId) || sessionOf(priorId) === session ||
           prior.path !== pair.priorRawPath || next.path !== pair.nextRawPath ||
@@ -384,6 +405,14 @@ export function createArchiveStore(db: Db) {
           prior.pairId || next.pairId || prior.end >= next.end ||
           [prior.path, next.path, prior.playbackPath, next.playbackPath].includes(priorPath) ||
           [prior.path, next.path, prior.playbackPath, next.playbackPath].includes(nextPath) ||
+          (pair.middleId && (!middle || middle.path !== pair.middleRawPath ||
+            middle.channelId !== prior.channelId || middle.unavailable || middle.playbackHidden ||
+            middle.pairId || middle.playbackPath || middle.epoch !== prior.epoch ||
+            sessionOf(middle.id) !== sessionOf(priorId) || middle.end <= prior.end ||
+            middle.end >= next.end ||
+            !/-chunk-(\d{9})\.ts$/.test(priorId) ||
+            Number(/-chunk-(\d{9})\.ts$/.exec(middle.id)?.[1]) !==
+              Number(/-chunk-(\d{9})\.ts$/.exec(priorId)![1]) + 1)) ||
           priorCut > prior.duration || nextOffset + nextDuration > next.duration + 0.001 ||
           db.prepare('SELECT 1 FROM archive_playback_pairs WHERE session = ?').get(session)) return false;
         const pinned = db.prepare(`SELECT 1 FROM archive_snapshot_chunks sc
@@ -395,7 +424,14 @@ export function createArchiveStore(db: Db) {
           AND p.playbackHidden = 0 AND (p.end < ? OR (p.end = ? AND p.rowid <
             (SELECT rowid FROM media_chunks WHERE id = ?))) ORDER BY p.end DESC,p.rowid DESC LIMIT 1`)
           .get(next.channelId, next.end, next.end, nextId) as { id: string } | undefined;
-        if (previous?.id !== priorId) return false;
+        if (previous?.id !== (middle?.id ?? priorId)) return false;
+        if (middle) {
+          const beforeMiddle = db.prepare(`SELECT p.id FROM media_chunks p WHERE p.channelId = ?
+            AND p.unavailable = 0 AND p.playbackHidden = 0 AND p.end < ?
+            ORDER BY p.end DESC,p.rowid DESC LIMIT 1`).get(middle.channelId, middle.end) as
+            { id: string } | undefined;
+          if (beforeMiddle?.id !== priorId) return false;
+        }
         const priorPresentationStart = prior.presentationStart ?? prior.start;
         if (pair.sessionTimeline) {
           const rows = chunks(`SELECT * FROM media_chunks WHERE channelId = ?
@@ -412,14 +448,17 @@ export function createArchiveStore(db: Db) {
         detach(prior); detach(next);
         const id = randomUUID();
         const shift = priorPresentationStart + priorCut * 1000 - next.start - nextOffset * 1000;
-        db.prepare(`INSERT INTO archive_playback_pairs(id,priorId,nextId,session,shiftMs,priorPath,nextPath)
-          VALUES(?,?,?,?,?,?,?)`).run(id, priorId, nextId, session, shift, priorPath, nextPath);
+        db.prepare(`INSERT INTO archive_playback_pairs(id,priorId,nextId,session,shiftMs,priorPath,nextPath,middleId)
+          VALUES(?,?,?,?,?,?,?,?)`).run(id, priorId, nextId, session, shift, priorPath, nextPath, middle?.id ?? null);
         const update = db.prepare(`UPDATE media_chunks SET playbackPath = ?, playbackSize = ?, playbackOffset = ?,
           playbackDuration = ?, presentationStart = ?, pairId = ?, pairRole = ? WHERE id = ?
           AND pairId IS NULL AND unavailable = 0`);
         if (update.run(priorPath, priorSize, 0, priorCut, priorPresentationStart, id, 'prior', priorId).changes !== 1 ||
           update.run(nextPath, nextSize, nextOffset, nextDuration,
             priorPresentationStart + priorCut * 1000, id, 'next', nextId).changes !== 1) throw new Error('Pair changed during publication');
+        if (middle && db.prepare(`UPDATE media_chunks SET playbackHidden = 1, pairId = ?, pairRole = 'middle'
+          WHERE id = ? AND pairId IS NULL AND playbackHidden = 0 AND playbackPath IS NULL AND unavailable = 0`)
+          .run(id, middle.id).changes !== 1) throw new Error('Middle chunk changed during publication');
         if (pair.sessionTimeline) {
           const updateStart = db.prepare(`UPDATE media_chunks SET presentationStart = ?
             WHERE id = ? AND pairId IS NULL AND unavailable = 0`);
@@ -506,7 +545,8 @@ export function createArchiveStore(db: Db) {
         if (!getChunk(id)) return 'absent';
         const referenced = db.prepare(`SELECT 1 FROM recording_chunk_refs WHERE chunkId = ? UNION ALL
           SELECT 1 FROM archive_snapshot_chunks WHERE chunkId = ? UNION ALL
-          SELECT 1 FROM archive_playback_pairs WHERE priorId = ? OR nextId = ? LIMIT 1`).get(id, id, id, id);
+          SELECT 1 FROM archive_playback_pairs WHERE priorId = ? OR middleId = ? OR nextId = ? LIMIT 1`)
+          .get(id, id, id, id, id);
         if (referenced) {
           db.prepare('UPDATE media_chunks SET unavailable = 1 WHERE id = ?').run(id);
           return 'quarantined';
@@ -545,7 +585,8 @@ export function createArchiveStore(db: Db) {
       const sessions = new Map<string, string | null>();
       let availableFrom: number | null = null, availableTo: number | null = null;
       for (const row of chunks(`SELECT * FROM media_chunks WHERE channelId = ? AND unavailable = 0
-        AND (? = 1 OR playbackHidden = 0) ORDER BY end,rowid`, channelId, raw ? 1 : 0)) {
+        AND (? = 1 OR playbackHidden = 0 OR (? = 1 AND pairId IS NULL))
+        ORDER BY end,rowid`, channelId, raw && !selectPairs ? 1 : 0, raw ? 1 : 0)) {
         const session = sessionOf(row.id);
         let sessionPair = session ? sessions.get(session) : null;
         if (session && sessionPair === undefined) {
@@ -602,9 +643,12 @@ export function createArchiveStore(db: Db) {
         if (selected.some(c => c.pairId && !pairValid(c.pairId, validity)))
           throw new Error('Archive pair is unavailable');
         if (selectPairs && db.prepare(`SELECT 1 FROM archive_playback_pairs p JOIN media_chunks a ON a.id = p.priorId
-          JOIN media_chunks b ON b.id = p.nextId WHERE a.channelId = ? AND
+          JOIN media_chunks b ON b.id = p.nextId LEFT JOIN media_chunks m ON m.id = p.middleId
+          WHERE a.channelId = ? AND
           (a.start < ? AND a.end > ? OR b.start < ? AND b.end > ?) AND
-          (a.playbackPath IS NULL OR b.playbackPath IS NULL OR a.unavailable != 0 OR b.unavailable != 0)
+          (a.playbackPath IS NULL OR b.playbackPath IS NULL OR a.unavailable != 0 OR b.unavailable != 0
+            OR (p.middleId IS NOT NULL AND (m.id IS NULL OR m.unavailable != 0 OR m.pairId != p.id
+              OR m.playbackHidden != 1)))
           LIMIT 1`).get(channelId, endTime, startTime, endTime, startTime)) throw new Error('Archive pair is unavailable');
         db.prepare('INSERT INTO archive_snapshots(id,channelId,startTime,endTime,expiresAt,createdAt) VALUES(?,?,?,?,?,?)').run(id, channelId, startTime, endTime, expiresAt, now);
         const add = db.prepare(`INSERT INTO archive_snapshot_chunks
@@ -652,12 +696,14 @@ export function createArchiveStore(db: Db) {
     retirablePairs(channelId: string, cutoff: number, now: number): string[] {
       return (db.prepare(`SELECT p.id FROM archive_playback_pairs p
         JOIN media_chunks a ON a.id = p.priorId JOIN media_chunks b ON b.id = p.nextId
+        LEFT JOIN media_chunks m ON m.id = p.middleId
         WHERE a.channelId = ? AND b.channelId = ? AND a.end <= ? AND b.end <= ?
           AND a.pairId = p.id AND b.pairId = p.id
+          AND (p.middleId IS NULL OR (m.end <= ? AND m.pairId = p.id))
           AND NOT EXISTS (SELECT 1 FROM archive_snapshot_chunks sc
             JOIN archive_snapshots s ON s.id = sc.snapshotId
-            WHERE sc.chunkId IN (a.id,b.id) AND s.expiresAt > ?)
-        ORDER BY b.end,p.id`).all(channelId, channelId, cutoff, cutoff, now) as Array<{ id: string }>).map(p => p.id);
+            WHERE (sc.chunkId IN (a.id,b.id) OR sc.chunkId = p.middleId) AND s.expiresAt > ?)
+        ORDER BY b.end,p.id`).all(channelId, channelId, cutoff, cutoff, cutoff, now) as Array<{ id: string }>).map(p => p.id);
     },
     retirePlaybackPair(channelId: string, pairId: string, now: number): boolean {
       return db.transaction(() => {
@@ -666,14 +712,16 @@ export function createArchiveStore(db: Db) {
         const cutoff = now - policy.retentionHours * 3_600_000;
         if (!db.prepare(`SELECT 1 FROM archive_playback_pairs p
           JOIN media_chunks a ON a.id = p.priorId JOIN media_chunks b ON b.id = p.nextId
+          LEFT JOIN media_chunks m ON m.id = p.middleId
           WHERE p.id = ? AND a.channelId = ? AND b.channelId = ?
             AND a.end <= ? AND b.end <= ? AND a.pairId = p.id AND b.pairId = p.id
+            AND (p.middleId IS NULL OR (m.end <= ? AND m.pairId = p.id))
             AND NOT EXISTS (SELECT 1 FROM archive_snapshot_chunks sc
               JOIN archive_snapshots s ON s.id = sc.snapshotId
-              WHERE sc.chunkId IN (a.id,b.id) AND s.expiresAt > ?)`).get(
-                pairId, channelId, channelId, cutoff, cutoff, now)) return false;
-        const pair = db.prepare('SELECT priorId,nextId,session FROM archive_playback_pairs WHERE id = ?')
-          .get(pairId) as { priorId: string; nextId: string; session: string };
+              WHERE (sc.chunkId IN (a.id,b.id) OR sc.chunkId = p.middleId) AND s.expiresAt > ?)`).get(
+                pairId, channelId, channelId, cutoff, cutoff, cutoff, now)) return false;
+        const pair = db.prepare('SELECT priorId,middleId,nextId,session FROM archive_playback_pairs WHERE id = ?')
+          .get(pairId) as { priorId: string; middleId: string | null; nextId: string; session: string };
         const prefix = `${pair.session}-chunk-`;
         if (db.prepare(`SELECT 1 FROM archive_playback_pairs WHERE id != ?
           AND substr(priorId,1,length(?)) = ? LIMIT 1`).get(pairId, prefix, prefix)) return false;
@@ -683,6 +731,8 @@ export function createArchiveStore(db: Db) {
         db.prepare(`UPDATE media_chunks SET playbackPath = NULL, playbackSize = 0,
           playbackOffset = 0, playbackDuration = NULL, presentationStart = NULL,
           pairId = NULL, pairRole = NULL WHERE id IN (?,?)`).run(pair.priorId, pair.nextId);
+        if (pair.middleId) db.prepare(`UPDATE media_chunks SET playbackHidden = 0,
+          pairId = NULL, pairRole = NULL WHERE id = ? AND pairId = ?`).run(pair.middleId, pairId);
         const priorSession = sessionOf(pair.priorId);
         if (priorSession && db.prepare('SELECT 1 FROM archive_playback_pairs WHERE session = ?').get(priorSession))
           db.prepare('UPDATE media_chunks SET presentationStart = ? WHERE id = ?')
