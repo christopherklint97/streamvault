@@ -10,8 +10,11 @@ const MAX_INPUT_BYTES = 64 * 1024 * 1024;
 const EXTRA_WORK_MULTIPLIER = 8; // staged elementary streams, muxes and two final copies
 
 export function pairEnabledFor(channelId: string, rawMode: string | undefined,
-  allowlist: string | undefined): boolean {
-  return rawMode === '1' && channelId.length > 0 && (allowlist || '').split(',')
+  allowlist = '*'): boolean {
+  // All enabled archives are eligible by default. The optional allowlist is
+  // only an injected test constraint; it is never read from production config.
+  return process.env.STREAMVAULT_ARCHIVE_RAW_ONLY !== '1' && rawMode !== '0' &&
+    channelId.length > 0 && allowlist.split(',')
     .map(id => id.trim()).some(id => id === '*' || id === channelId);
 }
 
@@ -28,7 +31,7 @@ export async function processArchivePair(store: ArchiveStore, root: string, id: 
   if (!current || !id.endsWith('-chunk-000000000.ts')) return false;
   const canRun = () => !signal?.aborted && pairEnabledFor(current.channelId,
     flags?.rawMode ?? process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK,
-    flags?.allowlist ?? process.env.STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS);
+    flags?.allowlist);
   if (!canRun() || !store.getArchive(current.channelId)?.enabled || current.unavailable ||
       current.playbackHidden || current.pairId) return false;
   const previous = store.previousChunk(id);

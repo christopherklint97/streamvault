@@ -18,16 +18,10 @@ services:
       # Stop archive capture before exhausting host disk or crowding other services.
       - STREAMVAULT_ARCHIVE_MAX_DISK_GB=${STREAMVAULT_ARCHIVE_MAX_DISK_GB:-400}
       - STREAMVAULT_ARCHIVE_RESERVE_GB=${STREAMVAULT_ARCHIVE_RESERVE_GB:-20}
-      # Opt-in bounded, low-priority frame-accurate repair for fresh reconnects only.
-      - STREAMVAULT_FRAME_ACCURATE_SEAMS=${STREAMVAULT_FRAME_ACCURATE_SEAMS:-0}
-      - STREAMVAULT_FRAME_ACCURATE_CHANNEL_IDS=${STREAMVAULT_FRAME_ACCURATE_CHANNEL_IDS:-}
-      # Optional per-channel fast retry only after a clean, publishing archive EOF.
-      - STREAMVAULT_FAST_EOF_CHANNEL_IDS=${STREAMVAULT_FAST_EOF_CHANNEL_IDS:-}
-      # Emergency raw-master playback for new archive tickets; preserves pinned viewers.
-      - STREAMVAULT_ARCHIVE_RAW_PLAYBACK=${STREAMVAULT_ARCHIVE_RAW_PLAYBACK:-0}
-      # Channel IDs, or * for all enabled current/future archives. Empty keeps raw fallback.
-      # Only verified, quota-gated copies publish; raw masters and old snapshots remain untouched.
-      - STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS=${STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS:-}
+      # All enabled archives keep raw fallback and attempt verified, quota-gated pair repair.
+      - STREAMVAULT_ARCHIVE_RAW_PLAYBACK=${STREAMVAULT_ARCHIVE_RAW_PLAYBACK:-1}
+      # Global emergency rollback for NEW tickets only; raw masters and old pins stay intact.
+      - STREAMVAULT_ARCHIVE_RAW_ONLY=${STREAMVAULT_ARCHIVE_RAW_ONLY:-0}
       # Optional hardening. If set, browser clients must enter the same value
       # in Settings under Backend token.
       - STREAMVAULT_AUTH_TOKEN=${STREAMVAULT_AUTH_TOKEN:-}

@@ -64,13 +64,12 @@ export function hlsCaptureArgs(url: string, directory: string, authToken?: strin
 }
 
 export function archiveRetryDelay(options: {
-  channelId: string; allowlist?: string; code: number | null; signal: string | null;
+  code: number | null; signal: string | null;
   sessionMs: number; publishAgeMs: number; proxyEndAgeMs?: number; hasPublished: boolean;
   fastAttemptsLast10Min: number; stalled: boolean; storageLow: boolean;
 }): number {
   if (options.storageLow) return 60_000;
   const eligible = options.code === 0 && !options.signal && !options.stalled && options.hasPublished &&
-    options.allowlist?.split(',').some(id => id.trim() === options.channelId) &&
     options.sessionMs >= 30_000 && options.publishAgeMs >= 0 && options.publishAgeMs <= 30_000 &&
     options.proxyEndAgeMs !== undefined && options.proxyEndAgeMs >= 0 && options.proxyEndAgeMs <= 5_000 &&
     options.fastAttemptsLast10Min >= 0 && options.fastAttemptsLast10Min < 4;
@@ -118,8 +117,11 @@ export class ArchiveCapture {
     private readonly processSeam: typeof processArchiveSeam = processArchiveSeam,
     private readonly processPair: typeof processArchivePair = processArchivePair) {}
   private pairCanRun(channelId: string): boolean {
-    return pairEnabledFor(channelId, process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK,
-      process.env.STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS);
+    return pairEnabledFor(channelId, process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK);
+  }
+  private get rawMode(): boolean {
+    return process.env.STREAMVAULT_ARCHIVE_RAW_ONLY === '1' ||
+      process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK !== '0';
   }
   /** Correlate a loopback capture's completed response with its active writer. */
   noteProxyLifecycle(channelId: string, session: string, cause: string, responseFinished: boolean): void {
@@ -132,7 +134,7 @@ export class ArchiveCapture {
    * New archive segments jump ahead of historical backfill; one job runs at a time. */
   private enqueueSeam(id: string, urgent = false): void {
     if (this.stopping || !id.endsWith('-chunk-000000000.ts')) return;
-    const rawMode = process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1';
+    const rawMode = this.rawMode;
     const channel = rawMode ? this.store.getChunk(id)?.channelId : undefined;
     if (rawMode && !this.pairCanRun(channel ?? '')) return;
     if (this.seamQueued.has(id)) {
@@ -161,9 +163,9 @@ export class ArchiveCapture {
   /** New playback tickets can lift an existing historical seam ahead of backfill.
    * The ticket's pinned media is unchanged; reopening later selects repaired copies. */
   prioritizeWindow(channelId: string, start: number, end: number): void {
-    if (this.stopping || (process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1' &&
+    if (this.stopping || (this.rawMode &&
         !this.pairCanRun(channelId)) || !this.store.getArchive(channelId)?.enabled || end <= start) return;
-    const candidates = (process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1'
+    const candidates = (this.rawMode
       ? this.store.pairCandidates(channelId, start)
       : this.store.seamCandidates(channelId, start))
       .filter(chunk => chunk.start < end).slice(0, 200);
@@ -175,9 +177,8 @@ export class ArchiveCapture {
     this.seamTimer = setTimeout(() => {
       this.seamTimer = null;
       if (this.stopping) return;
-      if (process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1' &&
-          (!process.env.STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS?.trim() ||
-            !this.seamQueue.some(id => this.pairCanRun(this.seamPairChannels.get(id) ?? '')))) {
+      if (this.rawMode &&
+          !this.seamQueue.some(id => this.pairCanRun(this.seamPairChannels.get(id) ?? ''))) {
         this.seamQueue = [];
         this.seamQueued.clear();
         this.seamUrgent.clear();
@@ -196,7 +197,7 @@ export class ArchiveCapture {
       if (!id) return;
       const chunk = this.store.getChunk(id);
       if (!chunk || !this.store.getArchive(chunk.channelId)?.enabled ||
-          (process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1' &&
+          (this.rawMode &&
             (!this.seamPairChannels.has(id) || !this.pairCanRun(chunk.channelId)))) {
         this.seamQueued.delete(id);
         this.seamUrgent.delete(id);
@@ -207,7 +208,7 @@ export class ArchiveCapture {
       this.seamWorkAbort = controller;
       this.seamWorkChannel = chunk.channelId;
       const signal = AbortSignal.any([this.seamAbort.signal, controller.signal]);
-      const processor = process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1' ? this.processPair : this.processSeam;
+      const processor = this.rawMode ? this.processPair : this.processSeam;
       const work = processor(this.store, this.root, id, Date.now(), reserve, maximum, signal)
         .then(() => {}, () => {
           if (!this.stopping) logger.warn('Archive seam check failed; captured media preserved');
@@ -283,14 +284,13 @@ export class ArchiveCapture {
       const reason = writer.capacityError ?? (writer.stale ? 'No archive segment published for two minutes' :
         'Source disconnected');
       this.store.setStatus(channelId, writer.capacityError ? 'storage_low' : 'retrying', reason);
-      // An opt-in clean, recently publishing writer exit can skip most of the
-      // cooldown. The replacement still uses a fresh session so its first
+      // A clean, recently publishing writer exit can skip most of the cooldown
+      // on every channel. The replacement still uses a fresh session so its first
       // chunk remains an explicit discontinuity and seam-repair candidate.
       const now = Date.now();
       const recentFastRetries = (this.fastRetryHistory.get(channelId) ?? [])
         .filter(at => at <= now && now - at < 10 * 60_000);
-      const delay = archiveRetryDelay({ channelId,
-        allowlist: process.env.STREAMVAULT_FAST_EOF_CHANNEL_IDS, code, signal,
+      const delay = archiveRetryDelay({ code, signal,
         sessionMs: now - writer.startedAt, publishAgeMs: now - writer.lastPublishedAt,
         proxyEndAgeMs: writer.proxyEndAt === undefined ? undefined : now - writer.proxyEndAt,
         hasPublished: Boolean(this.store.cursor(path.basename(writer.directory))),
@@ -537,8 +537,8 @@ export class ArchiveCapture {
     // Derived copies never overwrite the masters or an existing snapshot pin.
     const now = Date.now();
     const candidates = this.store.archives().filter(archive => archive.enabled &&
-      (process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK !== '1' || this.pairCanRun(archive.channelId)))
-      .flatMap(archive => process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1'
+      (!this.rawMode || this.pairCanRun(archive.channelId)))
+      .flatMap(archive => this.rawMode
         ? this.store.pairCandidates(archive.channelId, now - archive.retentionHours * 3_600_000)
         : this.store.seamCandidates(archive.channelId, now - archive.retentionHours * 3_600_000));
     const windows = this.store.recentViewerWindows(now, 60 * 60_000);
