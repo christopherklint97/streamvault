@@ -122,9 +122,10 @@ it('serves prior raw masters and hidden chunks to new archive tickets when emerg
     expect(store.setPlaybackMedia('joined', 'joined.playback.ts', 8, 5, 15, Date.now())).toBe(true);
     const ticket = () => fetch(`${base}/api/archive/c/playback-ticket`, { method: 'POST',
       headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ startTime: 1_000, endTime: 61_000 }) }).then(r => r.json()) as Promise<{ url: string; snapshotId: string; duration: number; endTime: number }>;
+    vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '0');
     const prior = await ticket();
     expect(store.snapshot(prior.snapshotId)?.chunks.map(c => c.id)).toEqual(['first', 'joined']);
-    vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '1');
+    vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_ONLY', '1');
     const fallback = await ticket();
     expect(fallback.duration).toBe(60);
     expect(fallback.endTime).toBe(61_000);

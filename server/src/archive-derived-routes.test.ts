@@ -1,4 +1,4 @@
-import { it, expect } from 'vitest';
+import { it, expect, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import express from 'express';
 import fs from 'node:fs';
@@ -8,6 +8,8 @@ import { createArchiveStore, ensureArchiveSchema } from './archive-store.js';
 import { createArchiveRouter } from './archive-routes.js';
 
 it('serves the pinned derivative through finite seekable HLS while retaining the raw TS', async () => {
+  // This fixture exercises the legacy derivative path, not the default raw+pair mode.
+  vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '0');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-derived-route-'));
   const db = new Database(':memory:'); ensureArchiveSchema(db);
   const store = createArchiveStore(db); store.configure('one', 'One', true, 24);
@@ -49,5 +51,5 @@ it('serves the pinned derivative through finite seekable HLS while retaining the
     expect(served.status).toBe(200);
     expect((await served.arrayBuffer()).byteLength).toBe(376);
     expect(fs.statSync(path.join(root, 'raw.ts')).size).toBe(188);
-  } finally { await new Promise<void>(resolve => server.close(() => resolve())); db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  } finally { vi.unstubAllEnvs(); await new Promise<void>(resolve => server.close(() => resolve())); db.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });

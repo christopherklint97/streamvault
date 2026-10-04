@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { parsePublishedSegments, hlsCaptureArgs, hasArchiveReserve, hasArchiveCapacity, nextArchiveEpoch, archiveRetryDelay } from './archive-capture.js';
 import { ArchiveCapture } from './archive-capture.js';
 import { createArchiveStore, ensureArchiveSchema } from './archive-store.js';
@@ -12,6 +12,9 @@ import type { ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 
 describe('stream-copy HLS capture', () => {
+  // Older seam-worker tests opt into the legacy presentation mode explicitly.
+  beforeEach(() => vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '0'));
+  afterEach(() => vi.unstubAllEnvs());
   it('recovers every committed entry from an interrupted session and deletes unindexed artifacts', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-restart-'));
     const db = new Database(':memory:'); ensureArchiveSchema(db);
@@ -196,8 +199,17 @@ describe('stream-copy HLS capture', () => {
       const port = (server.address() as { port: number }).port;
       const proc = spawn('ffmpeg', hlsCaptureArgs(`http://127.0.0.1:${port}/stream`, root,
         'synthetic-test-token', session), { stdio: ['ignore', 'ignore', 'ignore'] });
-      await Promise.race([new Promise<void>(resolve => proc.once('close', () => resolve())),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('ffmpeg request timeout')), 5_000))]);
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([new Promise<void>(resolve => proc.once('close', () => resolve())),
+          new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error('ffmpeg request timeout')), 15_000); })]);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+        if (proc.exitCode === null && proc.signalCode === null) {
+          proc.kill('SIGKILL');
+          await new Promise<void>(resolve => proc.once('close', () => resolve()));
+        }
+      }
       expect(observed).toEqual({ session, auth: 'Bearer synthetic-test-token' });
     } finally {
       server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
@@ -337,13 +349,14 @@ describe('stream-copy HLS capture', () => {
     } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 
-  it('keeps normal and storage backoff unless a canary writer had a fresh clean exit', () => {
-    const eligible = { channelId: 'live_44115', allowlist: 'live_44115', code: 0, signal: null,
+  it('uses bounded fast retries for any fresh clean EOF, with normal and storage fallback', () => {
+    const eligible = { channelId: 'live_44115', code: 0, signal: null,
       sessionMs: 45_000, publishAgeMs: 5_000, proxyEndAgeMs: 500, hasPublished: true,
       fastAttemptsLast10Min: 0, stalled: false, storageLow: false };
     expect(archiveRetryDelay(eligible)).toBe(1_000);
+    expect(archiveRetryDelay({ ...eligible, channelId: 'live_future' })).toBe(1_000);
     for (const override of [
-      { allowlist: '' }, { channelId: 'live_17289' }, { code: 1 }, { signal: 'SIGINT' },
+      { code: 1 }, { signal: 'SIGINT' },
       { sessionMs: 29_999 }, { publishAgeMs: 30_001 }, { proxyEndAgeMs: -1 },
       { proxyEndAgeMs: 5_001 }, { hasPublished: false }, { stalled: true },
       { fastAttemptsLast10Min: 4 },
@@ -352,12 +365,11 @@ describe('stream-copy HLS capture', () => {
     expect(archiveRetryDelay({ ...eligible, storageLow: true })).toBe(60_000);
   });
 
-  it('retries a published TV4 EOF promptly while preserving a new repairable session', async () => {
+  it('retries a published archive EOF promptly while preserving a new repairable session', async () => {
     const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? os.tmpdir(), 'archive-eof-'));
     const db = new Database(':memory:'); ensureArchiveSchema(db);
     const store = createArchiveStore(db); store.configure('live_44115', 'TV4', true, 24);
-    const previous = process.env.STREAMVAULT_FAST_EOF_CHANNEL_IDS;
-    process.env.STREAMVAULT_FAST_EOF_CHANNEL_IDS = 'live_44115';
+
     vi.useFakeTimers();
     const child = () => Object.assign(new EventEmitter(), { stderr: new EventEmitter(), kill: vi.fn(() => true) });
     const first = child(), second = child(), third = child();
@@ -409,8 +421,7 @@ describe('stream-copy HLS capture', () => {
       expect(history.get('live_44115')).toHaveLength(4);
       const stopped = capture.stopAll(); third.emit('close', null, 'SIGINT'); await stopped;
     } finally {
-      if (previous === undefined) delete process.env.STREAMVAULT_FAST_EOF_CHANNEL_IDS;
-      else process.env.STREAMVAULT_FAST_EOF_CHANNEL_IDS = previous;
+
       vi.clearAllTimers(); vi.useRealTimers(); db.close(); fs.rmSync(root, { recursive: true, force: true });
     }
   });
@@ -644,7 +655,7 @@ describe('stream-copy HLS capture', () => {
       processSeam as unknown as typeof import('./archive-seam.js').processArchiveSeam,
       processPair as unknown as typeof import('./archive-pair-worker.js').processArchivePair);
     vi.useFakeTimers(); vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '1');
-    vi.stubEnv('STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS', '*');
+    vi.stubEnv('STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS', 'unrelated_channel');
     try {
       const internals = capture as unknown as { seamQueue: string[];
         enqueueSeam: (id: string, urgent: boolean) => void };
@@ -676,7 +687,7 @@ describe('stream-copy HLS capture', () => {
     fs.writeFileSync(path.join(dir, 'chunk-000000000.ts'), Buffer.alloc(188, 0x47));
     const capture = new ArchiveCapture(store, root, 1);
     vi.useFakeTimers({ now }); vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '1');
-    vi.stubEnv('STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS', 'one');
+    vi.stubEnv('STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS', 'unrelated_channel');
     try {
       (capture as unknown as { publishFile: (channelId: string, directory: string,
         name: string, duration: number, discontinuity: boolean) => void })
@@ -755,7 +766,7 @@ describe('stream-copy HLS capture', () => {
     store.createSnapshot('espn', 0, 40_000, now, now + 500, false);
     const capture = new ArchiveCapture(store, root, 1);
     vi.useFakeTimers(); vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '1');
-    vi.stubEnv('STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS', 'espn');
+    vi.stubEnv('STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS', 'unrelated_channel');
     try {
       const internals = capture as unknown as { seamQueue: string[] };
       capture.prioritizeWindow('espn', 0, 40_000);
@@ -801,6 +812,34 @@ describe('stream-copy HLS capture', () => {
       expect(internals.seamQueue).toHaveLength(20_000);
       await capture.stopAll();
     } finally { vi.clearAllTimers(); vi.useRealTimers(); db.close(); }
+  });
+
+  it('backfills verified pairs for future enabled channels by default without channel selectors', async () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('live_future', 'Future', true, 24);
+    const id = '11111111-1111-4111-8111-111111111111-chunk-000000000.ts';
+    const now = Date.now();
+    store.publish({ id, channelId: 'live_future', start: now - 20_000,
+      end: now, duration: 20, path: 'raw.ts', size: 188, epoch: 1 });
+    const pairCandidates = vi.spyOn(store, 'pairCandidates');
+    const legacyCandidates = vi.spyOn(store, 'seamCandidates');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-global-backfill-'));
+    vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '');
+    vi.stubEnv('STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS', 'unrelated_channel');
+    const fakeSpawn = vi.fn(() => {
+      const proc = Object.assign(new EventEmitter(), { stderr: new EventEmitter(),
+        kill: () => { queueMicrotask(() => proc.emit('close', 0)); return true; } });
+      return proc as unknown as ChildProcess;
+    });
+    const capture = new ArchiveCapture(store, root, 1, undefined,
+      fakeSpawn as unknown as typeof import('node:child_process').spawn);
+    try {
+      capture.startAll();
+      expect(pairCandidates).toHaveBeenCalledWith('live_future', expect.any(Number));
+      expect(legacyCandidates).not.toHaveBeenCalled();
+      expect((capture as unknown as { seamQueue: string[] }).seamQueue).toContain(id);
+      await capture.stopAll();
+    } finally { vi.unstubAllEnvs(); db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 
   it('runs one nonblocking TV4 seam check at a time and prioritizes fresh capture over backfill', async () => {

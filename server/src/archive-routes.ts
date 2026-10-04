@@ -31,9 +31,10 @@ export function createArchiveRouter(deps: {
     // database error is diagnostic-only and must never be returned to clients.
     const error = row.status === 'storage_low' ? 'Archive storage low or unavailable' :
       row.status === 'retrying' ? 'Archive source disconnected; reconnecting' : null;
-    const raw = process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1';
-    const selectPairs = !raw || pairEnabledFor(channelId, process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK,
-      process.env.STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS);
+    const raw = process.env.STREAMVAULT_ARCHIVE_RAW_ONLY === '1' ||
+      process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK !== '0';
+    const selectPairs = process.env.STREAMVAULT_ARCHIVE_RAW_ONLY !== '1' &&
+      (!raw || pairEnabledFor(channelId, process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK));
     return { ...row, error, enabled: row.enabled === 1, ...store.coverage(channelId, raw, selectPairs) };
   };
   router.get('/api/archives', requireAuth, (_req, res) => {
@@ -79,9 +80,10 @@ export function createArchiveRouter(deps: {
       res.status(400).json({ error: 'Invalid archive interval' }); return;
     }
     const now = Date.now();
-    const raw = process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK === '1';
-    const selectPairs = !raw || pairEnabledFor(channelId, process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK,
-      process.env.STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS);
+    const raw = process.env.STREAMVAULT_ARCHIVE_RAW_ONLY === '1' ||
+      process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK !== '0';
+    const selectPairs = process.env.STREAMVAULT_ARCHIVE_RAW_ONLY !== '1' &&
+      (!raw || pairEnabledFor(channelId, process.env.STREAMVAULT_ARCHIVE_RAW_PLAYBACK));
     const selected = store.overlap(channelId, startTime, endTime, raw, selectPairs);
     if (!selected.length) { res.status(404).json({ error: 'No published archive coverage' }); return; }
     const expiresAt = now + LEASE_MS;
