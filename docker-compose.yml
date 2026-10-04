@@ -25,7 +25,8 @@ services:
       - STREAMVAULT_FAST_EOF_CHANNEL_IDS=${STREAMVAULT_FAST_EOF_CHANNEL_IDS:-}
       # Emergency raw-master playback for new archive tickets; preserves pinned viewers.
       - STREAMVAULT_ARCHIVE_RAW_PLAYBACK=${STREAMVAULT_ARCHIVE_RAW_PLAYBACK:-0}
-      # Explicit per-channel opt-in for verified copied seam pairs; empty preserves raw fallback.
+      # Channel IDs, or * for all enabled current/future archives. Empty keeps raw fallback.
+      # Only verified, quota-gated copies publish; raw masters and old snapshots remain untouched.
       - STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS=${STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS:-}
       # Optional hardening. If set, browser clients must enter the same value
       # in Settings under Backend token.

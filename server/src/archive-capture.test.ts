@@ -631,7 +631,7 @@ describe('stream-copy HLS capture', () => {
       db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 
-  it('serializes an explicitly allowlisted pair job while keeping legacy seam jobs disabled in raw mode', async () => {
+  it('serializes a globally enabled pair job while keeping legacy seam jobs disabled in raw mode', async () => {
     const db = new Database(':memory:'); ensureArchiveSchema(db);
     const store = createArchiveStore(db); store.configure('espn', 'ESPN', true, 24);
     const id = 'fresh-chunk-000000000.ts';
@@ -644,7 +644,7 @@ describe('stream-copy HLS capture', () => {
       processSeam as unknown as typeof import('./archive-seam.js').processArchiveSeam,
       processPair as unknown as typeof import('./archive-pair-worker.js').processArchivePair);
     vi.useFakeTimers(); vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '1');
-    vi.stubEnv('STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS', 'espn');
+    vi.stubEnv('STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS', '*');
     try {
       const internals = capture as unknown as { seamQueue: string[];
         enqueueSeam: (id: string, urgent: boolean) => void };

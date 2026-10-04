@@ -7,7 +7,7 @@ import path from 'node:path';
 import { createArchiveStore, ensureArchiveSchema } from './archive-store.js';
 import { createArchiveRouter } from './archive-routes.js';
 
-it('removing a pair canary restores raw selection for new tickets without changing old pins', async () => {
+it('removing global pair mode restores raw selection for new tickets without changing old pins', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-pair-rollback-'));
   const db = new Database(':memory:'); ensureArchiveSchema(db);
   const store = createArchiveStore(db); store.configure('c', 'C', true, 24);
@@ -30,7 +30,7 @@ it('removing a pair canary restores raw selection for new tickets without changi
     start: () => {}, stop: async () => {}, getRecording: () => undefined, getPrograms: () => [] }));
   const server = app.listen(0);
   vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '1');
-  vi.stubEnv('STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS', 'c');
+  vi.stubEnv('STREAMVAULT_ARCHIVE_PAIR_CHANNEL_IDS', '*');
   try {
     const address = server.address(); if (!address || typeof address === 'string') throw new Error('No address');
     const base = `http://127.0.0.1:${address.port}`;

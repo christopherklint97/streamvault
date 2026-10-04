@@ -11,11 +11,11 @@ const EXTRA_WORK_MULTIPLIER = 8; // staged elementary streams, muxes and two fin
 
 export function pairEnabledFor(channelId: string, rawMode: string | undefined,
   allowlist: string | undefined): boolean {
-  return rawMode === '1' && (allowlist || '').split(',')
-    .map(id => id.trim()).filter(Boolean).includes(channelId);
+  return rawMode === '1' && channelId.length > 0 && (allowlist || '').split(',')
+    .map(id => id.trim()).some(id => id === '*' || id === channelId);
 }
 
-/** A single bounded, abortable canary. Inputs and saved-show masters are never modified.
+/** One bounded, abortable pair at a time. Inputs and saved-show masters are never modified.
  * Capture serializes work and owns the queue; this worker publishes both paths
  * only after their validated files exist and a synchronous store transaction succeeds. */
 export async function processArchivePair(store: ArchiveStore, root: string, id: string,
