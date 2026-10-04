@@ -475,4 +475,80 @@ describe('usePlayer manual seek integration', () => {
     expect(avplay.open).toHaveBeenCalledTimes(3);
     await act(async () => hookRef.current?.stop());
   });
+
+  it.each(['completion', 'error'] as const)(
+    'defers a Samsung live %s during retry cooldown instead of ending playback', async event => {
+      vi.useFakeTimers({ now: Date.now() + (event === 'completion' ? 60_000 : 120_000) });
+      vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>(() => {}));
+      await act(async () => { usePlayerStore.setState({ currentChannel: {
+        id: 'live_future', name: 'Live channel', url: '/api/stream/live_future',
+        logo: '', group: '', region: '', contentType: 'livetv',
+      } }); });
+      const listeners: Array<{ onstreamcompleted: () => void; onerror: () => void;
+        onbufferingstart: () => void; onbufferingcomplete: () => void;
+        oncurrentplaytime: (ms: number) => void }> = [];
+      const prepareFailures: Array<() => void> = [];
+      const avplay = {
+        close: vi.fn(), open: vi.fn(), setDisplayRect: vi.fn(), setBufferingParam: vi.fn(),
+        setListener: vi.fn((listener: typeof listeners[number]) => { listeners.push(listener); }),
+        prepareAsync: vi.fn((success?: () => void, failure?: () => void) => {
+          prepareFailures.push(() => failure?.()); success?.();
+        }),
+        getDuration: vi.fn(() => 0), getCurrentTime: vi.fn(() => 0),
+        play: vi.fn(), stop: vi.fn(),
+      };
+      (globalThis as typeof globalThis & { webapis: WebApis }).webapis = { avplay } as unknown as WebApis;
+      await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_100); });
+      await act(async () => { listeners[0].onstreamcompleted(); await Promise.resolve(); });
+      expect(avplay.open).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        if (event === 'completion') listeners[1].onstreamcompleted();
+        else listeners[1].onerror();
+        listeners[1].onstreamcompleted(); // duplicate terminal callback must not queue another retry
+        await Promise.resolve();
+      });
+      expect(avplay.open).toHaveBeenCalledTimes(2);
+      expect(usePlayerStore.getState().status).toBe('loading');
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_999); });
+      expect(avplay.open).toHaveBeenCalledTimes(2);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(avplay.open).toHaveBeenCalledTimes(3);
+      if (event === 'completion') {
+        await act(async () => { listeners[2].onstreamcompleted(); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(4_999); });
+        expect(avplay.open).toHaveBeenCalledTimes(3);
+        await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+        expect(avplay.open).toHaveBeenCalledTimes(4);
+        await act(async () => { listeners[3].onstreamcompleted(); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(9_999); });
+        expect(avplay.open).toHaveBeenCalledTimes(4);
+        await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+        expect(avplay.open).toHaveBeenCalledTimes(5);
+        for (const delay of [20_000, 30_000, 30_000]) {
+          const before = avplay.open.mock.calls.length;
+          await act(async () => { listeners[before - 1].onstreamcompleted(); });
+          await act(async () => { await vi.advanceTimersByTimeAsync(delay - 1); });
+          expect(avplay.open).toHaveBeenCalledTimes(before);
+          await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+          expect(avplay.open).toHaveBeenCalledTimes(before + 1);
+        }
+        await act(async () => { await vi.advanceTimersByTimeAsync(10_100); });
+        const healthyIndex = avplay.open.mock.calls.length - 1;
+        await act(async () => { listeners[healthyIndex].oncurrentplaytime(12_000); });
+        await act(async () => { listeners[healthyIndex].onstreamcompleted(); });
+        expect(avplay.open).toHaveBeenCalledTimes(healthyIndex + 2); // healthy playback resets backoff
+      }
+      const activeIndex = avplay.open.mock.calls.length - 1;
+      await act(async () => { listeners[activeIndex].onstreamcompleted(); hookRef.current?.stop(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_100); });
+      expect(avplay.open).toHaveBeenCalledTimes(activeIndex + 1);
+      await act(async () => {
+        listeners[activeIndex].onerror(); listeners[activeIndex].onstreamcompleted();
+        listeners[activeIndex].onbufferingstart(); listeners[activeIndex].onbufferingcomplete();
+        prepareFailures[activeIndex]();
+      });
+      expect(usePlayerStore.getState().status).toBe('idle');
+    },
+  );
 });

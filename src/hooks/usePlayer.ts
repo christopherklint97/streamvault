@@ -225,16 +225,27 @@ function disableLiveStreamRecovery() {
   liveStreamRecovery.stop();
 }
 
-// Tizen AVPlay live-stream resilience: auto-retry on stalls and unexpected
-// stream completions. Throttled so a permanently-broken stream stops looping.
+// Tizen AVPlay live-stream resilience: retry while watching, but back off
+// repeated failures so a permanently-broken source cannot spin at 2s.
 let avplayStallTimer: ReturnType<typeof setTimeout> | null = null;
+let avplayDeferredRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let avplayLastRetryAt = 0;
+let avplayConsecutiveFailures = 0;
+let avplayRetryChannelId = '';
 const AVPLAY_STALL_TIMEOUT_MS = 8000;
 const AVPLAY_RETRY_COOLDOWN_MS = 2000;
+const AVPLAY_HEALTHY_PROGRESS_MS = 10_000;
+const AVPLAY_RETRY_DELAYS_MS = [0, 2_000, 5_000, 10_000, 20_000, 30_000];
 function clearAvplayStallTimer() {
   if (avplayStallTimer) {
     clearTimeout(avplayStallTimer);
     avplayStallTimer = null;
+  }
+}
+function clearAvplayDeferredRetryTimer() {
+  if (avplayDeferredRetryTimer) {
+    clearTimeout(avplayDeferredRetryTimer);
+    avplayDeferredRetryTimer = null;
   }
 }
 
@@ -350,6 +361,10 @@ export function stopActivePlayback() {
 
   stopBgProgressTracking();
   clearFiniteHlsStallTimer();
+  clearAvplayDeferredRetryTimer();
+  avplayConsecutiveFailures = 0;
+  avplayRetryChannelId = '';
+  avplayLastRetryAt = 0;
   finiteHlsRetry = { channelId: '', position: -1, attempts: 0, at: 0 };
   clearRecordingVodPoll();
   html5PlaybackGeneration += 1;
@@ -514,6 +529,13 @@ export function usePlayer(): {
         const avplay = webapis.avplay;
         let startupReady = false;
         clearAvplayStallTimer();
+        clearAvplayDeferredRetryTimer();
+        if (avplayRetryChannelId !== channel.id) {
+          avplayRetryChannelId = channel.id;
+          avplayConsecutiveFailures = 0;
+          avplayLastRetryAt = 0;
+        }
+        const sessionStartedAt = Date.now();
         avplay.close();
         // Route through the server proxy for every media type. Tizen live
         // playback retains subtitle data so AVPlay can inventory real TEXT
@@ -558,13 +580,33 @@ export function usePlayer(): {
         playerRef.current = tizenPlayer;
 
         // Throttled retry — used by stall watchdog, onerror, and onstreamcompleted (live).
+        const isCurrentSession = () => playbackClock.getSnapshot().generation === clockGeneration &&
+          usePlayerStore.getState().currentChannel?.id === channel.id;
         const tryAutoRetry = (reason: string) => {
+          if (!isCurrentSession()) return false;
+          if (isLive && avplayDeferredRetryTimer) return true; // Duplicate callback: one retry is already pending.
           const now = Date.now();
-          if (now - avplayLastRetryAt < AVPLAY_RETRY_COOLDOWN_MS) {
+          const delay = isLive
+            ? AVPLAY_RETRY_DELAYS_MS[Math.min(avplayConsecutiveFailures, AVPLAY_RETRY_DELAYS_MS.length - 1)]
+            : AVPLAY_RETRY_COOLDOWN_MS;
+          const remaining = Math.min(delay, Math.max(0, avplayLastRetryAt + delay - now));
+          if (remaining > 0) {
+            if (isLive) {
+              // Keep one bounded retry pending; do not turn a terminal live EOF
+              // into idle/error, or reopen a permanently failing source every 2s.
+              log.warn(`AVPlay: ${reason} — deferring retry (backoff)`);
+              setStatus('loading');
+              avplayDeferredRetryTimer = setTimeout(() => {
+                avplayDeferredRetryTimer = null;
+                if (isCurrentSession()) tryAutoRetry(reason);
+              }, remaining);
+              return true;
+            }
             log.warn(`AVPlay: ${reason} — skipping retry (cooldown)`);
             return false;
           }
           avplayLastRetryAt = now;
+          if (isLive) avplayConsecutiveFailures += 1;
           log.warn(`AVPlay: ${reason} — auto-retrying`);
           clearAvplayStallTimer();
           // A finite snapshot is stable across retries. Its persisted watch
@@ -595,18 +637,25 @@ export function usePlayer(): {
 
         avplay.setListener({
           onbufferingstart: () => {
+            if (!isCurrentSession()) return;
             log.debug('AVPlay: buffering start');
             setStatus('loading');
             armStallWatchdog();
           },
           onbufferingcomplete: () => {
+            if (!isCurrentSession()) return;
             log.debug('AVPlay: buffering complete');
             setStatus('playing');
             clearAvplayStallTimer();
           },
           oncurrentplaytime: (timeMs: number) => {
+            if (!isCurrentSession()) return;
             // Progress means the stream is alive — cancel any pending watchdog.
             clearAvplayStallTimer();
+            if (isLive && Number.isFinite(timeMs) && timeMs > 0 &&
+                Date.now() - sessionStartedAt >= AVPLAY_HEALTHY_PROGRESS_MS) {
+              avplayConsecutiveFailures = 0;
+            }
             let durationMs = 0;
             try { durationMs = avplay.getDuration(); } catch { /* unavailable while preparing */ }
             routePlaybackClock(
@@ -620,14 +669,17 @@ export function usePlayer(): {
           },
           onevent: () => {},
           onerror: () => {
+            if (!isCurrentSession()) return;
             log.error('AVPlay: playback error');
             if (isLive && tryAutoRetry('onerror')) return;
             setError('Playback error');
           },
           onsubtitlechange: (_duration: number, text: string) => {
+            if (!isCurrentSession()) return;
             tizenPlayer.emitSubtitleText(text);
           },
           onstreamcompleted: () => {
+            if (!isCurrentSession()) return;
             log.info('AVPlay: stream completed');
             // Live streams "completing" usually means the upstream dropped us — retry.
             if (isLive && tryAutoRetry('live stream completed')) return;
@@ -639,6 +691,7 @@ export function usePlayer(): {
         });
         avplay.prepareAsync(
           () => {
+            if (!isCurrentSession()) return;
             log.info('AVPlay: prepared, completing initial resume');
             const completeStartup = async () => {
               if (resumePosition > 0) {
@@ -651,7 +704,7 @@ export function usePlayer(): {
                 try {
                   await retryPlaybackSeek(() => seekAvPlay(avplay, resumeTarget));
                 } catch (error) {
-                  if (playbackClock.getSnapshot().generation !== clockGeneration) return;
+                  if (!isCurrentSession()) return;
                   log.warn('AVPlay: initial resume failed; starting from zero', error);
                   toast('Could not resume playback; playing from the beginning');
                   try {
@@ -661,7 +714,7 @@ export function usePlayer(): {
                   }
                 }
               }
-              if (playbackClock.getSnapshot().generation !== clockGeneration) return;
+              if (!isCurrentSession()) return;
               startupReady = true;
               let currentTimeMs = 0;
               let durationMs = 0;
@@ -694,11 +747,13 @@ export function usePlayer(): {
               setupMediaSession(channel.name);
             };
             void completeStartup().catch((error) => {
+              if (!isCurrentSession()) return;
               log.error('AVPlay: startup failed', error);
               setError('Could not start playback');
             });
           },
           () => {
+            if (!isCurrentSession()) return;
             log.error('AVPlay: prepare failed');
             if (isLive && tryAutoRetry('prepare failed')) return;
             setError('Failed to prepare stream');
