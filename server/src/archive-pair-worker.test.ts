@@ -73,6 +73,16 @@ describe('bounded archive pair canary', () => {
     expect(pairEnabledFor('live_17289', '0', 'live_17289')).toBe(false);
     expect(pairEnabledFor('live_17289', '1', '')).toBe(false);
   });
+  it('opts all current and future channels into fail-closed pair repair with an exact wildcard', () => {
+    for (const id of ['live_17289', 'live_1015944', 'live_44115', 'live_future'])
+      expect(pairEnabledFor(id, '1', ' * ')).toBe(true);
+    expect(pairEnabledFor('live_future', '1', 'live_17289, *')).toBe(true);
+    expect(pairEnabledFor('live_future', '0', '*')).toBe(false);
+    expect(pairEnabledFor('live_future', undefined, '*')).toBe(false);
+    expect(pairEnabledFor('', '1', '*')).toBe(false);
+    expect(pairEnabledFor('live_future', '1', 'live_*')).toBe(false);
+    expect(pairEnabledFor('live_future', '1', '*,oops')).toBe(true);
+  });
   it('leaves capture masters and the index untouched outside the explicit canary', async () => {
     const f = fixture();
     const previousRaw = fs.readFileSync(path.join(f.root, f.prior));
