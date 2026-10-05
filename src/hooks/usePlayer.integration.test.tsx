@@ -13,10 +13,30 @@ const mpegtsMock = vi.hoisted(() => ({
     on: vi.fn(), attachMediaElement: vi.fn(), load: vi.fn(), unload: vi.fn(), detachMediaElement: vi.fn(), destroy: vi.fn(),
   })),
 }));
+const hlsMock = vi.hoisted(() => ({
+  isSupported: vi.fn(() => false),
+  instances: [] as Array<{
+    on: ReturnType<typeof vi.fn>;
+    attachMedia: ReturnType<typeof vi.fn>;
+    loadSource: ReturnType<typeof vi.fn>;
+    destroy: ReturnType<typeof vi.fn>;
+  }>,
+}));
+vi.mock('hls.js', () => ({ default: class {
+  static isSupported = hlsMock.isSupported;
+  static Events = { ERROR: 'error' };
+  on = vi.fn();
+  attachMedia = vi.fn();
+  loadSource = vi.fn();
+  destroy = vi.fn();
+  constructor() { hlsMock.instances.push(this); }
+} }));
+
 vi.mock('mpegts.js', () => ({ default: { isSupported: () => true, createPlayer: mpegtsMock.createPlayer, Events: {
   ERROR: 'error', LOADING_COMPLETE: 'complete', MEDIA_INFO: 'info', STATISTICS_INFO: 'stats',
 } } }));
-vi.mock('../services/recordingPlayback', () => ({
+vi.mock('../services/recordingPlayback', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../services/recordingPlayback')>(),
   getRecordingPlaybackUrl: vi.fn(async () => '/api/recordings/r1/stream?ticket=fresh'),
   getRecordingVodStatus: vi.fn(async () => 'missing'),
 }));
@@ -37,6 +57,9 @@ describe('usePlayer manual seek integration', () => {
 
   beforeEach(async () => {
     localStorage.clear();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({ error: 'Not found' }), {
+      status: 404, headers: { 'Content-Type': 'application/json' },
+    }));
     useAppStore.setState({ showToast: false, toastMessage: '' });
     hookRef = createRef<ReturnType<typeof usePlayer>>();
     video = document.createElement('video');
@@ -64,6 +87,8 @@ describe('usePlayer manual seek integration', () => {
     container.remove();
     vi.restoreAllMocks();
     mpegtsMock.createPlayer.mockClear();
+    hlsMock.instances.length = 0;
+    hlsMock.isSupported.mockReset().mockReturnValue(false);
     vi.mocked(getRecordingVodStatus).mockReset().mockResolvedValue('missing');
     vi.useRealTimers();
     localStorage.clear();
@@ -179,6 +204,58 @@ describe('usePlayer manual seek integration', () => {
     } finally {
       await act(async () => hookRef.current?.stop());
     }
+  });
+
+  it('opens the same buffered live HLS feed on Samsung instead of a per-view TS response', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => String(url).endsWith('/authorize')
+      ? new Response(JSON.stringify({ playlistUrl: '/api/live/live_future/index.m3u8?ticket=synthetic' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      : new Response('{}', { status: 404 }));
+    usePlayerStore.setState({ currentChannel: {
+      id: 'live_future', name: 'Live channel', url: '/api/stream/live_future',
+      logo: '', group: '', region: '', contentType: 'livetv',
+    } });
+    const avplay = {
+      close: vi.fn(), open: vi.fn(), setDisplayRect: vi.fn(), setBufferingParam: vi.fn(),
+      setListener: vi.fn(), prepareAsync: vi.fn(), stop: vi.fn(),
+    };
+    (globalThis as typeof globalThis & { webapis: WebApis }).webapis = { avplay } as unknown as WebApis;
+    await act(async () => hookRef.current?.play());
+    await vi.waitFor(() => expect(avplay.open).toHaveBeenCalledWith('http://localhost:3000/api/live/live_future/index.m3u8?ticket=synthetic'));
+    await act(async () => hookRef.current?.stop());
+  });
+
+  it('uses native buffered live HLS on iPhone instead of a per-view mpegts player', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => String(url).endsWith('/authorize')
+      ? new Response(JSON.stringify({ playlistUrl: '/api/live/live_future/index.m3u8?ticket=synthetic' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      : new Response('{}', { status: 404 }));
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15');
+    vi.spyOn(video, 'canPlayType').mockReturnValue('maybe');
+    usePlayerStore.setState({ currentChannel: {
+      id: 'live_future', name: 'Live channel', url: '/api/stream/live_future',
+      logo: '', group: '', region: '', contentType: 'livetv',
+    } });
+    await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
+    await vi.waitFor(() => expect(video.src).toBe('http://localhost:3000/api/live/live_future/index.m3u8?ticket=synthetic'));
+    expect(mpegtsMock.createPlayer).not.toHaveBeenCalled();
+    await act(async () => hookRef.current?.stop());
+  });
+
+  it('keeps one HLS.js live player on desktop while the source reconnects behind the playlist', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => String(url).endsWith('/authorize')
+      ? new Response(JSON.stringify({ playlistUrl: '/api/live/live_future/index.m3u8?ticket=synthetic' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      : new Response('{}', { status: 404 }));
+    vi.spyOn(video, 'canPlayType').mockReturnValue('');
+    hlsMock.isSupported.mockReturnValue(true);
+    usePlayerStore.setState({ currentChannel: {
+      id: 'live_future', name: 'Live channel', url: '/api/stream/live_future',
+      logo: '', group: '', region: '', contentType: 'livetv',
+    } });
+    await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
+    await vi.waitFor(() => expect(hlsMock.instances).toHaveLength(1));
+    expect(hlsMock.instances[0].loadSource).toHaveBeenCalledWith('/api/live/live_future/index.m3u8?ticket=synthetic');
+    expect(mpegtsMock.createPlayer).not.toHaveBeenCalled();
+    await act(async () => hookRef.current?.stop());
+    expect(hlsMock.instances[0].destroy).toHaveBeenCalledOnce();
   });
 
   it('sends a TS-only iPhone recording through native HLS, not a whole-file MSE demux', async () => {
@@ -479,7 +556,9 @@ describe('usePlayer manual seek integration', () => {
   it.each(['completion', 'error'] as const)(
     'defers a Samsung live %s during retry cooldown instead of ending playback', async event => {
       vi.useFakeTimers({ now: Date.now() + (event === 'completion' ? 60_000 : 120_000) });
-      vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>(() => {}));
+      vi.spyOn(globalThis, 'fetch').mockImplementation((url) => String(url).endsWith('/authorize')
+        ? Promise.resolve(new Response(JSON.stringify({ error: 'Not found' }), { status: 404, headers: { 'Content-Type': 'application/json' } }))
+        : new Promise<Response>(() => {}));
       await act(async () => { usePlayerStore.setState({ currentChannel: {
         id: 'live_future', name: 'Live channel', url: '/api/stream/live_future',
         logo: '', group: '', region: '', contentType: 'livetv',
