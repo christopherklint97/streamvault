@@ -94,6 +94,44 @@ it('does not kill a progressing replay merely because HLS cannot publish duplica
   } finally { release(); }
 }, 60000);
 
+it('retries an initial HTTP source failure without treating it as an unsafe media seam', async () => {
+  const [first, second] = await media();
+  const upstream = express();
+  let requests = 0;
+  upstream.get('/api/stream/channel-a', (_req, res) => {
+    requests++;
+    if (requests === 1) { res.status(503).end(); return; }
+    res.type('video/mp2t');
+    if (requests >= 4) {
+      const nullPacket = Buffer.alloc(188, 0xff);
+      nullPacket.set([0x47, 0x1f, 0xff, 0x10]);
+      const block = Buffer.concat(Array.from({ length: 100 }, () => nullPacket));
+      const pace = setInterval(() => {
+        if (res.destroyed) { clearInterval(pace); return; }
+        res.write(block);
+      }, 400);
+      res.once('close', () => clearInterval(pace));
+      return;
+    }
+    const data = requests === 2 ? first : second;
+    res.set('Content-Length', String(data.length)).end(data);
+  });
+  const proxy = await listen(upstream);
+  const root = await mkdtemp(path.join(tmpdir(), 'sv-packet-initial-retry-'));
+  roots.push(root);
+  const buffer = createLiveBuffer({ root, packetAware: true, pollMs: 100,
+    maxBytesPerChannel: 8_000_000, maxSegmentBytes: 2_000_000 });
+  buffers.push(buffer);
+  const url = `${proxy}/api/stream/channel-a`;
+  await buffer.playlist('channel-a', url);
+  await waitFor(async () => requests >= 1 && buffer.activeCount === 0 ? true : null, 8000);
+  const manifest = await waitFor(async () => buffer.playlist('channel-a', url), 12000).catch(() => {
+    throw Error(`initial retry produced no HLS: requests=${requests} active=${buffer.activeCount}`);
+  });
+  expect(manifest).toContain('segment/');
+  expect(requests).toBeGreaterThanOrEqual(2);
+}, 25000);
+
 it('retires a stale HLS timeline even when source keeps sending TS null packets', async () => {
   const [first] = await media();
   const nullPacket = Buffer.alloc(188, 0xff);

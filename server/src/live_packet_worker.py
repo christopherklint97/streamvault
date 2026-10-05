@@ -18,6 +18,10 @@ import av
 from live_packet_stitch import Stitcher, UnsafeSeam, ts_packets
 
 
+class InitialSourceUnavailable(Exception):
+    """No source media was accepted; a later authorization may try again."""
+
+
 class Body:
     def __init__(self, response, limit, stopped, on_bytes):
         self.response, self.limit, self.stopped, self.on_bytes = response, limit, stopped, on_bytes
@@ -59,6 +63,7 @@ class Worker:
         self.child = None
         self.failure = False
         self.failure_type = None
+        self.received_media = False
         self.progress = self.directory / '.source-progress'
         self.last_progress = 0.
 
@@ -86,7 +91,9 @@ class Worker:
                 headers['Authorization'] = 'Bearer ' + token
             connection.request('GET', target, headers=headers)
             response = connection.getresponse()
-            if (response.status != 200 or response.getheader('Content-Type', '').split(';')[0].strip().lower()
+            if response.status != 200:
+                raise InitialSourceUnavailable()
+            if (response.getheader('Content-Type', '').split(';')[0].strip().lower()
                     not in ('video/mp2t', 'application/octet-stream')
                     or response.getheader('Content-Encoding') not in (None, 'identity')):
                 raise UnsafeSeam('source response rejected')
@@ -96,6 +103,9 @@ class Worker:
             with self.lock:
                 self.connection = connection
             return connection, Body(response, self.session_bytes, self.stop, self.note_progress), int(length) if length else None
+        except (OSError, http.client.HTTPException):
+            connection.close()
+            raise InitialSourceUnavailable() from None
         except BaseException:
             connection.close()
             raise
@@ -104,7 +114,15 @@ class Worker:
         while not self.stop.wait(.1):
             try:
                 # Include FFmpeg's unpublished temporary segment and stale files.
-                total = sum(p.stat().st_size for p in self.directory.iterdir() if p.is_file())
+                total = 0
+                for item in self.directory.iterdir():
+                    try:
+                        if item.is_file():
+                            total += item.stat().st_size
+                    except FileNotFoundError:
+                        # FFmpeg atomically renames .tmp and deletes old TS;
+                        # the next pass counts the replacement, not a failure.
+                        continue
                 if total > self.disk_bytes:
                     self.failure = True
                     self.cancel()
@@ -145,6 +163,7 @@ class Worker:
                         with av.open(body, 'r', format='mpegts') as demux:
                             packets = ts_packets(demux)
                             first = next(packets)
+                            self.received_media = True
                             if mapped is None:
                                 mapped = {stream.type: mux.add_stream_from_template(stream) for stream in demux.streams}
                             from itertools import chain
@@ -179,6 +198,7 @@ class Worker:
             if child.wait(timeout=10) != 0:
                 raise UnsafeSeam('HLS mux failed')
         except BaseException as exc:
+            retryable = isinstance(exc, InitialSourceUnavailable) and not self.received_media
             self.failure = True
             self.failure_type = type(exc).__name__
             self.cancel()
@@ -192,7 +212,10 @@ class Worker:
             for item in self.directory.iterdir():
                 if item.is_file():
                     item.unlink()
-            (self.directory / 'UNSAFE').touch()
+            # No packet was ever accepted on an unavailable initial source:
+            # a later authorization may start a fresh presentation. All media
+            # or seam failures stay latched, with cached segments invalidated.
+            (self.directory / ('RETRYABLE' if retryable else 'UNSAFE')).touch()
         finally:
             self.stop.set()
             monitor.join(timeout=2)

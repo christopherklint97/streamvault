@@ -251,7 +251,15 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     worker.once('close', () => {
       void (async () => {
         if (ch.terminating || generation !== ch.generation) return;
-        if (packetAware) { markUnsafe(ch.id); await retire(ch); return; } // never retry an unproved seam
+        if (packetAware) {
+          // Only an initial transport/HTTP failure before accepting any media
+          // can be retried as a fresh presentation on a later authorization.
+          // Every failed seam or emitted packet remains latched unavailable.
+          const retryable = ch.segments.length === 0 && await stat(path.join(working, 'RETRYABLE'))
+            .then(() => true, () => false);
+          if (!retryable) markUnsafe(ch.id);
+          await retire(ch); return;
+        }
         await publishInOrder(ch); // FFmpeg may have finalized its last segment at EOF.
         ch.working = undefined;
         ch.worker = undefined;

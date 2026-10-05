@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from live_packet_worker import Worker
 
@@ -66,6 +67,29 @@ class WorkerLifetimeTests(unittest.TestCase):
     def test_long_length_delimited_response_does_not_exhaust_a_cumulative_byte_cap(self):
         self.probe(session_bytes=188 * 100)
 
+
+    def test_monitor_ignores_ffmpeg_temp_file_rename_between_listing_and_stat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = Path(tmp)
+            (stage / 'vanishing.ts').write_bytes(b'x')
+            worker = Worker('http://127.0.0.1:1/api/stream/channel-a', stage)
+            original_stat = Path.stat
+            seen = 0
+            def renamed(path, *args, **kwargs):
+                nonlocal seen
+                if path.name == 'vanishing.ts':
+                    seen += 1
+                    if seen == 2:
+                        raise FileNotFoundError('FFmpeg atomically renamed this stage file')
+                return original_stat(path, *args, **kwargs)
+            with patch.object(Path, 'stat', renamed):
+                watcher = threading.Thread(target=worker.monitor, daemon=True)
+                watcher.start()
+                time.sleep(.35)
+                worker.stop.set()
+                watcher.join(timeout=2)
+            self.assertGreaterEqual(seen, 2)
+            self.assertFalse(worker.failure)
 
 if __name__ == '__main__':
     unittest.main()
