@@ -147,7 +147,7 @@ class Worker:
         try:
             args = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin',
                     '-f', 'mpegts', '-i', 'pipe:0', '-map', '0:v:0', '-map', '0:a:0',
-                    '-c', 'copy', '-f', 'hls', '-hls_time', '2', '-hls_list_size', '16',
+                    '-c', 'copy', '-f', 'hls', '-hls_time', '2', '-hls_list_size', '64',
                     '-hls_flags', 'delete_segments+temp_file+independent_segments+omit_endlist',
                     '-hls_segment_filename', str(self.directory / '%d.ts'), str(self.directory / 'index.m3u8')]
             child = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

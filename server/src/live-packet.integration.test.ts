@@ -94,6 +94,43 @@ it('does not kill a progressing replay merely because HLS cannot publish duplica
   } finally { release(); }
 }, 60000);
 
+it('latches an unreadable unsafe marker instead of starting another packet worker', async () => {
+  const [first] = await media();
+  const nullPacket = Buffer.alloc(188, 0xff);
+  nullPacket.set([0x47, 0x1f, 0xff, 0x10]);
+  const block = Buffer.concat(Array.from({ length: 100 }, () => nullPacket));
+  const upstream = express();
+  let requests = 0;
+  upstream.get('/api/stream/channel-a', (_req, res) => {
+    requests++;
+    res.type('video/mp2t');
+    res.write(first);
+    const pace = setInterval(() => {
+      if (res.destroyed) { clearInterval(pace); return; }
+      res.write(block);
+    }, 400);
+    res.once('close', () => clearInterval(pace));
+  });
+  const proxy = await listen(upstream);
+  const root = await mkdtemp(path.join(tmpdir(), 'sv-packet-marker-error-'));
+  roots.push(root);
+  const buffer = createLiveBuffer({ root, packetAware: true, pollMs: 100,
+    maxBytesPerChannel: 8_000_000, maxSegmentBytes: 2_000_000,
+    unsafeMarkerStat: async () => { throw Object.assign(new Error('marker unavailable'), { code: 'EACCES' }); } });
+  buffers.push(buffer);
+  const url = `${proxy}/api/stream/channel-a`;
+  await buffer.playlist('channel-a', url);
+  await waitFor(async () => buffer.activeCount === 0 ? true : null, 12000).catch(() => {
+    throw Error(`marker-error retirement incomplete: requests=${requests} active=${buffer.activeCount}`);
+  });
+  for (let attempt = 0; attempt < 8; attempt++) {
+    expect(await buffer.playlist('channel-a', url)).toBeNull();
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  expect(requests).toBeLessThanOrEqual(1);
+  expect(buffer.activeCount).toBe(0);
+}, 25000);
+
 it('latches a missing staged segment instead of hot-relaunching unverified media', async () => {
   const [first] = await media();
   const nullPacket = Buffer.alloc(188, 0xff);
@@ -331,14 +368,18 @@ it.skipIf(!existsSync(path.join(captured, 'first.ts')) || !existsSync(path.join(
     const proxy = await listen(upstream);
     const root = await mkdtemp(path.join(tmpdir(), 'sv-packet-fast-rollover-'));
     roots.push(root);
-    const buffer = createLiveBuffer({ root, packetAware: true }); // production poll and quotas
+    const reasons: string[] = [];
+    const buffer = createLiveBuffer({ root, packetAware: true, onUnsafe: reason => reasons.push(reason) }); // production poll and quotas
     buffers.push(buffer);
     const url = `${proxy}/api/stream/channel-a`;
+    let observedSequence = -1;
+    let observedSegments = 0;
     const manifest = await waitFor(async () => {
       const current = await buffer.playlist('channel-a', url);
-      const sequence = Number(current?.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/)?.[1] ?? -1);
-      return requests >= 3 && sequence >= 45 ? current : null;
-    }, 90000);
+      observedSequence = Number(current?.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/)?.[1] ?? -1);
+      observedSegments = (current?.match(/^segment\//gm) ?? []).length;
+      return requests >= 3 && observedSequence >= 45 ? current : null;
+    }, 90000).catch(() => { throw Error(`fast rollover stalled: requests=${requests} active=${buffer.activeCount} sequence=${observedSequence} segments=${observedSegments} reasons=${reasons.join(',')}`); });
     expect(manifest).toContain('segment/');
     expect(buffer.activeCount).toBe(1);
   }, 120000,

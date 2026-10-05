@@ -19,6 +19,8 @@ export interface LiveBufferOptions {
   root?: string; maxChannels?: number; maxBytesPerChannel?: number; maxSegmentBytes?: number; maxReaders?: number;
   stallMs?: number; maxUnpublishedMs?: number; idleMs?: number; retryMs?: number; pollMs?: number; segmentSeconds?: number;
   minFreeBytes?: number; removeChannelDir?: (dir: string) => Promise<void>;
+  unsafeMarkerStat?: (file: string) => Promise<void>;
+  onUnsafe?: (reason: string) => void; // fixed, non-URL diagnostic categories
   packetAware?: boolean;
 }
 
@@ -50,15 +52,17 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
   const segmentSeconds = options.segmentSeconds ?? 2;
   const minFreeBytes = options.minFreeBytes ?? 128 * 1024 * 1024;
   const removeChannelDir = options.removeChannelDir ?? (dir => rm(dir, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 }));
+  const unsafeMarkerStat = options.unsafeMarkerStat ?? (async (file: string) => { await stat(file); });
   const packetAware = options.packetAware ?? false;
   if (![maxChannels, maxBytes, maxSegmentBytes, maxReaders, stallMs, maxUnpublishedMs, idleMs, retryMs, pollMs, segmentSeconds, minFreeBytes]
     .every(n => Number.isFinite(n) && n > 0) || maxBytes < maxSegmentBytes * 2 || !Number.isInteger(maxReaders)) throw Error('Invalid live buffer limits');
   const channels = new Map<string, Channel>();
   const unsafeChannels = new Set<string>();
   let unsafeCapacityExhausted = false;
-  function markUnsafe(id: string) {
+  function markUnsafe(id: string, reason = 'worker_exit') {
     // Bound failed-ID accounting; if exhausted, reject ALL new packet channels
     // until restart rather than forgetting an unsafe one and retrying it.
+    options.onUnsafe?.(reason);
     if (unsafeChannels.size >= maxChannels * 16) unsafeCapacityExhausted = true;
     else unsafeChannels.add(id);
   }
@@ -112,16 +116,16 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     return ch.retirement;
   }
 
-  function retireUnsafe(ch: Channel): Promise<void> {
-    if (packetAware && !ch.terminating) markUnsafe(ch.id);
+  function retireUnsafe(ch: Channel, reason = 'unpublishable_stage'): Promise<void> {
+    if (packetAware && !ch.terminating) markUnsafe(ch.id, reason);
     return retire(ch);
   }
 
   async function publish(ch: Channel) {
     if (!ch.working || ch.terminating) return;
     if (packetAware) {
-      try { await stat(path.join(ch.working, 'UNSAFE')); markUnsafe(ch.id); await retire(ch); return; }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { await retire(ch); return; } }
+      try { await unsafeMarkerStat(path.join(ch.working, 'UNSAFE')); markUnsafe(ch.id, 'worker_unsafe'); await retire(ch); return; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { await retireUnsafe(ch, 'marker_unreadable'); return; } }
     }
     // FFmpeg's HLS muxer writes separate WebVTT assets, which this endpoint
     // cannot expose as selectable renditions. Fall back to legacy TS instead
@@ -136,7 +140,7 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     catch { return; }
     const entries = [...manifest.matchAll(/#EXTINF:([\d.]+),?[^\n]*\n([^\r\n]+\.ts)/g)];
     const indices = entries.map(([, , name]) => /^\d+\.ts$/.test(name) ? Number(name.slice(0, -3)) : NaN);
-    if (!newStageIndices(indices, ch.lastStageIndex)) { await retireUnsafe(ch); return; }
+    if (!newStageIndices(indices, ch.lastStageIndex)) { await retireUnsafe(ch, 'stage_index_gap'); return; }
     for (const [, durationText, name] of entries) {
       if (ch.terminating) return;
       const index = Number(name.slice(0, -3));
@@ -145,9 +149,9 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       const duration = Number(durationText);
       // Never conceal a unique segment by skipping an unpublishable input.
       if (!Number.isFinite(duration) || duration <= 0 || duration > 4) { await retireUnsafe(ch); return; }
+      const stage = path.join(ch.working, name);
       let data: Buffer;
       try {
-        const stage = path.join(ch.working, name);
         if ((await stat(stage)).size > maxSegmentBytes) { await retireUnsafe(ch); return; }
         data = await readFile(stage);
       } catch { await retireUnsafe(ch); return; }
@@ -167,6 +171,10 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       ch.segments.push({ id, name: key, duration, bytes: data.length, discontinuity });
       ch.bytes += data.length;
       ch.lastPublish = Date.now();
+      // The served copy is now independent of FFmpeg's rolling staging list.
+      // Reclaim published stage bytes so a longer manifest can absorb bursts
+      // without retaining an unbounded second copy of the media.
+      await rm(stage, { force: true }).catch(() => {});
       while ((ch.bytes > maxBytes || ch.segments.length > 12) && ch.segments.length > 1) {
         const old = ch.segments.shift()!;
         ch.bytes -= old.bytes;
@@ -194,21 +202,21 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
         // may otherwise fill the mount before FFmpeg publishes its first segment.
         try {
           const space = await statfs(root);
-          if (space.bavail * space.bsize < minFreeBytes) { await retireUnsafe(ch); return; }
+          if (space.bavail * space.bsize < minFreeBytes) { await retireUnsafe(ch, 'free_space'); return; }
           let total = 0;
           for (const name of await readdir(ch.working)) {
             const size = (await stat(path.join(ch.working, name))).size;
             total += size;
-            if (name.endsWith('.ts') && size > maxSegmentBytes) { await retireUnsafe(ch); return; }
+            if (name.endsWith('.ts') && size > maxSegmentBytes) { await retireUnsafe(ch, 'stage_segment_cap'); return; }
           }
-          if (total + ch.bytes > maxBytes + maxSegmentBytes * 4) { await retireUnsafe(ch); return; }
+          if (total + ch.bytes > maxBytes + maxSegmentBytes * 4) { await retireUnsafe(ch, 'stage_disk_cap'); return; }
         } catch { /* writer may be closing or replacing the directory */ }
         await publishInOrder(ch);
         const unpublishedMs = Date.now() - ch.lastPublish;
         // Input bytes alone are not playable media: null TS packets or a
         // replay that never reaches a unique picture must expire this feed.
         if (packetAware && unpublishedMs > maxUnpublishedMs) {
-          await retireUnsafe(ch); return;
+          await retireUnsafe(ch, 'no_new_segments'); return;
         } else if (unpublishedMs > stallMs) {
           // A packet seam can consume a long replay without publishing new
           // segments. Treat ongoing bounded source reads as forward progress;
@@ -219,7 +227,7 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
             catch { /* worker has not started or is closing */ }
           }
           if (Date.now() - Math.max(ch.lastPublish, sourceProgress) > stallMs) {
-            if (packetAware) await retireUnsafe(ch);
+            if (packetAware) await retireUnsafe(ch, 'source_stall');
             else ch.worker?.kill('SIGKILL');
             return;
           }
