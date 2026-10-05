@@ -155,12 +155,11 @@ class Worker:
                                 native.pts, native.dts = packet.pts, packet.dts
                                 native.stream = mapped[packet.kind]
                                 mux.mux(native)
-                        # Clean HTTP EOF may end inside a TS transport packet;
-                        # the next authenticated A/V seam must prove every
-                        # published packet before any successor media escapes.
-                        # A silent chunked response is a candidate EOF only
-                        # after a substantial body. Length-delimited
-                        # truncation is unsafe; memory/disk are capped separately.
+                        # Clean EOF can bisect a TS packet. A chunked socket
+                        # timeout is NOT clean EOF, but after a substantial
+                        # body may be retried only through the same strict A/V
+                        # seam proof. Length-delimited truncation is unsafe;
+                        # memory and disk are capped separately.
                         if ((length is not None and body.used != length)
                                 or (body.failed and (length is not None or body.used < 188 * 100))
                                 or self.stop.is_set()):

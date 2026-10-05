@@ -17,7 +17,7 @@ interface Channel {
 }
 export interface LiveBufferOptions {
   root?: string; maxChannels?: number; maxBytesPerChannel?: number; maxSegmentBytes?: number; maxReaders?: number;
-  stallMs?: number; idleMs?: number; retryMs?: number; pollMs?: number; segmentSeconds?: number;
+  stallMs?: number; maxUnpublishedMs?: number; idleMs?: number; retryMs?: number; pollMs?: number; segmentSeconds?: number;
   minFreeBytes?: number; removeChannelDir?: (dir: string) => Promise<void>;
   packetAware?: boolean;
 }
@@ -43,14 +43,15 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
   const maxSegmentBytes = options.maxSegmentBytes ?? 12 * 1024 * 1024;
   const maxReaders = options.maxReaders ?? 16;
   const stallMs = options.stallMs ?? 15_000;
+  const maxUnpublishedMs = options.maxUnpublishedMs ?? 45_000;
   const idleMs = options.idleMs ?? 60_000;
   const retryMs = options.retryMs ?? 2_000;
   const pollMs = options.pollMs ?? 500;
   const segmentSeconds = options.segmentSeconds ?? 2;
   const minFreeBytes = options.minFreeBytes ?? 128 * 1024 * 1024;
-  const removeChannelDir = options.removeChannelDir ?? (dir => rm(dir, { recursive: true, force: true }));
+  const removeChannelDir = options.removeChannelDir ?? (dir => rm(dir, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 }));
   const packetAware = options.packetAware ?? false;
-  if (![maxChannels, maxBytes, maxSegmentBytes, maxReaders, stallMs, idleMs, retryMs, pollMs, segmentSeconds, minFreeBytes]
+  if (![maxChannels, maxBytes, maxSegmentBytes, maxReaders, stallMs, maxUnpublishedMs, idleMs, retryMs, pollMs, segmentSeconds, minFreeBytes]
     .every(n => Number.isFinite(n) && n > 0) || maxBytes < maxSegmentBytes * 2 || !Number.isInteger(maxReaders)) throw Error('Invalid live buffer limits');
   const channels = new Map<string, Channel>();
   const unsafeChannels = new Set<string>();
@@ -86,11 +87,23 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     ch.retirement = (async () => {
       try {
         const worker = ch.worker;
-        if (worker && worker.exitCode === null) worker.kill('SIGKILL');
-        if (worker && worker.exitCode === null) await new Promise<void>(resolve => {
-          const timeout = setTimeout(resolve, 1000);
-          worker.once('close', () => { clearTimeout(timeout); resolve(); });
-        });
+        if (worker && worker.exitCode === null && worker.signalCode === null) {
+          // Let Python close its FFmpeg child and HTTP socket. A direct SIGKILL
+          // orphans the muxer, which can keep writing into a retired directory.
+          const waitClose = (ms: number) => new Promise<void>(resolve => {
+            const onClose = () => { clearTimeout(timer); resolve(); };
+            const timer = setTimeout(() => { worker.off('close', onClose); resolve(); }, ms);
+            worker.once('close', onClose);
+          });
+          const graceful = waitClose(packetAware ? 5_000 : 1_000);
+          worker.kill(packetAware ? 'SIGTERM' : 'SIGKILL');
+          await graceful;
+          if (packetAware && worker.exitCode === null && worker.signalCode === null) {
+            const forced = waitClose(1_000);
+            worker.kill('SIGKILL');
+            await forced;
+          }
+        }
         if (ch.dir) await removeChannelDir(ch.dir).catch(() => {});
       } finally {
         if (channels.get(ch.id) === ch) channels.delete(ch.id);
@@ -185,7 +198,12 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
           if (total + ch.bytes > maxBytes + maxSegmentBytes * 4) { await retire(ch); return; }
         } catch { /* writer may be closing or replacing the directory */ }
         await publishInOrder(ch);
-        if (Date.now() - ch.lastPublish > stallMs) {
+        const unpublishedMs = Date.now() - ch.lastPublish;
+        // Input bytes alone are not playable media: null TS packets or a
+        // replay that never reaches a unique picture must expire this feed.
+        if (packetAware && unpublishedMs > maxUnpublishedMs) {
+          ch.worker?.kill('SIGKILL');
+        } else if (unpublishedMs > stallMs) {
           // A packet seam can consume a long replay without publishing new
           // segments. Treat ongoing bounded source reads as forward progress;
           // an actually silent source stops touching this private marker.

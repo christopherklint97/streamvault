@@ -94,6 +94,36 @@ it('does not kill a progressing replay merely because HLS cannot publish duplica
   } finally { release(); }
 }, 60000);
 
+it('retires a stale HLS timeline even when source keeps sending TS null packets', async () => {
+  const [first] = await media();
+  const nullPacket = Buffer.alloc(188, 0xff);
+  nullPacket.set([0x47, 0x1f, 0xff, 0x10]);
+  const nullTransport = Buffer.concat(Array.from({ length: 100 }, () => nullPacket));
+  const upstream = express();
+  let requests = 0;
+  upstream.get('/api/stream/channel-a', (_req, res) => {
+    requests++;
+    res.type('video/mp2t');
+    res.write(first);
+    const pace = setInterval(() => {
+      if (res.destroyed) { clearInterval(pace); return; }
+      res.write(nullTransport);
+    }, 200);
+    res.once('close', () => clearInterval(pace));
+  });
+  const proxy = await listen(upstream);
+  const root = await mkdtemp(path.join(tmpdir(), 'sv-packet-dead-timeline-'));
+  roots.push(root);
+  const buffer = createLiveBuffer({ root, packetAware: true, pollMs: 100, stallMs: 1000,
+    maxUnpublishedMs: 4500, maxBytesPerChannel: 8_000_000, maxSegmentBytes: 2_000_000 });
+  buffers.push(buffer);
+  const url = `${proxy}/api/stream/channel-a`;
+  await waitFor(async () => (await buffer.playlist('channel-a', url))?.includes('segment/') ? true : null);
+  await waitFor(async () => buffer.activeCount === 0 ? true : null, 10000);
+  expect(requests).toBe(1);
+  expect(await buffer.playlist('channel-a', url)).toBeNull();
+}, 20000);
+
 it('reopens a stalled but complete chunked session and keeps the same decoder timeline', async () => {
   const [first, second] = await media();
   const upstream = express();
@@ -126,11 +156,19 @@ it.skipIf(!existsSync(path.join(captured, 'first.ts')) || !existsSync(path.join(
     const second = await readFile(path.join(captured, 'second.ts'));
     const upstream = express();
     let requests = 0;
-    upstream.get('/api/stream/channel-a', (_req, res) => {
+    upstream.get('/api/stream/channel-a', async (_req, res) => {
       requests++;
       res.type('video/mp2t');
       if (requests === 1) { res.write(first); res.end(); return; }
-      if (requests === 2) { res.set('Content-Length', String(second.length)); res.end(second); return; }
+      if (requests === 2) {
+        for (let offset = 0; offset < second.length; offset += 64 * 1024) {
+          if (res.destroyed) return;
+          res.write(second.subarray(offset, offset + 64 * 1024));
+          await new Promise(resolve => setTimeout(resolve, 15));
+        }
+        res.end();
+        return;
+      }
       const nullPacket = Buffer.alloc(188, 0xff);
       nullPacket.set([0x47, 0x1f, 0xff, 0x10]);
       const nullTransport = Buffer.concat(Array.from({ length: 100 }, () => nullPacket));
@@ -153,10 +191,11 @@ it.skipIf(!existsSync(path.join(captured, 'first.ts')) || !existsSync(path.join(
       const current = await buffer.playlist('channel-a', url);
       observedSequence = Number(current?.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/)?.[1] ?? -1);
       observedSegments = (current?.match(/^segment\//gm) ?? []).length;
-      // Wait for the successor to finish; the seam lies in the last rolling
-      // window, not in the first predecessor segments.
-      return requests >= 3 && current && observedSequence >= 30
-        && observedSegments >= 8 ? current : null;
+      // Snapshot while the rolling HLS window straddles the non-IDR seam.
+      // Waiting for the NEXT EOF would evict the boundary on this fast local
+      // source and only decode an unrelated tail.
+      return requests >= 2 && current && observedSequence >= 25 && observedSequence <= 34
+        && observedSequence + observedSegments - 1 >= 39 ? current : null;
     }, 25000).catch(() => { throw Error(`captured seam not published: sessions=${requests} active=${buffer.activeCount} sequence=${observedSequence} segments=${observedSegments}`); });
     expect(manifest).not.toContain('#EXT-X-DISCONTINUITY\n');
     expect(buffer.activeCount).toBe(1);
@@ -180,13 +219,13 @@ import av,sys
 with av.open(sys.argv[1]) as new, av.open(sys.argv[2]) as played:
   sample = [p for p in new.demux(video=0) if p.size]
   packets = [p for p in played.demux(video=0) if p.size]
-  unique = sample[415]
+  unique = sample[520]  # first unmatched non-IDR picture in this natural-EOF pair
   print('1' if not unique.is_keyframe and sum(bytes(p)==bytes(unique) for p in packets)==1 else '0')
 `, path.join(captured, 'second.ts'), path.join(saved, 'index.m3u8')], { timeout: 30000 });
     expect(identify.status).toBe(0);
     expect(identify.stdout.toString().trim()).toBe('1');
     const decode = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-xerror', '-err_detect', 'explode',
-      '-i', path.join(saved, 'index.m3u8'), '-t', '15', '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-'], { timeout: 30000 });
+      '-i', path.join(saved, 'index.m3u8'), '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-'], { timeout: 60000 });
     expect(decode.status).toBe(0);
     expect(decode.stderr.toString()).toBe('');
   }, 120000,
