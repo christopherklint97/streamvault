@@ -5,7 +5,14 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { createLiveBuffer, createLiveRouter } from './live-buffer.js';
+import { createLiveBuffer, createLiveRouter, newStageIndices } from './live-buffer.js';
+
+it('rejects missing FFmpeg stage segments and ignores already-published windows', () => {
+  expect(newStageIndices([0, 1, 2], -1)).toEqual([0, 1, 2]);
+  expect(newStageIndices([1, 2, 3], 2)).toEqual([3]);
+  expect(newStageIndices([5, 6], 2)).toBeNull();
+  expect(newStageIndices([1, 3], 0)).toBeNull();
+});
 
 const servers: Server[] = [];
 const roots: string[] = [];
@@ -32,6 +39,18 @@ async function fixture(): Promise<Buffer> {
   if (result.status !== 0) throw Error('Fixture encoder failed');
   return readFile(output);
 }
+async function subtitledFixture(): Promise<Buffer> {
+  const root = await mkdtemp(path.join(tmpdir(), 'sv-live-subs-'));
+  roots.push(root);
+  const srt = path.join(root, 'subs.srt');
+  const output = path.join(root, 'source.mkv');
+  await writeFile(srt, '1\n00:00:00,000 --> 00:00:03,000\nHello from live TV.\n');
+  const result = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=10:duration=4',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=44100:duration=4', '-i', srt,
+    '-map', '0:v', '-map', '1:a', '-map', '2:s', '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '20', '-bf', '0', '-c:a', 'aac', '-c:s', 'webvtt', output], { timeout: 15000 });
+  if (result.status !== 0) throw Error('Subtitled fixture failed');
+  return readFile(output);
+}
 async function mockSource(body: Buffer, framing: 'chunked' | 'length' | 'silent') {
   const app = express();
   let requests = 0;
@@ -47,7 +66,7 @@ async function mockSource(body: Buffer, framing: 'chunked' | 'length' | 'silent'
   });
   return { url: `${await listen(app)}/source`, requests: () => requests };
 }
-async function harness(url: string, opts: { stallMs?: number; idleMs?: number; maxChannels?: number; maxBytesPerChannel?: number; maxSegmentBytes?: number; minFreeBytes?: number } = {}) {
+async function harness(url: string, opts: { stallMs?: number; idleMs?: number; maxChannels?: number; maxReaders?: number; maxBytesPerChannel?: number; maxSegmentBytes?: number; minFreeBytes?: number } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'sv-live-buffer-'));
   roots.push(root);
   const buffer = createLiveBuffer({ root, pollMs: 100, retryMs: 200, maxBytesPerChannel: 8 * 1024 * 1024, maxSegmentBytes: 2 * 1024 * 1024, ...opts });
@@ -133,7 +152,7 @@ describe('shared live rolling HLS HTTP', () => {
     expect(playlistUrl).toMatch(/^\/api\/live\/channel-a\/index\.m3u8\?ticket=/);
     const manifest = await waitPlaylist(new URL(playlistUrl, base).toString(), text => text.includes('segment/'));
     const segmentPath = manifest.split('\n').find(line => line.startsWith('segment/'))!;
-    expect(segmentPath).toMatch(/\?ticket=/);
+    expect(segmentPath).toMatch(/[?&]ticket=/);
     expect((await fetch(new URL(segmentPath.split('?')[0], playlist))).status).toBe(401);
     expect((await fetch(new URL(segmentPath.replace(/ticket=[^&]+/, 'ticket=invalid'), playlist))).status).toBe(401);
     expect((await fetch(new URL(segmentPath, new URL(playlistUrl, base)))).status).toBe(200);
@@ -141,6 +160,7 @@ describe('shared live rolling HLS HTTP', () => {
     expect((await fetch(`${playlist}?ticket=${expired}`)).status).toBe(401);
     expect((await fetch(`${base}/api/live/channel-b/index.m3u8?ticket=${new URL(playlistUrl, base).searchParams.get('ticket')}`)).status).toBe(401);
     expect((await fetch(`${base}/api/live/channel-a/authorize`)).status).toBe(401);
+    expect((await fetch(`${base}/api/live/channel-a/authorize?ticket=${new URL(playlistUrl, base).searchParams.get('ticket')}`)).status).toBe(401);
   }, 20000);
 
   it('kills silent sources, backs off, limits workers, expires idle workers, and removes temporary files', async () => {
@@ -161,6 +181,7 @@ describe('shared live rolling HLS HTTP', () => {
     await fetch(playlist);
     const initial = await waitPlaylist(playlist, text => text.includes('segment/'));
     const initialSequence = Number(initial.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/)?.[1]);
+    expect(initialSequence).toBeLessThan(2 ** 31);
     const latest = await waitPlaylist(playlist, text => Number(text.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/)?.[1] ?? 0) > initialSequence + 2);
     expect(latest).not.toContain('#EXT-X-ENDLIST');
     expect((await fetch(`${base}/api/live/channel-a/segment/${initialSequence}.ts`)).status).toBe(404);
@@ -198,6 +219,47 @@ describe('shared live rolling HLS HTTP', () => {
     expect((manifest?.match(/^segment\//gm) ?? []).length).toBeLessThanOrEqual(12);
   }, 16000);
 
+  it('does not silently strip real subtitle streams when buffering cannot serve their rendition', async () => {
+    const source = await mockSource(await subtitledFixture(), 'length');
+    const { base, buffer } = await harness(source.url);
+    const response = await fetch(`${base}/api/live/channel-a/authorize`);
+    expect(response.status).toBe(503);
+    expect(source.requests()).toBeGreaterThan(0);
+    expect(await buffer.playlist('channel-a', source.url)).toBeNull();
+  }, 12000);
+
+  it('bounds simultaneous authorization waiters instead of polling for every viewer', async () => {
+    const source = await mockSource(await fixture(), 'silent');
+    const { base } = await harness(source.url, { stallMs: 600 });
+    const endpoint = `${base}/api/live/channel-a/authorize`;
+    const pending = Array.from({ length: 8 }, () => fetch(endpoint));
+    await new Promise(resolve => setTimeout(resolve, 250));
+    const started = Date.now();
+    const overloaded = await fetch(endpoint);
+    expect(overloaded.status).toBe(503);
+    expect(Date.now() - started).toBeLessThan(1500);
+    const responses = await Promise.all(pending);
+    expect(responses.every(response => response.status === 503)).toBe(true);
+  }, 12000);
+
+  it('streams segments with a bounded number of open readers instead of buffering per viewer', async () => {
+    const source = await mockSource(await fixture(), 'length');
+    const { buffer, playlist } = await harness(source.url, { maxReaders: 1 });
+    await fetch(playlist);
+    const manifest = await waitPlaylist(playlist, text => text.includes('segment/'));
+    const segmentPath = manifest.split('\n').find(line => line.startsWith('segment/'))!;
+    const url = new URL(segmentPath, playlist);
+    const id = Number(url.pathname.match(/\/(\d+)\.ts$/)?.[1]);
+    const epoch = url.searchParams.get('epoch')!;
+    const first = await buffer.segment('channel-a', id, epoch);
+    if (!first || first === 'busy') throw Error('First segment did not open');
+    expect(buffer.activeReaders).toBe(1);
+    expect(await buffer.segment('channel-a', id, epoch)).toBe('busy');
+    first.destroy();
+    await new Promise(resolve => first.once('close', resolve));
+    expect(buffer.activeReaders).toBe(0);
+  }, 12000);
+
   it('never reuses a segment URL after an idle worker is retired', async () => {
     const source = await mockSource(await fixture(), 'length');
     const { playlist, buffer } = await harness(source.url, { idleMs: 500 });
@@ -210,6 +272,8 @@ describe('shared live rolling HLS HTTP', () => {
     const next = await waitPlaylist(playlist, text => text.includes('segment/'));
     const newPath = next.split('\n').find(line => line.startsWith('segment/'))!;
     expect(newPath).not.toBe(oldPath);
+    expect((await fetch(new URL(newPath, playlist))).status).toBe(200);
+    expect((await fetch(new URL(newPath.split('?')[0], playlist))).status).toBe(404);
     expect((await fetch(new URL(oldPath, playlist))).status).toBe(404);
   }, 16000);
 

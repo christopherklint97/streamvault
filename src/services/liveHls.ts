@@ -5,14 +5,18 @@ export async function attachLiveHls(
   video: HTMLVideoElement,
   url: string,
   onFatal: (detail: string) => void,
+  isCurrent: () => boolean = () => true,
+  loadHls: () => Promise<typeof import('hls.js')> = () => import('hls.js'),
 ): Promise<() => void> {
+  if (!isCurrent()) throw new Error('Live playback superseded');
   if (video.canPlayType('application/vnd.apple.mpegurl')) {
     video.src = url;
     video.load();
     return () => { video.removeAttribute('src'); video.load(); };
   }
 
-  const { default: HlsPlayer } = await import('hls.js');
+  const { default: HlsPlayer } = await loadHls();
+  if (!isCurrent()) throw new Error('Live playback superseded');
   if (!HlsPlayer.isSupported()) throw new Error('Live HLS playback is not supported on this device');
   const hls: Hls = new HlsPlayer({
     enableWorker: true,

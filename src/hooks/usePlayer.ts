@@ -1191,7 +1191,7 @@ export function usePlayer(): {
           if (!isCurrentPlayback()) return;
           setStatus('loading');
           liveStreamRecovery.transportEnded('hls-error');
-        }).then(dispose => {
+        }, isCurrentPlayback).then(dispose => {
           if (!isCurrentPlayback()) { dispose(); return; }
           disposeFiniteHls = dispose;
         }).catch(() => {

@@ -1,43 +1,59 @@
 import { Router, type Request } from 'express';
 import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, statfs, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readdir, readFile, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { isAuthorizedRequest } from './security.js';
 
 interface Segment { id: number; name: string; duration: number; bytes: number; discontinuity: boolean; }
 interface Channel {
-  id: string; dir: string; segments: Segment[]; bytes: number; sequence: number; discontinuitySequence: number;
+  id: string; dir: string; epoch: string; segments: Segment[]; bytes: number; sequence: number; discontinuitySequence: number;
   lastAccess: number; lastPublish: number; worker?: ChildProcess; working?: string;
-  generation: number; timer?: ReturnType<typeof setInterval>; terminating: boolean;
+  generation: number; lastStageIndex: number; timer?: ReturnType<typeof setInterval>; terminating: boolean;
   inspecting?: boolean; publishTask?: Promise<void>;
 }
 export interface LiveBufferOptions {
-  root?: string; maxChannels?: number; maxBytesPerChannel?: number; maxSegmentBytes?: number;
+  root?: string; maxChannels?: number; maxBytesPerChannel?: number; maxSegmentBytes?: number; maxReaders?: number;
   stallMs?: number; idleMs?: number; retryMs?: number; pollMs?: number; segmentSeconds?: number;
   minFreeBytes?: number;
+}
+
+export function newStageIndices(indices: number[], last: number): number[] | null {
+  const fresh: number[] = [];
+  let expected = last + 1;
+  for (const index of indices) {
+    if (!Number.isSafeInteger(index) || index < 0) return null;
+    if (index <= last) continue;
+    if (index !== expected) return null;
+    fresh.push(index);
+    expected++;
+  }
+  return fresh;
 }
 
 /** One FFmpeg ingest per channel, never one per viewer. No archive files are touched. */
 export function createLiveBuffer(options: LiveBufferOptions = {}) {
   const root = options.root ?? path.join(process.env.TMPDIR || tmpdir(), 'streamvault-live-buffer');
-  const maxChannels = options.maxChannels ?? 2;
+  const maxChannels = options.maxChannels ?? 4;
   const maxBytes = options.maxBytesPerChannel ?? 64 * 1024 * 1024;
   const maxSegmentBytes = options.maxSegmentBytes ?? 12 * 1024 * 1024;
+  const maxReaders = options.maxReaders ?? 16;
   const stallMs = options.stallMs ?? 15_000;
   const idleMs = options.idleMs ?? 60_000;
   const retryMs = options.retryMs ?? 2_000;
   const pollMs = options.pollMs ?? 500;
   const segmentSeconds = options.segmentSeconds ?? 2;
   const minFreeBytes = options.minFreeBytes ?? 128 * 1024 * 1024;
-  if (![maxChannels, maxBytes, maxSegmentBytes, stallMs, idleMs, retryMs, pollMs, segmentSeconds, minFreeBytes]
-    .every(n => Number.isFinite(n) && n > 0) || maxBytes < maxSegmentBytes * 2) throw Error('Invalid live buffer limits');
+  if (![maxChannels, maxBytes, maxSegmentBytes, maxReaders, stallMs, idleMs, retryMs, pollMs, segmentSeconds, minFreeBytes]
+    .every(n => Number.isFinite(n) && n > 0) || maxBytes < maxSegmentBytes * 2 || !Number.isInteger(maxReaders)) throw Error('Invalid live buffer limits');
   const channels = new Map<string, Channel>();
+  let activeReaders = 0;
   let stopped = false;
-  // Include a boot epoch and reserve a range per worker lifetime: an old
-  // playlist must never resolve a reused segment number to different media.
-  let nextSequence = Date.now() * 100 + randomBytes(1)[0];
+  // Keep HLS media sequence modest and monotonic per channel within a process.
+  // Segment URLs also carry an opaque worker epoch, so an old URL cannot alias
+  // different media after idle retirement or a service restart.
+  const sequenceByChannel = new Map<string, number>();
   let initialized: Promise<void> | undefined;
   const initialize = () => initialized ??= (async () => {
     await mkdir(root, { recursive: true, mode: 0o700 });
@@ -65,30 +81,45 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
 
   async function publish(ch: Channel) {
     if (!ch.working || ch.terminating) return;
+    // FFmpeg's HLS muxer writes separate WebVTT assets, which this endpoint
+    // cannot expose as selectable renditions. Fall back to legacy TS instead
+    // of silently serving video without the original subtitle track.
+    try {
+      if ((await readdir(ch.working)).some(name => name.endsWith('.vtt') || name.endsWith('_vtt.m3u8'))) {
+        await retire(ch); return;
+      }
+    } catch { return; }
     let manifest: string;
     try { manifest = await readFile(path.join(ch.working, 'index.m3u8'), 'utf8'); }
     catch { return; }
     const entries = [...manifest.matchAll(/#EXTINF:([\d.]+),?[^\n]*\n([^\r\n]+\.ts)/g)];
+    const indices = entries.map(([, , name]) => /^\d+\.ts$/.test(name) ? Number(name.slice(0, -3)) : NaN);
+    if (!newStageIndices(indices, ch.lastStageIndex)) { await retire(ch); return; }
     for (const [, durationText, name] of entries) {
-      if (!/^\d+\.ts$/.test(name) || ch.terminating) continue;
+      if (ch.terminating) return;
+      const index = Number(name.slice(0, -3));
+      if (index <= ch.lastStageIndex) continue;
       const key = `${ch.generation}-${name}`;
-      if (ch.segments.some(s => s.name === key)) continue;
       const duration = Number(durationText);
-      if (!Number.isFinite(duration) || duration <= 0) continue;
-      // A longer GOP cannot satisfy this live playlist's fixed reload cadence.
-      // Stop the worker rather than hiding a unique segment or lying about TARGETDURATION.
-      if (duration > 4) { void retire(ch); return; }
+      // Never conceal a unique segment by skipping an unpublishable input.
+      if (!Number.isFinite(duration) || duration <= 0 || duration > 4) { await retire(ch); return; }
       let data: Buffer;
-      try { data = await readFile(path.join(ch.working, name)); } catch { continue; }
-      if (!data.length || data.length > maxSegmentBytes || ch.terminating) continue;
+      try {
+        const stage = path.join(ch.working, name);
+        if ((await stat(stage)).size > maxSegmentBytes) { await retire(ch); return; }
+        data = await readFile(stage);
+      } catch { await retire(ch); return; }
+      if (!data.length || data.length > maxSegmentBytes || ch.terminating) { await retire(ch); return; }
       try {
         const space = await statfs(root);
         if (space.bavail * space.bsize < minFreeBytes + data.length) { void retire(ch); return; }
       } catch { void retire(ch); return; }
       const id = ch.sequence++;
+      sequenceByChannel.set(ch.id, ch.sequence);
       const filename = `${id}.ts`;
       try { await writeFile(path.join(ch.dir, filename), data, { flag: 'wx' }); }
       catch { void retire(ch); return; }
+      ch.lastStageIndex = index;
       const discontinuity = ch.segments.length > 0 && ch.segments.at(-1)!.name.split('-')[0] !== String(ch.generation);
       ch.segments.push({ id, name: key, duration, bytes: data.length, discontinuity });
       ch.bytes += data.length;
@@ -145,13 +176,14 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     } catch { await retire(ch); return; }
     if (ch.terminating || stopped) return;
     const generation = ++ch.generation;
+    ch.lastStageIndex = -1;
     const working = await mkdtemp(path.join(ch.dir, 'ingest-'));
     if (ch.terminating || stopped) { await rm(working, { recursive: true, force: true }); return; }
     ch.working = working;
     ch.lastPublish = Date.now();
     const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-i', url,
-      '-map', '0:v?', '-map', '0:a?', '-c', 'copy', '-f', 'hls',
-      '-hls_time', String(segmentSeconds), '-hls_list_size', '4',
+      '-map', '0:v?', '-map', '0:a?', '-map', '0:s?', '-c', 'copy', '-f', 'hls',
+      '-hls_time', String(segmentSeconds), '-hls_list_size', '16',
       '-hls_flags', 'delete_segments+omit_endlist+temp_file',
       '-hls_segment_filename', path.join(working, '%d.ts'), path.join(working, 'index.m3u8')];
     // Never log FFmpeg arguments/stderr: upstream URL paths may embed credentials.
@@ -175,9 +207,9 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     let ch = channels.get(id);
     if (ch) { ch.lastAccess = Date.now(); return ch; }
     if (stopped || channels.size >= maxChannels) return null;
-    ch = { id, dir: '', segments: [], bytes: 0, sequence: nextSequence, discontinuitySequence: 0,
-      generation: 0, lastAccess: Date.now(), lastPublish: Date.now(), terminating: false };
-    nextSequence += 100_000_000;
+    ch = { id, dir: '', epoch: randomBytes(8).toString('hex'), segments: [], bytes: 0,
+      sequence: sequenceByChannel.get(id) ?? 0, discontinuitySequence: 0,
+      generation: 0, lastStageIndex: -1, lastAccess: Date.now(), lastPublish: Date.now(), terminating: false };
     channels.set(id, ch); // reserve slot before the first await
     try {
       await initialize();
@@ -192,6 +224,7 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
 
   return {
     get activeCount() { return channels.size; },
+    get activeReaders() { return activeReaders; },
     async playlist(id: string, url: string, ticket?: string) {
       const ch = await get(id, url);
       if (!ch || !ch.segments.length) return null;
@@ -199,17 +232,26 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
         `#EXT-X-MEDIA-SEQUENCE:${ch.segments[0].id}`, `#EXT-X-DISCONTINUITY-SEQUENCE:${ch.discontinuitySequence}`];
       for (const seg of ch.segments) {
         if (seg.discontinuity) rows.push('#EXT-X-DISCONTINUITY');
-        rows.push(`#EXTINF:${seg.duration.toFixed(3)},`, `segment/${seg.id}.ts${ticket ? `?ticket=${encodeURIComponent(ticket)}` : ''}`);
+        rows.push(`#EXTINF:${seg.duration.toFixed(3)},`, `segment/${seg.id}.ts?epoch=${ch.epoch}${ticket ? `&ticket=${encodeURIComponent(ticket)}` : ''}`);
       }
       return `${rows.join('\n')}\n`;
     },
-    async segment(id: string, segmentId: number) {
+    async segment(id: string, segmentId: number, epoch: string) {
       const ch = channels.get(id);
-      if (!ch) return null;
+      if (!ch || ch.epoch !== epoch) return null;
       ch.lastAccess = Date.now();
       const seg = ch.segments.find(s => s.id === segmentId);
       if (!seg) return null;
-      try { return await readFile(path.join(ch.dir, `${seg.id}.ts`)); } catch { return null; }
+      if (activeReaders >= maxReaders) return 'busy' as const;
+      activeReaders++;
+      try {
+        // Pin the inode before eviction. A slow viewer holds only one 64 KiB
+        // stream buffer rather than an entire (potentially 12 MiB) segment.
+        const handle = await open(path.join(ch.dir, `${seg.id}.ts`), 'r');
+        const stream = handle.createReadStream({ highWaterMark: 64 * 1024, autoClose: true });
+        stream.once('close', () => { activeReaders--; });
+        return stream;
+      } catch { activeReaders--; return null; }
     },
     async stop() { stopped = true; await Promise.all([...channels.values()].map(retire)); },
   };
@@ -219,6 +261,7 @@ export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, so
   const router = Router();
   const secret = randomBytes(32);
   const ttl = 24 * 60 * 60_000;
+  let authorizationWaiters = 0;
   const signature = (id: string, expiry: number) => createHmac('sha256', secret).update(`${id}\u001f${expiry}`).digest('base64url');
   const ticketFor = (id: string) => { const expiresAt = Date.now() + ttl; return { ticket: `${expiresAt}.${signature(id, expiresAt)}`, expiresAt }; };
   const allowed = (req: Request, id: string) => {
@@ -242,20 +285,26 @@ export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, so
   };
   router.get('/:id/authorize', async (req, res) => {
     const id = String(req.params.id);
-    if (!allowed(req, id)) { res.status(401).end(); return; }
+    const applicationToken = process.env.STREAMVAULT_AUTH_TOKEN;
+    if (!isAuthorizedRequest(req.header('authorization') || undefined, applicationToken,
+      req.header('x-streamvault-token') || undefined)) { res.status(401).end(); return; }
     const url = source(id);
     if (!url) { res.status(404).end(); return; }
     if (req.query.audio === '1') { res.status(422).end(); return; }
     // Native players may not retry an initial 503 playlist. Wait briefly for
     // a published segment; otherwise let the caller use its legacy TS path.
-    const deadline = Date.now() + 5_000;
+    if (authorizationWaiters >= 8) { res.set('Retry-After', '2').status(503).end(); return; }
+    authorizationWaiters++;
     let ready = false;
-    do {
-      const manifest = await buffer.playlist(id, url);
-      if (manifest?.includes('\nsegment/')) { ready = true; break; }
-      if (Date.now() >= deadline || req.destroyed) break;
-      await new Promise(resolve => setTimeout(resolve, 100));
-    } while (true);
+    try {
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline && !req.destroyed) {
+        const manifest = await buffer.playlist(id, url);
+        if (manifest?.includes('\nsegment/')) { ready = true; break; }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    } finally { authorizationWaiters--; }
+    if (req.destroyed) return;
     if (!ready) { res.set('Retry-After', '2').status(503).end(); return; }
     const { ticket, expiresAt } = ticketFor(id);
     res.set('Cache-Control', 'private, no-store').json({ playlistUrl: `/api/live/${encodeURIComponent(id)}/index.m3u8?ticket=${ticket}`, expiresAt });
@@ -276,9 +325,17 @@ export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, so
     if (!prepare(req, res, id)) return;
     const rawId = String(req.params.segmentId);
     if (!/^\d{1,15}$/.test(rawId) || !Number.isSafeInteger(Number(rawId))) { res.status(404).end(); return; }
-    const bytes = await buffer.segment(id, Number(rawId));
-    if (!bytes) { res.status(404).end(); return; }
-    res.type('video/mp2t').send(bytes);
+    const epoch = typeof req.query.epoch === 'string' ? req.query.epoch : '';
+    const stream = await buffer.segment(id, Number(rawId), epoch);
+    if (stream === 'busy') { res.set('Retry-After', '1').status(503).end(); return; }
+    if (!stream) { res.status(404).end(); return; }
+    res.type('video/mp2t');
+    res.once('close', () => stream.destroy());
+    stream.once('error', () => {
+      if (res.headersSent) res.destroy();
+      else res.status(503).end();
+    });
+    stream.pipe(res);
   });
   return router;
 }

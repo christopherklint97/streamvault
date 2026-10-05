@@ -22,6 +22,15 @@ describe('live HLS native-player authorization', () => {
     }
   });
 
+  it('falls back to legacy TS when a protected feed is overloaded, but never downgrades authentication rejection', async () => {
+    localStorage.setItem('streamvault_auth_token', JSON.stringify('test-secret'));
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+    fetchMock.mockResolvedValueOnce(json({ error: 'Worker capacity' }, 503));
+    await expect(getAuthorizedLiveHlsUrl('', 'live_future', 'http://localhost:3000')).resolves.toBeNull();
+    fetchMock.mockResolvedValueOnce(json({ error: 'Unauthenticated' }, 401));
+    await expect(getAuthorizedLiveHlsUrl('', 'live_future', 'http://localhost:3000')).rejects.toThrow();
+  });
+
   it('rejects a cross-origin or different-channel playlist from the authorization response', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch');
     fetchMock.mockResolvedValueOnce(json({ playlistUrl: 'https://other.example.test/steal' }));

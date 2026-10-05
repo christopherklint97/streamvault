@@ -1,4 +1,4 @@
-import { ApiError, apiFetch, hasStoredApiToken } from './api';
+import { ApiError, apiFetch } from './api';
 import { resolveMediaUrl } from './recordingPlayback';
 
 /** Issue a short-lived media URL that native players can use without custom headers. */
@@ -21,8 +21,8 @@ export async function getAuthorizedLiveHlsUrl(
     }
     return resolveMediaUrl(response.playlistUrl, apiBaseUrl, pageOrigin);
   } catch (error) {
-    if (error instanceof ApiError && [404, 429, 501, 503].includes(error.status) && !hasStoredApiToken()) {
-      return null; // Unavailable feed: retain the TS path rather than black-screening without auth.
+    if (error instanceof ApiError && [404, 429, 501, 503].includes(error.status)) {
+      return null; // Feed unavailable: retain the existing TS path even for signed-in clients.
     }
     throw error;
   }

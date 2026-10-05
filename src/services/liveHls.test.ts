@@ -45,4 +45,18 @@ describe('shared live HLS playback', () => {
     dispose();
     expect(hls.destroy).toHaveBeenCalledOnce();
   });
+
+  it('never attaches an old HLS player after a delayed import and channel switch', async () => {
+    const video = document.createElement('video');
+    vi.spyOn(video, 'canPlayType').mockReturnValue('');
+    let current = true;
+    let release!: (module: typeof import('hls.js')) => void;
+    const load = () => new Promise<typeof import('hls.js')>(resolve => { release = resolve; });
+    const attaching = attachLiveHls(video, '/api/live/old/index.m3u8', vi.fn(), () => current, load);
+    current = false;
+    release(await import('hls.js'));
+    await expect(attaching).rejects.toThrow();
+    expect(hlsMock.instances).toHaveLength(0);
+    expect(video.src).toBe('');
+  });
 });
