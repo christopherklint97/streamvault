@@ -1,5 +1,5 @@
 ## Stage 1: Build frontend
-FROM node:26-slim@sha256:14bf3eac4bf209d906d3c41256597d3ab1f926b2e93a79e9bdfe1efd32454239 AS frontend-build
+FROM node:26-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1 AS frontend-build
 
 WORKDIR /app
 
@@ -14,7 +14,7 @@ COPY public/ public/
 RUN VITE_SERVER_URL="" npm run build
 
 ## Stage 2: Build Comskip for ARM64/AMD64
-FROM node:26-slim@sha256:14bf3eac4bf209d906d3c41256597d3ab1f926b2e93a79e9bdfe1efd32454239 AS comskip-build
+FROM node:26-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1 AS comskip-build
 
 ARG COMSKIP_REV=a140b6a
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -31,7 +31,7 @@ RUN git clone --filter=blob:none https://github.com/erikkaashoek/Comskip.git . \
  && make -j2
 
 ## Stage 3: Build server native deps
-FROM node:26-slim@sha256:14bf3eac4bf209d906d3c41256597d3ab1f926b2e93a79e9bdfe1efd32454239 AS server-build
+FROM node:26-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1 AS server-build
 
 RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
 
@@ -41,7 +41,7 @@ COPY server/package.json server/package-lock.json ./
 RUN npm ci --omit=dev
 
 ## Stage 4: Runtime
-FROM node:26-slim@sha256:14bf3eac4bf209d906d3c41256597d3ab1f926b2e93a79e9bdfe1efd32454239
+FROM node:26-slim@sha256:ec7758ee051e457b468b32bde57b0879010b325bb9862718e9615225ce4aaae1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg libargtable2-0 libsdl2-2.0-0 util-linux python3 python3-av \
