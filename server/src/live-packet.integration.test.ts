@@ -2,6 +2,7 @@ import { afterEach, expect, it } from 'vitest';
 import express from 'express';
 import { createServer, type Server } from 'node:http';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -39,7 +40,7 @@ async function media() {
   roots.push(dir);
   const make = spawnSync('/usr/bin/python3', ['-c',
     'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from test_media import make_synthetic; make_synthetic(Path(sys.argv[2]))',
-    path.join(repo, 'prototypes/live_packet_continuity'), dir], { timeout: 30000 });
+    path.join(repo, 'prototypes/live_packet_continuity'), dir], { timeout: 90000 });
   if (make.status !== 0) throw Error('synthetic fixture failed');
   return [await readFile(path.join(dir, 'first.ts')), await readFile(path.join(dir, 'second.ts'))];
 }
@@ -52,6 +53,144 @@ async function waitFor<T>(fn: () => Promise<T | null>, ms = 12000): Promise<T> {
   }
   throw Error('packet live readiness deadline exceeded');
 }
+
+it('does not kill a progressing replay merely because HLS cannot publish duplicates yet', async () => {
+  const [first, second] = await media();
+  const upstream = express();
+  let requests = 0;
+  let release!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  upstream.get('/api/stream/channel-a', async (_req, res) => {
+    requests++;
+    res.type('video/mp2t');
+    if (requests === 1) { res.set('Content-Length', String(first.length)); res.end(first); return; }
+    if (requests === 2) {
+      await waiting;
+      for (let pos = 0; pos < second.length; pos += 8192) {
+        if (res.destroyed) return;
+        res.write(second.subarray(pos, pos + 8192));
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+      res.end();
+      return;
+    }
+    res.write(second.subarray(0, 188));
+  });
+  const proxy = await listen(upstream);
+  const root = await mkdtemp(path.join(tmpdir(), 'sv-packet-replay-progress-'));
+  roots.push(root);
+  const buffer = createLiveBuffer({ root, packetAware: true, pollMs: 100, stallMs: 5000,
+    maxBytesPerChannel: 8_000_000, maxSegmentBytes: 2_000_000 });
+  buffers.push(buffer);
+  const url = `${proxy}/api/stream/channel-a`;
+  await buffer.playlist('channel-a', url);
+  try {
+    await waitFor(async () => requests >= 2 ? true : null, 15000).catch(() => {
+      throw Error(`first response did not reopen: requests=${requests} active=${buffer.activeCount}`);
+    });
+    release();
+    await waitFor(async () => requests >= 3 ? true : null, 25000);
+    expect(buffer.activeCount).toBe(1);
+  } finally { release(); }
+}, 60000);
+
+it('reopens a stalled but complete chunked session and keeps the same decoder timeline', async () => {
+  const [first, second] = await media();
+  const upstream = express();
+  let requests = 0;
+  upstream.get('/api/stream/channel-a', (_req, res) => {
+    requests++;
+    res.type('video/mp2t');
+    if (requests === 1) { res.write(first); return; } // no terminating chunk
+    if (requests === 2) { res.set('Content-Length', String(second.length)); res.end(second); return; }
+    res.write(second.subarray(0, 188));
+  });
+  const proxy = await listen(upstream);
+  const root = await mkdtemp(path.join(tmpdir(), 'sv-packet-stall-'));
+  roots.push(root);
+  const buffer = createLiveBuffer({ root, packetAware: true, pollMs: 100, stallMs: 12000,
+    maxBytesPerChannel: 8_000_000, maxSegmentBytes: 2_000_000 });
+  buffers.push(buffer);
+  const url = `${proxy}/api/stream/channel-a`;
+  await waitFor(async () => {
+    const manifest = await buffer.playlist('channel-a', url);
+    return requests >= 2 && manifest?.includes('segment/') ? manifest : null;
+  }, 15000);
+  expect(buffer.activeCount).toBe(1);
+}, 25000);
+
+const captured = '/home/christopherklint/.hermes/cache/scratch/live-eof-samples';
+it.skipIf(!existsSync(path.join(captured, 'first.ts')) || !existsSync(path.join(captured, 'second.ts')))(
+  'preserves the captured non-IDR seam despite a clean HTTP body ending mid-TS-packet', async () => {
+    const first = await readFile(path.join(captured, 'first.ts'));
+    const second = await readFile(path.join(captured, 'second.ts'));
+    const upstream = express();
+    let requests = 0;
+    upstream.get('/api/stream/channel-a', (_req, res) => {
+      requests++;
+      res.type('video/mp2t');
+      if (requests === 1) { res.write(first); res.end(); return; }
+      if (requests === 2) { res.set('Content-Length', String(second.length)); res.end(second); return; }
+      const nullPacket = Buffer.alloc(188, 0xff);
+      nullPacket.set([0x47, 0x1f, 0xff, 0x10]);
+      const nullTransport = Buffer.concat(Array.from({ length: 100 }, () => nullPacket));
+      const pace = setInterval(() => {
+        if (res.destroyed) { clearInterval(pace); return; }
+        res.write(nullTransport); // valid TS null PID; no unverified media
+      }, 400);
+      res.once('close', () => clearInterval(pace));
+    });
+    const proxy = await listen(upstream);
+    const root = await mkdtemp(path.join(tmpdir(), 'sv-packet-captured-'));
+    roots.push(root);
+    const buffer = createLiveBuffer({ root, packetAware: true, pollMs: 100, stallMs: 15000,
+      maxBytesPerChannel: 64 * 1024 * 1024, maxSegmentBytes: 12 * 1024 * 1024 });
+    buffers.push(buffer);
+    const url = `${proxy}/api/stream/channel-a`;
+    let observedSequence = -1;
+    let observedSegments = 0;
+    const manifest = await waitFor(async () => {
+      const current = await buffer.playlist('channel-a', url);
+      observedSequence = Number(current?.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/)?.[1] ?? -1);
+      observedSegments = (current?.match(/^segment\//gm) ?? []).length;
+      // Wait for the successor to finish; the seam lies in the last rolling
+      // window, not in the first predecessor segments.
+      return requests >= 3 && current && observedSequence >= 30
+        && observedSegments >= 8 ? current : null;
+    }, 25000).catch(() => { throw Error(`captured seam not published: sessions=${requests} active=${buffer.activeCount} sequence=${observedSequence} segments=${observedSegments}`); });
+    expect(manifest).not.toContain('#EXT-X-DISCONTINUITY\n');
+    expect(buffer.activeCount).toBe(1);
+    const saved = await mkdtemp(path.join(tmpdir(), 'sv-packet-captured-decode-'));
+    roots.push(saved);
+    const lines = manifest.split('\n').filter(line => line.startsWith('segment/'));
+    for (const [index, line] of lines.entries()) {
+      const parsed = new URL(line, 'http://127.0.0.1');
+      const id = Number(parsed.pathname.match(/\/(\d+)\.ts$/)?.[1]);
+      const epoch = parsed.searchParams.get('epoch')!;
+      const stream = await buffer.segment('channel-a', id, epoch);
+      expect(stream && stream !== 'busy').toBe(true);
+      const chunks: Buffer[] = [];
+      for await (const part of stream as NodeJS.ReadableStream) chunks.push(Buffer.from(part));
+      await writeFile(path.join(saved, `${index}.ts`), Buffer.concat(chunks));
+    }
+    await writeFile(path.join(saved, 'index.m3u8'),
+      `#EXTM3U\n#EXT-X-TARGETDURATION:4\n${lines.map((_, i) => `#EXTINF:2,\n${i}.ts`).join('\n')}\n#EXT-X-ENDLIST\n`);
+    const identify = spawnSync('/usr/bin/python3', ['-c', `
+import av,sys
+with av.open(sys.argv[1]) as new, av.open(sys.argv[2]) as played:
+  sample = [p for p in new.demux(video=0) if p.size]
+  packets = [p for p in played.demux(video=0) if p.size]
+  unique = sample[415]
+  print('1' if not unique.is_keyframe and sum(bytes(p)==bytes(unique) for p in packets)==1 else '0')
+`, path.join(captured, 'second.ts'), path.join(saved, 'index.m3u8')], { timeout: 30000 });
+    expect(identify.status).toBe(0);
+    expect(identify.stdout.toString().trim()).toBe('1');
+    const decode = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-xerror', '-err_detect', 'explode',
+      '-i', path.join(saved, 'index.m3u8'), '-t', '15', '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-'], { timeout: 30000 });
+    expect(decode.status).toBe(0);
+    expect(decode.stderr.toString()).toBe('');
+  }, 120000,
+);
 
 it.each(['chunked', 'length'] as const)('serves one signed, continuous HLS timeline over authenticated %s proxy EOFs', async framing => {
   process.env.STREAMVAULT_AUTH_TOKEN = 'test-only-local-token';

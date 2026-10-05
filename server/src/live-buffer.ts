@@ -185,7 +185,17 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
           if (total + ch.bytes > maxBytes + maxSegmentBytes * 4) { await retire(ch); return; }
         } catch { /* writer may be closing or replacing the directory */ }
         await publishInOrder(ch);
-        if (Date.now() - ch.lastPublish > stallMs) ch.worker?.kill('SIGKILL');
+        if (Date.now() - ch.lastPublish > stallMs) {
+          // A packet seam can consume a long replay without publishing new
+          // segments. Treat ongoing bounded source reads as forward progress;
+          // an actually silent source stops touching this private marker.
+          let sourceProgress = 0;
+          if (packetAware) {
+            try { sourceProgress = (await stat(path.join(ch.working, '.source-progress'))).mtimeMs; }
+            catch { /* worker has not started or is closing */ }
+          }
+          if (Date.now() - Math.max(ch.lastPublish, sourceProgress) > stallMs) ch.worker?.kill('SIGKILL');
+        }
       }
     } finally { ch.inspecting = false; }
   }

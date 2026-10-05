@@ -19,25 +19,25 @@ from live_packet_stitch import Stitcher, UnsafeSeam, ts_packets
 
 
 class Body:
-    def __init__(self, response, limit, stopped):
-        self.response, self.limit, self.stopped = response, limit, stopped
+    def __init__(self, response, limit, stopped, on_bytes):
+        self.response, self.limit, self.stopped, self.on_bytes = response, limit, stopped, on_bytes
         self.used = 0
         self.failed = False
-        self.over_limit = False
 
     def read(self, size):
-        if self.stopped.is_set() or self.failed or self.over_limit:
+        if self.stopped.is_set() or self.failed:
             return b''
         try:
-            data = self.response.read(min(size, self.limit - self.used + 1))
+            # Bound resident read size, not total session bytes: an upstream
+            # can legitimately keep one HTTP response open for hours.
+            data = self.response.read(min(size, self.limit, 16 * 1024))
         except (TimeoutError, OSError, http.client.HTTPException):
             # PyAV callbacks must return EOF, not raise a timeout through C code.
             self.failed = True
             return b''
         self.used += len(data)
-        if self.used > self.limit:
-            self.over_limit = True
-            return b''
+        if data:
+            self.on_bytes()
         return data
 
 
@@ -58,6 +58,15 @@ class Worker:
         self.connection = None
         self.child = None
         self.failure = False
+        self.failure_type = None
+        self.progress = self.directory / '.source-progress'
+        self.last_progress = 0.
+
+    def note_progress(self):
+        now = time.monotonic()
+        if now - self.last_progress >= .25:
+            self.last_progress = now
+            self.progress.touch(exist_ok=True)
 
     def cancel(self, *_):
         self.stop.set()
@@ -82,11 +91,11 @@ class Worker:
                     or response.getheader('Content-Encoding') not in (None, 'identity')):
                 raise UnsafeSeam('source response rejected')
             length = response.getheader('Content-Length')
-            if length is not None and (not length.isdecimal() or int(length) > self.session_bytes):
+            if length is not None and not length.isdecimal():
                 raise UnsafeSeam('source length rejected')
             with self.lock:
                 self.connection = connection
-            return connection, Body(response, self.session_bytes, self.stop), int(length) if length else None
+            return connection, Body(response, self.session_bytes, self.stop, self.note_progress), int(length) if length else None
         except BaseException:
             connection.close()
             raise
@@ -109,9 +118,13 @@ class Worker:
         # Node reserved a private, empty mkdtemp staging directory before spawn.
         if not self.directory.is_dir() or any(self.directory.iterdir()):
             raise UnsafeSeam('staging directory is not empty')
+        self.progress.touch(mode=0o600)
         monitor = threading.Thread(target=self.monitor, daemon=True)
         monitor.start()
-        began = time.monotonic()
+        # The Node owner retires idle channels. A worker wall-clock deadline
+        # would silently terminate an actively viewed channel after minutes.
+        # Keep the constructor's legacy idle_seconds argument for local probes,
+        # but never use it to terminate a live presentation.
         child = None
         try:
             args = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin',
@@ -126,7 +139,7 @@ class Worker:
             with av.open(child.stdin, 'w', format='mpegts', options={'mpegts_flags': '+resend_headers'}) as mux:
                 mapped = None
                 # Keep one PyAV mux and one FFmpeg mux for this channel's lifetime.
-                while not self.stop.is_set() and time.monotonic() - began < self.idle_seconds:
+                while not self.stop.is_set():
                     connection, body, length = self.open_source()
                     try:
                         with av.open(body, 'r', format='mpegts') as demux:
@@ -136,14 +149,21 @@ class Worker:
                                 mapped = {stream.type: mux.add_stream_from_template(stream) for stream in demux.streams}
                             from itertools import chain
                             for packet in stitcher.feed(chain((first,), packets)):
-                                if self.stop.is_set() or self.failure or time.monotonic() - began >= self.idle_seconds:
+                                if self.stop.is_set() or self.failure:
                                     raise UnsafeSeam('worker stopped')
                                 native = packet.native
                                 native.pts, native.dts = packet.pts, packet.dts
                                 native.stream = mapped[packet.kind]
                                 mux.mux(native)
-                        if (body.failed or body.over_limit or (length is not None and body.used != length)
-                                or body.used % 188 != 0 or self.stop.is_set()):
+                        # Clean HTTP EOF may end inside a TS transport packet;
+                        # the next authenticated A/V seam must prove every
+                        # published packet before any successor media escapes.
+                        # A silent chunked response is a candidate EOF only
+                        # after a substantial body. Length-delimited
+                        # truncation is unsafe; memory/disk are capped separately.
+                        if ((length is not None and body.used != length)
+                                or (body.failed and (length is not None or body.used < 188 * 100))
+                                or self.stop.is_set()):
                             raise UnsafeSeam('source body incomplete or interrupted')
                     finally:
                         with self.lock:
@@ -159,8 +179,9 @@ class Worker:
             child.stdin.close()
             if child.wait(timeout=10) != 0:
                 raise UnsafeSeam('HLS mux failed')
-        except BaseException:
+        except BaseException as exc:
             self.failure = True
+            self.failure_type = type(exc).__name__
             self.cancel()
             if child:
                 with suppress(Exception):
