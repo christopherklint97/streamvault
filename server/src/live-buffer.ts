@@ -4,9 +4,11 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdir, mkdtemp, open, readdir, readFile, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { isAuthorizedRequest } from './security.js';
 
 interface Segment { id: number; name: string; duration: number; bytes: number; discontinuity: boolean; }
+export const packetAwareLiveEnabled = (value: string | undefined): boolean => value === '1';
 interface Channel {
   id: string; dir: string; epoch: string; segments: Segment[]; bytes: number; sequence: number; discontinuitySequence: number;
   lastAccess: number; lastPublish: number; worker?: ChildProcess; working?: string;
@@ -17,6 +19,7 @@ export interface LiveBufferOptions {
   root?: string; maxChannels?: number; maxBytesPerChannel?: number; maxSegmentBytes?: number; maxReaders?: number;
   stallMs?: number; idleMs?: number; retryMs?: number; pollMs?: number; segmentSeconds?: number;
   minFreeBytes?: number; removeChannelDir?: (dir: string) => Promise<void>;
+  packetAware?: boolean;
 }
 
 export function newStageIndices(indices: number[], last: number): number[] | null {
@@ -46,9 +49,18 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
   const segmentSeconds = options.segmentSeconds ?? 2;
   const minFreeBytes = options.minFreeBytes ?? 128 * 1024 * 1024;
   const removeChannelDir = options.removeChannelDir ?? (dir => rm(dir, { recursive: true, force: true }));
+  const packetAware = options.packetAware ?? false;
   if (![maxChannels, maxBytes, maxSegmentBytes, maxReaders, stallMs, idleMs, retryMs, pollMs, segmentSeconds, minFreeBytes]
     .every(n => Number.isFinite(n) && n > 0) || maxBytes < maxSegmentBytes * 2 || !Number.isInteger(maxReaders)) throw Error('Invalid live buffer limits');
   const channels = new Map<string, Channel>();
+  const unsafeChannels = new Set<string>();
+  let unsafeCapacityExhausted = false;
+  function markUnsafe(id: string) {
+    // Bound failed-ID accounting; if exhausted, reject ALL new packet channels
+    // until restart rather than forgetting an unsafe one and retrying it.
+    if (unsafeChannels.size >= maxChannels * 16) unsafeCapacityExhausted = true;
+    else unsafeChannels.add(id);
+  }
   let activeReaders = 0;
   let stopped = false;
   // Keep HLS media sequence modest and monotonic per channel within a process.
@@ -89,6 +101,10 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
 
   async function publish(ch: Channel) {
     if (!ch.working || ch.terminating) return;
+    if (packetAware) {
+      try { await stat(path.join(ch.working, 'UNSAFE')); markUnsafe(ch.id); await retire(ch); return; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { await retire(ch); return; } }
+    }
     // FFmpeg's HLS muxer writes separate WebVTT assets, which this endpoint
     // cannot expose as selectable renditions. Fall back to legacy TS instead
     // of silently serving video without the original subtitle track.
@@ -195,12 +211,19 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       '-hls_flags', 'delete_segments+omit_endlist+temp_file',
       '-hls_segment_filename', path.join(working, '%d.ts'), path.join(working, 'index.m3u8')];
     // Never log FFmpeg arguments/stderr: upstream URL paths may embed credentials.
-    const worker = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'ignore'] });
+    // The packet worker receives only a loopback proxy URL. The token is not
+    // passed in argv (or logged); it authenticates the same proxy as capture.
+    const worker = packetAware
+      ? spawn('/usr/bin/python3', [path.join(path.dirname(fileURLToPath(import.meta.url)), 'live_packet_worker.py'),
+        '--source', url, '--directory', working, '--disk-bytes', String(maxBytes + maxSegmentBytes * 4)],
+        { stdio: ['ignore', 'ignore', 'ignore'] })
+      : spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'ignore'] });
     ch.worker = worker;
     worker.on('error', () => {});
     worker.once('close', () => {
       void (async () => {
         if (ch.terminating || generation !== ch.generation) return;
+        if (packetAware) { markUnsafe(ch.id); await retire(ch); return; } // never retry an unproved seam
         await publishInOrder(ch); // FFmpeg may have finalized its last segment at EOF.
         ch.working = undefined;
         ch.worker = undefined;
@@ -212,6 +235,9 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
   }
 
   async function get(id: string, url: string) {
+    if (packetAware && (unsafeCapacityExhausted || unsafeChannels.has(id))) return null;
+    if (packetAware && (!/^https?:\/\/127\.0\.0\.1:\d+\/api\/stream\/[A-Za-z0-9_-]+(?:\?subs=1)?$/.test(url)
+      || !/^[-A-Za-z0-9_]+$/.test(id))) return null;
     let ch = channels.get(id);
     if (ch) {
       if (ch.terminating) return null;
@@ -249,7 +275,7 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     },
     async segment(id: string, segmentId: number, epoch: string) {
       const ch = channels.get(id);
-      if (!ch || ch.epoch !== epoch) return null;
+      if (!ch || ch.terminating || ch.epoch !== epoch) return null;
       ch.lastAccess = Date.now();
       const seg = ch.segments.find(s => s.id === segmentId);
       if (!seg) return null;

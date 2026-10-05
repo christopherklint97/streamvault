@@ -105,7 +105,7 @@ import {
 } from './subtitles.js';
 import { parseByteRange } from './ranges.js';
 import { createArchiveRouter } from './archive-routes.js';
-import { createLiveBuffer, createLiveRouter } from './live-buffer.js';
+import { createLiveBuffer, createLiveRouter, packetAwareLiveEnabled } from './live-buffer.js';
 import { loadArchiveSigningKey } from './archive-hls.js';
 import { ArchiveCapture } from './archive-capture.js';
 import { pruneArchive } from './archive-retention.js';
@@ -218,7 +218,8 @@ app.use(createArchiveRouter({ store: archiveStore, root: archiveRoot, secret: ar
   start: id => archiveCapture.start(id), stop: id => archiveCapture.stopArchive(id),
   prioritize: (id, start, end) => archiveCapture.prioritizeWindow(id, start, end) }));
 const liveBuffer = createLiveBuffer({ root: process.env.STREAMVAULT_LIVE_BUFFER_DIR ||
-  path.join(process.env.TMPDIR || '/var/tmp', 'streamvault-live-buffer') });
+  path.join(process.env.TMPDIR || '/var/tmp', 'streamvault-live-buffer'),
+  packetAware: packetAwareLiveEnabled(process.env.STREAMVAULT_LIVE_PACKET_AWARE) });
 app.use('/api/live', createLiveRouter(liveBuffer, id => {
   const channel = getChannelById(id);
   // The existing proxy validates upstream responses and hides credential-bearing
