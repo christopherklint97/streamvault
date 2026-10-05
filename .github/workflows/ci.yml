@@ -58,11 +58,32 @@ jobs:
       - name: Apps2Samsung workflow contract checks (offline)
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/test_tizen_wgt_workflow.py
 
-      - name: Test server
-        run: cd server && npm run test
-
       - name: Build
         run: npm run build
 
       - name: Build Docker image
-        run: docker build .
+        run: docker build -t streamvault-ci:packet .
+      - name: Test server in packaged runtime
+        run: |
+          docker run --rm -v "$PWD:/checkout" -w /checkout/server streamvault-ci:packet \
+            npm run test -- --run --no-file-parallelism --maxWorkers=1 --testTimeout=30000
+          docker run --rm -v "$PWD:/checkout" -w /checkout/server/src streamvault-ci:packet \
+            /usr/bin/python3 -m unittest -v test_live_packet_worker
+
+  arm64-image:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build ARM64 runtime with PyAV
+        run: |
+          docker build -t streamvault-ci:arm64 .
+          docker run --rm streamvault-ci:arm64 /usr/bin/python3 -c 'import av; print(av.__version__)'
+      - name: Package verified ARM64 image
+        run: docker save streamvault-ci:arm64 | gzip -1 > streamvault-arm64.tar.gz
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: streamvault-arm64-${{ github.event.pull_request.head.sha || github.sha }}
+          path: streamvault-arm64.tar.gz
+          retention-days: 2
+          compression-level: 0
+          if-no-files-found: error

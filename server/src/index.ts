@@ -105,6 +105,7 @@ import {
 } from './subtitles.js';
 import { parseByteRange } from './ranges.js';
 import { createArchiveRouter } from './archive-routes.js';
+import { createLiveBuffer, createLiveRouter, packetAwareLiveEnabled } from './live-buffer.js';
 import { loadArchiveSigningKey } from './archive-hls.js';
 import { ArchiveCapture } from './archive-capture.js';
 import { pruneArchive } from './archive-retention.js';
@@ -216,6 +217,16 @@ app.use(createArchiveRouter({ store: archiveStore, root: archiveRoot, secret: ar
   getChannel: getChannelById, getRecording, getPrograms: getArchivePrograms,
   start: id => archiveCapture.start(id), stop: id => archiveCapture.stopArchive(id),
   prioritize: (id, start, end) => archiveCapture.prioritizeWindow(id, start, end) }));
+const liveBuffer = createLiveBuffer({ root: process.env.STREAMVAULT_LIVE_BUFFER_DIR ||
+  path.join(process.env.TMPDIR || '/var/tmp', 'streamvault-live-buffer'),
+  packetAware: packetAwareLiveEnabled(process.env.STREAMVAULT_LIVE_PACKET_AWARE) });
+app.use('/api/live', createLiveRouter(liveBuffer, id => {
+  const channel = getChannelById(id);
+  // The existing proxy validates upstream responses and hides credential-bearing
+  // provider URLs from the FFmpeg process arguments.
+  return channel?.content_type === 'livetv' && channel.url
+    ? `http://127.0.0.1:${PORT}/api/stream/${encodeURIComponent(id)}?subs=1` : null;
+}));
 
 // Request logging; include completion timing only when a request is slow.
 app.use((req, res, next) => {
@@ -2400,7 +2411,7 @@ function shutdown(signal: string): void {
   });
 
   const recorderAndAnalysisShutdown = (async () => {
-    await Promise.all([schedulerShutdown, stopAllRecordings(), archiveCapture.stopAll()]);
+    await Promise.all([schedulerShutdown, stopAllRecordings(), archiveCapture.stopAll(), liveBuffer.stop()]);
     await stopCommercialAnalysisWorker();
   })().catch(error => {
     logger.warn(`Recorder/analysis shutdown failed: ${error instanceof Error ? error.message : error}`);

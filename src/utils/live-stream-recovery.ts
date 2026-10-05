@@ -1,4 +1,4 @@
-export type LiveRecoveryReason = 'loading-complete' | 'media-ended' | 'mpegts-error' | 'stalled';
+export type LiveRecoveryReason = 'loading-complete' | 'media-ended' | 'mpegts-error' | 'hls-error' | 'stalled';
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 

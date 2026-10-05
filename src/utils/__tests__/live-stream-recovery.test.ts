@@ -172,6 +172,15 @@ describe('LiveStreamRecovery', () => {
     expect(recover).toHaveBeenLastCalledWith('loading-complete', 1);
   });
 
+  it('recovers a fatal live HLS error without conflating it with a source EOF', () => {
+    const recover = vi.fn();
+    const recovery = new LiveStreamRecovery(recover, { retryDelaysMs: [250] });
+    recovery.begin('live_future');
+    recovery.transportEnded('hls-error');
+    vi.advanceTimersByTime(250);
+    expect(recover).toHaveBeenCalledWith('hls-error', 1);
+  });
+
   it('does not reconnect while playback is intentionally paused', () => {
     const recover = vi.fn();
     const recovery = new LiveStreamRecovery(recover, {

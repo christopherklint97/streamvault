@@ -35,6 +35,8 @@ import {
 } from '../services/playbackSeek';
 import { useRecordingStore } from '../stores/recordingStore';
 import { attachFiniteHls } from '../services/finiteHls';
+import { attachLiveHls } from '../services/liveHls';
+import { getAuthorizedLiveHlsUrl } from '../services/livePlayback';
 import {
   getAvPlayClockReading,
   getHtml5ClockReading,
@@ -114,6 +116,7 @@ let bgProgressInterval: ReturnType<typeof setInterval> | null = null;
 let bgBufferTimer: ReturnType<typeof setTimeout> | null = null;
 let recordingVodPoll: ReturnType<typeof setInterval> | null = null;
 let html5PlaybackGeneration = 0;
+let liveAuthorizationGeneration = 0;
 let restartActiveLiveStream: (() => void) | null = null;
 let activeBrowserSubtitleController: AbortController | null = null;
 let activeBrowserTextTrack: TextTrack | null = null;
@@ -368,6 +371,7 @@ export function stopActivePlayback() {
   finiteHlsRetry = { channelId: '', position: -1, attempts: 0, at: 0 };
   clearRecordingVodPoll();
   html5PlaybackGeneration += 1;
+  liveAuthorizationGeneration += 1;
   playbackClock.reset();
   resetManualSeekIntent();
   commercialSkipSession.reset();
@@ -519,6 +523,11 @@ export function usePlayer(): {
     setStatus('loading');
     const clockGeneration = playbackClock.begin(channel.duration ?? 0);
     const commercialGeneration = beginCommercialPlayback(channel);
+    const authorizationGeneration = ++liveAuthorizationGeneration;
+    const startPlayback = (authorizedLiveUrl: string | null) => {
+      if (authorizationGeneration !== liveAuthorizationGeneration ||
+          usePlayerStore.getState().currentChannel?.id !== channel.id ||
+          usePlayerStore.getState().status === 'idle') return;
 
     // Try AVPlay first (Samsung Tizen), fallback to HTML5 video
     if (typeof webapis !== 'undefined' && webapis.avplay) {
@@ -543,7 +552,8 @@ export function usePlayer(): {
         const isRecording = Boolean(channel.recordingId);
         const playerPath = isRecording || channel.dvrHls
           ? channel.url
-          : getStreamUrl(channel.id, channel.url, isLive ? true : keepSubsRef.current, isLive, audioOnly);
+          : isLive ? authorizedLiveUrl ?? getStreamUrl(channel.id, channel.url, true, true, audioOnly)
+            : getStreamUrl(channel.id, channel.url, keepSubsRef.current, false, false);
         const tizenPlayUrl = toAbsolutePlayerUrl(
           playerPath,
           useChannelStore.getState().apiBaseUrl
@@ -1053,10 +1063,11 @@ export function usePlayer(): {
           ? `${apiBaseUrl}${appleMobileVodPath}`
             : needsBrowserTranscode
             ? `${apiBaseUrl}${browserTranscodePath(channel.id, channel.id.startsWith('episode_') ? channel.url : undefined, resumePosition)}`
-            : getStreamUrl(channel.id, channel.url, isLiveTs ? true : keepSubsRef.current, isLiveTs, audioOnly);
+            : isLiveTs ? authorizedLiveUrl ?? getStreamUrl(channel.id, channel.url, true, true, audioOnly)
+              : getStreamUrl(channel.id, channel.url, keepSubsRef.current, false, false);
       log.info(`HTML5: starting ${channel.dvrHls ? 'finite DVR HLS' : channel.contentType} playback`);
 
-      if (isLiveTs || (isFiniteTsRecording && !appleRecordingHlsPath)) {
+      const startMpegTsPlayback = () => {
         // Native video cannot demux a saved MPEG-TS master either.
         log.info(`HTML5: loading mpegts.js for ${isLiveTs ? 'live' : 'recorded'} MPEG-TS playback...`);
         setupEvents();
@@ -1089,7 +1100,9 @@ export function usePlayer(): {
           const player = mpegts.createPlayer({
             type: 'mpegts',
             isLive: isLiveTs,
-            url: playUrl,
+            url: isLiveTs
+              ? getStreamUrl(channel.id, channel.url, true, true, audioOnly)
+              : playUrl,
             ...(!isLiveTs && channel.duration ? { duration: channel.duration * 1000 } : {}),
             ...(!isLiveTs && channel.recordingSize ? { filesize: channel.recordingSize } : {}),
           }, {
@@ -1159,6 +1172,36 @@ export function usePlayer(): {
           if (isLiveTs) disableLiveStreamRecovery();
           setError(isLiveTs ? 'Failed to load live TV player' : 'Failed to load recording player');
         });
+      };
+      if (isLiveTs && authorizedLiveUrl) {
+        setupEvents();
+        const syncLiveHlsSubtitles = () => {
+          if (!isCurrentPlayback()) return;
+          const tracks = getHtml5SubtitleTracks(video.textTracks,
+            track => !browserProgrammaticTextTracks.has(track));
+          const selectedIndex = selectPreferredSubtitleTrack(tracks, keepSubsRef.current, getSubtitleLanguage());
+          applyHtml5SubtitleSelection(video, selectedIndex);
+          browserSubtitleSession.replace(channel.id, tracks, selectedIndex);
+        };
+        video.textTracks.onaddtrack = syncLiveHlsSubtitles;
+        video.textTracks.onremovetrack = syncLiveHlsSubtitles;
+        syncLiveHlsSubtitles();
+        video.dataset.streamOffset = '0';
+        void attachLiveHls(video, playUrl, () => {
+          if (!isCurrentPlayback()) return;
+          setStatus('loading');
+          liveStreamRecovery.transportEnded('hls-error');
+        }, isCurrentPlayback).then(dispose => {
+          if (!isCurrentPlayback()) { dispose(); return; }
+          disposeFiniteHls = dispose;
+        }).catch(() => {
+          if (!isCurrentPlayback()) return;
+          // An engine without native HLS or MSE support keeps the old TS path.
+          log.warn('HTML5: live HLS unavailable; falling back to MPEG-TS');
+          startMpegTsPlayback();
+        });
+      } else if (isLiveTs || (isFiniteTsRecording && !appleRecordingHlsPath)) {
+        startMpegTsPlayback();
       } else if (channel.dvrHls) {
         setupEvents();
         const syncDvrSubtitleTracks = () => {
@@ -1241,6 +1284,20 @@ export function usePlayer(): {
           });
         }
       }
+    }
+    };
+    if (channel.contentType === 'livetv' && !audioOnly) {
+      void getAuthorizedLiveHlsUrl(useChannelStore.getState().apiBaseUrl, channel.id)
+        .then(startPlayback)
+        .catch(() => {
+          if (authorizationGeneration !== liveAuthorizationGeneration ||
+              usePlayerStore.getState().currentChannel?.id !== channel.id) return;
+          setError('Live playback could not be authorized. Check the server connection.');
+        });
+    } else {
+      // Audio-only keeps the legacy audio-transcoding path until the HLS feed
+      // has a verified audio-only rendition; never substitute full A/V.
+      startPlayback(null);
     }
   }, []);
 

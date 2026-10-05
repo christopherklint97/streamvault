@@ -13,6 +13,9 @@ services:
     environment:
       - TZ=Europe/Stockholm
       - LOG_LEVEL=info
+      # Shared packet-aware live HLS is the default for all video channels;
+      # set 0 globally to fall back to the previous HLS worker on failure.
+      - STREAMVAULT_LIVE_PACKET_AWARE=${STREAMVAULT_LIVE_PACKET_AWARE:-1}
       # New recordings store TS chunks only; existing recordings keep legacy playback.
       - STREAMVAULT_SEGMENTED_RECORDINGS=${STREAMVAULT_SEGMENTED_RECORDINGS:-0}
       # Stop archive capture before exhausting host disk or crowding other services.
