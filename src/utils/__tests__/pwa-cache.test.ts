@@ -12,6 +12,8 @@ describe('CACHEABLE_API_PATTERN', () => {
       '/api/live/live_future/authorize',
       '/api/live/live_future/index.m3u8?ticket=synthetic',
       '/api/live/live_future/segment/123.ts?ticket=synthetic',
+      '/api/LIVE/live_future/index.m3u8?ticket=synthetic',
+      '/API/LiVe/live_future/segment/123.ts?ticket=synthetic',
       '/api/proxy/example',
       '/api/remux/vod_1',
       '/api/transcode/vod_1',

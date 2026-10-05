@@ -66,7 +66,7 @@ async function mockSource(body: Buffer, framing: 'chunked' | 'length' | 'silent'
   });
   return { url: `${await listen(app)}/source`, requests: () => requests };
 }
-async function harness(url: string, opts: { stallMs?: number; idleMs?: number; maxChannels?: number; maxReaders?: number; maxBytesPerChannel?: number; maxSegmentBytes?: number; minFreeBytes?: number } = {}) {
+async function harness(url: string, opts: { stallMs?: number; idleMs?: number; maxChannels?: number; maxReaders?: number; maxBytesPerChannel?: number; maxSegmentBytes?: number; minFreeBytes?: number; removeChannelDir?: (dir: string) => Promise<void> } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'sv-live-buffer-'));
   roots.push(root);
   const buffer = createLiveBuffer({ root, pollMs: 100, retryMs: 200, maxBytesPerChannel: 8 * 1024 * 1024, maxSegmentBytes: 2 * 1024 * 1024, ...opts });
@@ -229,17 +229,29 @@ describe('shared live rolling HLS HTTP', () => {
   }, 12000);
 
   it('bounds simultaneous authorization waiters instead of polling for every viewer', async () => {
-    const source = await mockSource(await fixture(), 'silent');
-    const { base } = await harness(source.url, { stallMs: 600 });
+    const { base, buffer } = await harness('http://127.0.0.1/unused');
+    let release!: () => void;
+    let allEntered!: () => void;
+    const hold = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { allEntered = resolve; });
+    let waiting = 0;
+    // Hold eight real HTTP handlers inside their awaited playlist operation;
+    // a ninth must get capacity feedback without awaiting their completion.
+    buffer.playlist = async () => {
+      if (++waiting === 8) allEntered();
+      await hold;
+      return '#EXTM3U\nsegment/0.ts\n';
+    };
     const endpoint = `${base}/api/live/channel-a/authorize`;
     const pending = Array.from({ length: 8 }, () => fetch(endpoint));
-    await new Promise(resolve => setTimeout(resolve, 250));
-    const started = Date.now();
-    const overloaded = await fetch(endpoint);
-    expect(overloaded.status).toBe(503);
-    expect(Date.now() - started).toBeLessThan(1500);
+    try {
+      await entered;
+      const overloaded = await fetch(endpoint);
+      expect(overloaded.status).toBe(503);
+      expect(overloaded.headers.get('Retry-After')).toBe('2');
+    } finally { release(); }
     const responses = await Promise.all(pending);
-    expect(responses.every(response => response.status === 503)).toBe(true);
+    expect(responses.every(response => response.status === 200)).toBe(true);
   }, 12000);
 
   it('streams segments with a bounded number of open readers instead of buffering per viewer', async () => {
@@ -259,6 +271,62 @@ describe('shared live rolling HLS HTTP', () => {
     await new Promise(resolve => first.once('close', resolve));
     expect(buffer.activeReaders).toBe(0);
   }, 12000);
+
+  it('releases a segment-reader slot when a viewer aborts before its file open resolves', async () => {
+    const source = await mockSource(await fixture(), 'length');
+    const { buffer, playlist } = await harness(source.url, { maxReaders: 1 });
+    await fetch(playlist);
+    const manifest = await waitPlaylist(playlist, text => text.includes('segment/'));
+    const segmentPath = manifest.split('\n').find(line => line.startsWith('segment/'))!;
+    const segmentUrl = new URL(segmentPath, playlist);
+    const realSegment = buffer.segment.bind(buffer);
+    let release!: () => void;
+    const pendingOpen = new Promise<void>(resolve => { release = resolve; });
+    buffer.segment = async (...args) => {
+      const stream = await realSegment(...args);
+      if (stream && stream !== 'busy') await pendingOpen;
+      return stream;
+    };
+    const abort = new AbortController();
+    const request = fetch(segmentUrl, { signal: abort.signal }).catch(() => null);
+    try {
+      for (let attempt = 0; attempt < 30 && buffer.activeReaders === 0; attempt++)
+        await new Promise(resolve => setTimeout(resolve, 50));
+      expect(buffer.activeReaders).toBe(1);
+      abort.abort();
+      await request;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } finally { release(); }
+    for (let attempt = 0; attempt < 30 && buffer.activeReaders !== 0; attempt++)
+      await new Promise(resolve => setTimeout(resolve, 50));
+    expect(buffer.activeReaders).toBe(0);
+    expect((await fetch(segmentUrl)).status).toBe(200);
+  }, 12000);
+
+  it('holds ingest capacity until retirement cleanup and awaits it during shutdown', async () => {
+    const source = await mockSource(await fixture(), 'length');
+    let release!: () => void;
+    let notifyCleanup!: () => void;
+    const cleanupGate = new Promise<void>(resolve => { release = resolve; });
+    const cleanupStarted = new Promise<void>(resolve => { notifyCleanup = resolve; });
+    const { buffer, playlist } = await harness(source.url, {
+      idleMs: 500, maxChannels: 1,
+      removeChannelDir: async dir => { notifyCleanup(); await cleanupGate; await rm(dir, { recursive: true, force: true }); },
+    });
+    await fetch(playlist);
+    try {
+      await Promise.race([cleanupStarted, new Promise<never>((_, reject) => setTimeout(() => reject(Error('Retirement did not start')), 3500))]);
+      expect(buffer.activeCount).toBe(1);
+      expect(await buffer.playlist('channel-b', source.url)).toBeNull();
+      let stopped = false;
+      const shutdown = buffer.stop().then(() => { stopped = true; });
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(stopped).toBe(false);
+      release();
+      await shutdown;
+      expect(buffer.activeCount).toBe(0);
+    } finally { release(); }
+  }, 9000);
 
   it('never reuses a segment URL after an idle worker is retired', async () => {
     const source = await mockSource(await fixture(), 'length');

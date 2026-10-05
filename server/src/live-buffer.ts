@@ -10,13 +10,13 @@ interface Segment { id: number; name: string; duration: number; bytes: number; d
 interface Channel {
   id: string; dir: string; epoch: string; segments: Segment[]; bytes: number; sequence: number; discontinuitySequence: number;
   lastAccess: number; lastPublish: number; worker?: ChildProcess; working?: string;
-  generation: number; lastStageIndex: number; timer?: ReturnType<typeof setInterval>; terminating: boolean;
+  generation: number; lastStageIndex: number; timer?: ReturnType<typeof setInterval>; terminating: boolean; retirement?: Promise<void>;
   inspecting?: boolean; publishTask?: Promise<void>;
 }
 export interface LiveBufferOptions {
   root?: string; maxChannels?: number; maxBytesPerChannel?: number; maxSegmentBytes?: number; maxReaders?: number;
   stallMs?: number; idleMs?: number; retryMs?: number; pollMs?: number; segmentSeconds?: number;
-  minFreeBytes?: number;
+  minFreeBytes?: number; removeChannelDir?: (dir: string) => Promise<void>;
 }
 
 export function newStageIndices(indices: number[], last: number): number[] | null {
@@ -45,6 +45,7 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
   const pollMs = options.pollMs ?? 500;
   const segmentSeconds = options.segmentSeconds ?? 2;
   const minFreeBytes = options.minFreeBytes ?? 128 * 1024 * 1024;
+  const removeChannelDir = options.removeChannelDir ?? (dir => rm(dir, { recursive: true, force: true }));
   if (![maxChannels, maxBytes, maxSegmentBytes, maxReaders, stallMs, idleMs, retryMs, pollMs, segmentSeconds, minFreeBytes]
     .every(n => Number.isFinite(n) && n > 0) || maxBytes < maxSegmentBytes * 2 || !Number.isInteger(maxReaders)) throw Error('Invalid live buffer limits');
   const channels = new Map<string, Channel>();
@@ -64,19 +65,26 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     }
   })();
 
-  async function retire(ch: Channel) {
-    if (ch.terminating) return;
+  function retire(ch: Channel): Promise<void> {
+    if (ch.retirement) return ch.retirement;
     ch.terminating = true;
-    channels.delete(ch.id);
     if (ch.timer) clearInterval(ch.timer);
-    const worker = ch.worker;
-    if (worker && worker.exitCode === null) worker.kill('SIGKILL');
-    // Child must release file descriptors before deleting its work directory.
-    if (worker && worker.exitCode === null) await new Promise<void>(resolve => {
-      const timeout = setTimeout(resolve, 1000);
-      worker.once('close', () => { clearTimeout(timeout); resolve(); });
-    });
-    await rm(ch.dir, { recursive: true, force: true }).catch(() => {});
+    // Keep this slot reserved and tracked until the worker and disposable
+    // directory are gone; shutdown can join a retirement already in progress.
+    ch.retirement = (async () => {
+      try {
+        const worker = ch.worker;
+        if (worker && worker.exitCode === null) worker.kill('SIGKILL');
+        if (worker && worker.exitCode === null) await new Promise<void>(resolve => {
+          const timeout = setTimeout(resolve, 1000);
+          worker.once('close', () => { clearTimeout(timeout); resolve(); });
+        });
+        if (ch.dir) await removeChannelDir(ch.dir).catch(() => {});
+      } finally {
+        if (channels.get(ch.id) === ch) channels.delete(ch.id);
+      }
+    })();
+    return ch.retirement;
   }
 
   async function publish(ch: Channel) {
@@ -205,7 +213,10 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
 
   async function get(id: string, url: string) {
     let ch = channels.get(id);
-    if (ch) { ch.lastAccess = Date.now(); return ch; }
+    if (ch) {
+      if (ch.terminating) return null;
+      ch.lastAccess = Date.now(); return ch;
+    }
     if (stopped || channels.size >= maxChannels) return null;
     ch = { id, dir: '', epoch: randomBytes(8).toString('hex'), segments: [], bytes: 0,
       sequence: sequenceByChannel.get(id) ?? 0, discontinuitySequence: 0,
@@ -326,12 +337,19 @@ export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, so
     const rawId = String(req.params.segmentId);
     if (!/^\d{1,15}$/.test(rawId) || !Number.isSafeInteger(Number(rawId))) { res.status(404).end(); return; }
     const epoch = typeof req.query.epoch === 'string' ? req.query.epoch : '';
+    // The viewer may disconnect while the file descriptor is opening. Observe
+    // close before awaiting, then destroy a stream that arrives after close.
+    let disconnected = res.destroyed;
+    let destroyStream: (() => void) | null = null;
+    res.once('close', () => { disconnected = true; destroyStream?.(); });
     const stream = await buffer.segment(id, Number(rawId), epoch);
-    if (stream === 'busy') { res.set('Retry-After', '1').status(503).end(); return; }
-    if (!stream) { res.status(404).end(); return; }
+    if (stream === 'busy') { if (!disconnected) res.set('Retry-After', '1').status(503).end(); return; }
+    if (!stream) { if (!disconnected) res.status(404).end(); return; }
+    destroyStream = () => stream.destroy();
+    if (disconnected || res.destroyed) { stream.destroy(); return; }
     res.type('video/mp2t');
-    res.once('close', () => stream.destroy());
     stream.once('error', () => {
+      if (res.destroyed) return;
       if (res.headersSent) res.destroy();
       else res.status(503).end();
     });
