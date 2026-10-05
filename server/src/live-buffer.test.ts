@@ -185,7 +185,10 @@ describe('shared live rolling HLS HTTP', () => {
     const latest = await waitPlaylist(playlist, text => Number(text.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/)?.[1] ?? 0) > initialSequence + 2);
     expect(latest).not.toContain('#EXT-X-ENDLIST');
     expect((await fetch(`${base}/api/live/channel-a/segment/${initialSequence}.ts`)).status).toBe(404);
-    const activePath = latest.split('\n').find(line => line.startsWith('segment/'))!;
+    // This fixture is much smaller than production's cache and can evict the
+    // oldest advertised entry before the next request. Exercise the newest
+    // published segment rather than racing that intentionally tiny window.
+    const activePath = latest.split('\n').filter(line => line.startsWith('segment/')).at(-1)!;
     expect((await fetch(new URL(activePath, playlist))).status).toBe(200);
     const folders = await (await import('node:fs/promises')).readdir(root);
     expect(folders).toHaveLength(1);
