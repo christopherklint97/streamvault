@@ -94,6 +94,42 @@ it('does not kill a progressing replay merely because HLS cannot publish duplica
   } finally { release(); }
 }, 60000);
 
+it('latches a missing staged segment instead of hot-relaunching unverified media', async () => {
+  const [first] = await media();
+  const nullPacket = Buffer.alloc(188, 0xff);
+  nullPacket.set([0x47, 0x1f, 0xff, 0x10]);
+  const nullTransport = Buffer.concat(Array.from({ length: 100 }, () => nullPacket));
+  const upstream = express();
+  let requests = 0;
+  upstream.get('/api/stream/channel-a', (_req, res) => {
+    requests++;
+    res.type('video/mp2t');
+    res.write(first);
+    const pace = setInterval(() => {
+      if (res.destroyed) { clearInterval(pace); return; }
+      res.write(nullTransport);
+    }, 400);
+    res.once('close', () => clearInterval(pace));
+  });
+  const proxy = await listen(upstream);
+  const root = await mkdtemp(path.join(tmpdir(), 'sv-packet-stage-gap-'));
+  roots.push(root);
+  const buffer = createLiveBuffer({ root, packetAware: true, pollMs: 100,
+    maxBytesPerChannel: 8_000_000, maxSegmentBytes: 2_000_000 });
+  buffers.push(buffer);
+  const url = `${proxy}/api/stream/channel-a`;
+  await waitFor(async () => (await buffer.playlist('channel-a', url))?.includes('segment/') ? true : null);
+  const channelDir = (await readdir(root)).find(name => name.startsWith('channel-'))!;
+  const workingDir = (await readdir(path.join(root, channelDir))).find(name => name.startsWith('ingest-'))!;
+  await writeFile(path.join(root, channelDir, workingDir, 'index.m3u8'), '#EXTM3U\n#EXTINF:2,\n999.ts\n');
+  await waitFor(async () => buffer.activeCount === 0 ? true : null, 8000);
+  for (let attempt = 0; attempt < 10; attempt++) {
+    expect(await buffer.playlist('channel-a', url)).toBeNull();
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  expect(requests).toBe(1);
+}, 20000);
+
 it('retries an initial HTTP source failure without treating it as an unsafe media seam', async () => {
   const [first, second] = await media();
   const upstream = express();
@@ -266,6 +302,45 @@ with av.open(sys.argv[1]) as new, av.open(sys.argv[2]) as played:
       '-i', path.join(saved, 'index.m3u8'), '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-'], { timeout: 60000 });
     expect(decode.status).toBe(0);
     expect(decode.stderr.toString()).toBe('');
+  }, 120000,
+);
+
+it.skipIf(!existsSync(path.join(captured, 'first.ts')) || !existsSync(path.join(captured, 'second.ts')))(
+  'keeps the packet channel available through a fast real-source HLS rollover', async () => {
+    const first = await readFile(path.join(captured, 'first.ts'));
+    const second = await readFile(path.join(captured, 'second.ts'));
+    const nullPacket = Buffer.alloc(188, 0xff);
+    nullPacket.set([0x47, 0x1f, 0xff, 0x10]);
+    const block = Buffer.concat(Array.from({ length: 100 }, () => nullPacket));
+    const upstream = express();
+    let requests = 0;
+    upstream.get('/api/stream/channel-a', (_req, res) => {
+      requests++;
+      res.type('video/mp2t');
+      if (requests <= 2) {
+        const data = requests === 1 ? first : second;
+        res.set('Content-Length', String(data.length)).end(data);
+        return;
+      }
+      const pace = setInterval(() => {
+        if (res.destroyed) { clearInterval(pace); return; }
+        res.write(block);
+      }, 400);
+      res.once('close', () => clearInterval(pace));
+    });
+    const proxy = await listen(upstream);
+    const root = await mkdtemp(path.join(tmpdir(), 'sv-packet-fast-rollover-'));
+    roots.push(root);
+    const buffer = createLiveBuffer({ root, packetAware: true }); // production poll and quotas
+    buffers.push(buffer);
+    const url = `${proxy}/api/stream/channel-a`;
+    const manifest = await waitFor(async () => {
+      const current = await buffer.playlist('channel-a', url);
+      const sequence = Number(current?.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/)?.[1] ?? -1);
+      return requests >= 3 && sequence >= 45 ? current : null;
+    }, 90000);
+    expect(manifest).toContain('segment/');
+    expect(buffer.activeCount).toBe(1);
   }, 120000,
 );
 

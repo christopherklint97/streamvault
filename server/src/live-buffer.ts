@@ -112,6 +112,11 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     return ch.retirement;
   }
 
+  function retireUnsafe(ch: Channel): Promise<void> {
+    if (packetAware && !ch.terminating) markUnsafe(ch.id);
+    return retire(ch);
+  }
+
   async function publish(ch: Channel) {
     if (!ch.working || ch.terminating) return;
     if (packetAware) {
@@ -123,7 +128,7 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     // of silently serving video without the original subtitle track.
     try {
       if ((await readdir(ch.working)).some(name => name.endsWith('.vtt') || name.endsWith('_vtt.m3u8'))) {
-        await retire(ch); return;
+        await retireUnsafe(ch); return;
       }
     } catch { return; }
     let manifest: string;
@@ -131,7 +136,7 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     catch { return; }
     const entries = [...manifest.matchAll(/#EXTINF:([\d.]+),?[^\n]*\n([^\r\n]+\.ts)/g)];
     const indices = entries.map(([, , name]) => /^\d+\.ts$/.test(name) ? Number(name.slice(0, -3)) : NaN);
-    if (!newStageIndices(indices, ch.lastStageIndex)) { await retire(ch); return; }
+    if (!newStageIndices(indices, ch.lastStageIndex)) { await retireUnsafe(ch); return; }
     for (const [, durationText, name] of entries) {
       if (ch.terminating) return;
       const index = Number(name.slice(0, -3));
@@ -139,23 +144,24 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       const key = `${ch.generation}-${name}`;
       const duration = Number(durationText);
       // Never conceal a unique segment by skipping an unpublishable input.
-      if (!Number.isFinite(duration) || duration <= 0 || duration > 4) { await retire(ch); return; }
+      if (!Number.isFinite(duration) || duration <= 0 || duration > 4) { await retireUnsafe(ch); return; }
       let data: Buffer;
       try {
         const stage = path.join(ch.working, name);
-        if ((await stat(stage)).size > maxSegmentBytes) { await retire(ch); return; }
+        if ((await stat(stage)).size > maxSegmentBytes) { await retireUnsafe(ch); return; }
         data = await readFile(stage);
-      } catch { await retire(ch); return; }
-      if (!data.length || data.length > maxSegmentBytes || ch.terminating) { await retire(ch); return; }
+      } catch { await retireUnsafe(ch); return; }
+      if (ch.terminating) return;
+      if (!data.length || data.length > maxSegmentBytes) { await retireUnsafe(ch); return; }
       try {
         const space = await statfs(root);
-        if (space.bavail * space.bsize < minFreeBytes + data.length) { void retire(ch); return; }
-      } catch { void retire(ch); return; }
+        if (space.bavail * space.bsize < minFreeBytes + data.length) { void retireUnsafe(ch); return; }
+      } catch { void retireUnsafe(ch); return; }
       const id = ch.sequence++;
       sequenceByChannel.set(ch.id, ch.sequence);
       const filename = `${id}.ts`;
       try { await writeFile(path.join(ch.dir, filename), data, { flag: 'wx' }); }
-      catch { void retire(ch); return; }
+      catch { void retireUnsafe(ch); return; }
       ch.lastStageIndex = index;
       const discontinuity = ch.segments.length > 0 && ch.segments.at(-1)!.name.split('-')[0] !== String(ch.generation);
       ch.segments.push({ id, name: key, duration, bytes: data.length, discontinuity });
@@ -188,21 +194,21 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
         // may otherwise fill the mount before FFmpeg publishes its first segment.
         try {
           const space = await statfs(root);
-          if (space.bavail * space.bsize < minFreeBytes) { await retire(ch); return; }
+          if (space.bavail * space.bsize < minFreeBytes) { await retireUnsafe(ch); return; }
           let total = 0;
           for (const name of await readdir(ch.working)) {
             const size = (await stat(path.join(ch.working, name))).size;
             total += size;
-            if (name.endsWith('.ts') && size > maxSegmentBytes) { await retire(ch); return; }
+            if (name.endsWith('.ts') && size > maxSegmentBytes) { await retireUnsafe(ch); return; }
           }
-          if (total + ch.bytes > maxBytes + maxSegmentBytes * 4) { await retire(ch); return; }
+          if (total + ch.bytes > maxBytes + maxSegmentBytes * 4) { await retireUnsafe(ch); return; }
         } catch { /* writer may be closing or replacing the directory */ }
         await publishInOrder(ch);
         const unpublishedMs = Date.now() - ch.lastPublish;
         // Input bytes alone are not playable media: null TS packets or a
         // replay that never reaches a unique picture must expire this feed.
         if (packetAware && unpublishedMs > maxUnpublishedMs) {
-          ch.worker?.kill('SIGKILL');
+          await retireUnsafe(ch); return;
         } else if (unpublishedMs > stallMs) {
           // A packet seam can consume a long replay without publishing new
           // segments. Treat ongoing bounded source reads as forward progress;
@@ -212,7 +218,11 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
             try { sourceProgress = (await stat(path.join(ch.working, '.source-progress'))).mtimeMs; }
             catch { /* worker has not started or is closing */ }
           }
-          if (Date.now() - Math.max(ch.lastPublish, sourceProgress) > stallMs) ch.worker?.kill('SIGKILL');
+          if (Date.now() - Math.max(ch.lastPublish, sourceProgress) > stallMs) {
+            if (packetAware) await retireUnsafe(ch);
+            else ch.worker?.kill('SIGKILL');
+            return;
+          }
         }
       }
     } finally { ch.inspecting = false; }
