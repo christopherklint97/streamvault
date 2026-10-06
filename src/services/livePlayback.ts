@@ -8,6 +8,8 @@ const AUTHORIZATION_BUDGET_MS = 50_000;
 let authorizationGeneration = 0;
 
 export interface LiveAuthorizationOptions {
+  /** Explicit native-HLS compatibility request; primary remains the default. */
+  delivery?: 'primary' | 'compatible';
   /** The player owns this generation; false cancels retries after stop/restart. */
   isCurrent?: () => boolean;
 }
@@ -17,6 +19,7 @@ export async function getAuthorizedLiveHlsUrl(
   apiBaseUrl: string, channelId: string, pageOrigin = window.location.origin,
   options: LiveAuthorizationOptions = {},
 ): Promise<string | null> {
+  const route = options.delivery === 'compatible' ? '/api/live-compatible' : '/api/live';
   const generation = ++authorizationGeneration;
   const deadline = Date.now() + AUTHORIZATION_BUDGET_MS;
   const scope = getBackendRequestScope();
@@ -46,14 +49,14 @@ export async function getAuthorizedLiveHlsUrl(
       if (expired) throw timeoutError;
       try {
         const response = await apiFetch<{ playlistUrl: string }>(
-          apiBaseUrl, `/api/live/${encodeURIComponent(channelId)}/authorize`, { signal: controller.signal },
+          apiBaseUrl, `${route}/${encodeURIComponent(channelId)}/authorize`, { signal: controller.signal },
         );
         assertCurrent();
         if (expired) throw timeoutError;
         if (typeof response?.playlistUrl !== 'string' || !response.playlistUrl) {
           throw new Error('Live playback ticket did not include a URL');
         }
-        const expected = new URL(`${apiBaseUrl}/api/live/${encodeURIComponent(channelId)}/index.m3u8`, pageOrigin);
+        const expected = new URL(`${apiBaseUrl}${route}/${encodeURIComponent(channelId)}/index.m3u8`, pageOrigin);
         const issued = new URL(response.playlistUrl, expected);
         if (!['http:', 'https:'].includes(issued.protocol) ||
             issued.origin !== expected.origin || issued.pathname !== expected.pathname ||

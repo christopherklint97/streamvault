@@ -35,8 +35,9 @@ import {
 } from '../services/playbackSeek';
 import { useRecordingStore } from '../stores/recordingStore';
 import { attachFiniteHls } from '../services/finiteHls';
-import { attachLiveHls } from '../services/liveHls';
+import { attachLiveHls, prefersNativeLiveHls } from '../services/liveHls';
 import { getAuthorizedLiveHlsUrl } from '../services/livePlayback';
+import { getBackendRequestScope } from '../services/api';
 import {
   getAvPlayClockReading,
   getHtml5ClockReading,
@@ -219,7 +220,6 @@ function startBrowserSubtitleTrack(
 
 const liveStreamRecovery = new LiveStreamRecovery((reason, attempt) => {
   log.warn(`Live stream: ${reason} — reconnecting (attempt ${attempt})`);
-  usePlayerStore.getState().setStatus('loading');
   restartActiveLiveStream?.();
 });
 
@@ -492,6 +492,7 @@ export function usePlayer(): {
   // browser live playback still carries captions so it can expose only tracks
   // that the media element actually detects, with Off enforced by track mode.
   const keepSubsRef = useRef(getSubtitlesEnabled());
+  const nativePrimaryFailureRef = useRef<{ channelId: string; backendGeneration: number } | null>(null);
 
   const play = useCallback(function play(finiteRetryPosition?: number) {
     const channel = usePlayerStore.getState().currentChannel;
@@ -524,6 +525,25 @@ export function usePlayer(): {
     const clockGeneration = playbackClock.begin(channel.duration ?? 0);
     const commercialGeneration = beginCommercialPlayback(channel);
     const authorizationGeneration = ++liveAuthorizationGeneration;
+    const backendGeneration = getBackendRequestScope().generation;
+    const isCurrentAuthorization = () => authorizationGeneration === liveAuthorizationGeneration &&
+      backendGeneration === getBackendRequestScope().generation &&
+      usePlayerStore.getState().currentChannel?.id === channel.id;
+    const nativeVideo = document.getElementById('av-player') as HTMLVideoElement | null;
+    const nativeLiveHls = channel.contentType === 'livetv' && !audioOnly && !channel.dvrHls &&
+      !(typeof webapis !== 'undefined' && webapis.avplay) && !!nativeVideo && prefersNativeLiveHls(nativeVideo);
+    if (nativePrimaryFailureRef.current?.channelId !== channel.id ||
+        nativePrimaryFailureRef.current?.backendGeneration !== backendGeneration) nativePrimaryFailureRef.current = null;
+    let compatibleLiveHls = nativeLiveHls && !!nativePrimaryFailureRef.current;
+    const noteNativePrimaryFailure = () => {
+      if (nativeLiveHls && !compatibleLiveHls && isCurrentAuthorization()) {
+        nativePrimaryFailureRef.current = { channelId: channel.id, backendGeneration };
+      }
+    };
+    const failCompatibleLiveHls = () => {
+      disableLiveStreamRecovery();
+      setError('Compatible Live TV is unavailable. Check the server connection and tap to retry.');
+    };
     const startPlayback = (authorizedLiveUrl: string | null) => {
       if (authorizationGeneration !== liveAuthorizationGeneration ||
           usePlayerStore.getState().currentChannel?.id !== channel.id ||
@@ -788,10 +808,21 @@ export function usePlayer(): {
       video.dataset.channelId = channel.id;
       const playbackGeneration = ++html5PlaybackGeneration;
       const isCurrentPlayback = () => playbackGeneration === html5PlaybackGeneration &&
-        (!authorizedLiveUrl || (authorizationGeneration === liveAuthorizationGeneration &&
-          usePlayerStore.getState().currentChannel?.id === channel.id));
+        (!authorizedLiveUrl || isCurrentAuthorization());
+      let hasLiveMediaProgress = false;
       if (isLiveTs) {
-        restartActiveLiveStream = play;
+        restartActiveLiveStream = () => {
+          if (!isCurrentPlayback() || !isCurrentAuthorization()) return;
+          setStatus('loading');
+          // A successful authorization/attachment is not a decoded first frame.
+          // Stop the compatible startup watchdog instead of reauthorizing forever.
+          if (nativeLiveHls && compatibleLiveHls && !hasLiveMediaProgress) {
+            failCompatibleLiveHls();
+            return;
+          }
+          noteNativePrimaryFailure();
+          play();
+        };
         liveStreamRecovery.begin(channel.id);
       } else {
         restartActiveLiveStream = null;
@@ -1023,6 +1054,7 @@ export function usePlayer(): {
           }
           if (!isLiveTs || !isCurrentPlayback() || video.currentTime <= lastMediaTime) return;
           lastMediaTime = video.currentTime;
+          hasLiveMediaProgress = true;
           liveStreamRecovery.progress();
           recoverDrainedLiveStream();
         };
@@ -1044,6 +1076,8 @@ export function usePlayer(): {
             return;
           }
           if (isLiveTs && isCurrentPlayback()) {
+            if (nativeLiveHls && compatibleLiveHls) { failCompatibleLiveHls(); return; }
+            noteNativePrimaryFailure();
             setStatus('loading');
             liveStreamRecovery.transportEnded('mpegts-error');
             return;
@@ -1056,6 +1090,7 @@ export function usePlayer(): {
           log.info('HTML5 event: ended');
           if (isLiveTs && isCurrentPlayback()) {
             if (pendingLiveEof) { recoverDrainedLiveStream(true); return; }
+            noteNativePrimaryFailure();
             setStatus('loading');
             liveStreamRecovery.transportEnded('media-ended');
             return;
@@ -1223,6 +1258,7 @@ export function usePlayer(): {
         video.dataset.streamOffset = '0';
         void attachLiveHls(video, playUrl, () => {
           if (!isCurrentPlayback()) return;
+          noteNativePrimaryFailure();
           setStatus('loading');
           liveStreamRecovery.transportEnded('hls-error');
         }, isCurrentPlayback, undefined, attemptPlay).then(dispose => {
@@ -1230,6 +1266,14 @@ export function usePlayer(): {
           disposeFiniteHls = dispose;
         }).catch(() => {
           if (!isCurrentPlayback()) return;
+          if (nativeLiveHls) {
+            if (compatibleLiveHls) failCompatibleLiveHls();
+            else {
+              noteNativePrimaryFailure();
+              liveStreamRecovery.transportEnded('hls-error');
+            }
+            return;
+          }
           // An engine without native HLS or MSE support keeps the old TS path.
           log.warn('HTML5: live HLS unavailable; falling back to MPEG-TS');
           startMpegTsPlayback();
@@ -1325,14 +1369,29 @@ export function usePlayer(): {
       // watchdog/queued retry without resetting backoff; begin() rearms recovery
       // only after this authorization succeeds and attaches its player.
       liveStreamRecovery.suspend();
-      void getAuthorizedLiveHlsUrl(useChannelStore.getState().apiBaseUrl, channel.id, window.location.origin, {
-        isCurrent: () => authorizationGeneration === liveAuthorizationGeneration &&
-          usePlayerStore.getState().currentChannel?.id === channel.id,
+      const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
+      void getAuthorizedLiveHlsUrl(apiBaseUrl, channel.id, window.location.origin, {
+        isCurrent: isCurrentAuthorization,
+        ...(compatibleLiveHls ? { delivery: 'compatible' as const } : {}),
       })
-        .then(startPlayback)
+        .then(async url => {
+          if (!isCurrentAuthorization()) return;
+          if (!url && nativeLiveHls && !compatibleLiveHls) {
+            noteNativePrimaryFailure();
+            compatibleLiveHls = true;
+            url = await getAuthorizedLiveHlsUrl(apiBaseUrl, channel.id, window.location.origin, {
+              delivery: 'compatible', isCurrent: isCurrentAuthorization,
+            });
+            if (!isCurrentAuthorization()) return;
+          }
+          if (!url && nativeLiveHls) {
+            failCompatibleLiveHls();
+            return;
+          }
+          startPlayback(url);
+        })
         .catch(() => {
-          if (authorizationGeneration !== liveAuthorizationGeneration ||
-              usePlayerStore.getState().currentChannel?.id !== channel.id) return;
+          if (!isCurrentAuthorization()) return;
           setError('Live playback could not be authorized. Check the server connection.');
         });
     } else {
@@ -1343,6 +1402,7 @@ export function usePlayer(): {
   }, []);
 
   const stop = useCallback(() => {
+    nativePrimaryFailureRef.current = null;
     playerRef.current = null;
     subtitleTracksRef.current = [];
     selectedSubtitleIndexRef.current = -1;

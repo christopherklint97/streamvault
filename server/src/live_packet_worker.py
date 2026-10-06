@@ -191,7 +191,11 @@ class Worker:
                 while not self.stop.is_set():
                     connection, body, length = self.open_continuation_source()
                     try:
-                        with av.open(body, 'r', format='mpegts') as demux:
+                        # Discover supported TS tracks within bounded media
+                        # time/bytes; a valid initial burst followed by silence
+                        # must not wait for the longer socket timeout to demux.
+                        with av.open(body, 'r', format='mpegts',
+                                     options={'analyzeduration': '1000000', 'probesize': '1048576'}) as demux:
                             packets = ts_packets(demux)
                             first = next(packets)
                             self.received_media = True

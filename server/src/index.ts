@@ -217,19 +217,29 @@ app.use(createArchiveRouter({ store: archiveStore, root: archiveRoot, secret: ar
   getChannel: getChannelById, getRecording, getPrograms: getArchivePrograms,
   start: id => archiveCapture.start(id), stop: id => archiveCapture.stopArchive(id),
   prioritize: (id, start, end) => archiveCapture.prioritizeWindow(id, start, end) }));
-const liveBuffer = createLiveBuffer({ root: process.env.STREAMVAULT_LIVE_BUFFER_DIR ||
-  path.join(process.env.TMPDIR || '/var/tmp', 'streamvault-live-buffer'),
+const liveBufferRoot = path.resolve(process.env.STREAMVAULT_LIVE_BUFFER_DIR ||
+  path.join(process.env.TMPDIR || '/var/tmp', 'streamvault-live-buffer'));
+const liveBuffer = createLiveBuffer({ root: liveBufferRoot,
   packetAware: packetAwareLiveEnabled(process.env.STREAMVAULT_LIVE_PACKET_AWARE),
   // IDs are validated by packet ingestion; reasons are fixed server categories.
   // Never log source URLs, tickets, or worker stderr.
   onUnsafe: (reason, id) => console.warn('Live HLS unavailable', { channelId: id, reason }) });
-app.use('/api/live', createLiveRouter(liveBuffer, id => {
+// Separate disposable cache and router secret: never reopen a latched primary
+// presentation or make its old tickets/segment epochs valid in compatibility mode.
+const compatibleLiveBuffer = createLiveBuffer({
+  root: `${liveBufferRoot}-compatible`,
+  packetAware: false, maxChannels: 4,
+});
+const liveSource = (id: string) => {
+  if (!/^[-A-Za-z0-9_]+$/.test(id)) return null;
   const channel = getChannelById(id);
   // The existing proxy validates upstream responses and hides credential-bearing
   // provider URLs from the FFmpeg process arguments.
   return channel?.content_type === 'livetv' && channel.url
     ? `http://127.0.0.1:${PORT}/api/stream/${encodeURIComponent(id)}?subs=1` : null;
-}));
+};
+app.use('/api/live', createLiveRouter(liveBuffer, liveSource));
+app.use('/api/live-compatible', createLiveRouter(compatibleLiveBuffer, liveSource, { basePath: '/api/live-compatible' }));
 
 // Request logging; include completion timing only when a request is slow.
 app.use((req, res, next) => {
@@ -2414,7 +2424,7 @@ function shutdown(signal: string): void {
   });
 
   const recorderAndAnalysisShutdown = (async () => {
-    await Promise.all([schedulerShutdown, stopAllRecordings(), archiveCapture.stopAll(), liveBuffer.stop()]);
+    await Promise.all([schedulerShutdown, stopAllRecordings(), archiveCapture.stopAll(), liveBuffer.stop(), compatibleLiveBuffer.stop()]);
     await stopCommercialAnalysisWorker();
   })().catch(error => {
     logger.warn(`Recorder/analysis shutdown failed: ${error instanceof Error ? error.message : error}`);

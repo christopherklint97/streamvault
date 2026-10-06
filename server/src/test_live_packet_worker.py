@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+import av
 
 from live_packet_worker import Body, InitialSourceUnavailable, Worker
 from live_packet_stitch import UnsafeSeam
@@ -244,6 +245,14 @@ class WorkerInitialTransportTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             serve.join(timeout=2)
+
+    def test_bounded_input_discovery_still_validates_real_media_and_truncation(self):
+        data = self.media['libx264']
+        with patch('live_packet_worker.av.open', wraps=av.open) as opened:
+            worker, _ = self.assert_classification(ScriptedResponse(data), len(data) + 188, 'UNSAFE')
+        self.assertTrue(worker.received_media)
+        demux_call = next(call for call in opened.call_args_list if call.args[1] == 'r')
+        self.assertEqual(demux_call.kwargs['options'], {'analyzeduration': '1000000', 'probesize': '1048576'})
 
     def test_initial_body_timeout_without_media_is_retryable(self):
         worker, body = self.assert_classification(ScriptedResponse(error=TimeoutError()), None, 'RETRYABLE')

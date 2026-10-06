@@ -357,7 +357,9 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
   };
 }
 
-export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, source: (id: string) => string | null | undefined) {
+export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, source: (id: string) => string | null | undefined,
+  options: { basePath?: '/api/live' | '/api/live-compatible' } = {}) {
+  const basePath = options.basePath ?? '/api/live';
   const router = Router();
   const secret = randomBytes(32);
   const ttl = 24 * 60 * 60_000;
@@ -410,7 +412,7 @@ export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, so
     if (buffer.isUnsafe(id)) { res.status(501).end(); return; }
     if (!ready) { res.set('Retry-After', '2').status(503).end(); return; }
     const { ticket, expiresAt } = ticketFor(id);
-    res.set('Cache-Control', 'private, no-store').json({ playlistUrl: `/api/live/${encodeURIComponent(id)}/index.m3u8?ticket=${ticket}`, expiresAt });
+    res.set('Cache-Control', 'private, no-store').json({ playlistUrl: `${basePath}/${encodeURIComponent(id)}/index.m3u8?ticket=${ticket}`, expiresAt });
   });
   router.get('/:id/index.m3u8', async (req, res) => {
     const id = String(req.params.id);

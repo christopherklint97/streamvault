@@ -192,6 +192,80 @@ describe('live HLS native-player authorization', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('can explicitly authorize compatibility after a real primary 501 response', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({ error: 'Unsafe seam' }, 501))
+      .mockResolvedValueOnce(json({ playlistUrl: '/api/live-compatible/live_future/index.m3u8?ticket=synthetic' }));
+    await expect(getAuthorizedLiveHlsUrl('', 'live_future', 'https://app.example.test')).resolves.toBeNull();
+    await expect(getAuthorizedLiveHlsUrl('', 'live_future', 'https://app.example.test', {
+      delivery: 'compatible',
+    })).resolves.toContain('/api/live-compatible/live_future/index.m3u8');
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/live/live_future/authorize', '/api/live-compatible/live_future/authorize',
+    ]);
+  });
+
+  it.each([401, 403])('never downgrades compatible authorization %s after 503', async status => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({}, 503, '1')).mockResolvedValueOnce(json({}, status));
+    const outcome = getAuthorizedLiveHlsUrl('', 'live_future', 'https://app.example.test', {
+      delivery: 'compatible',
+    }).catch(error => error);
+    await vi.runAllTimersAsync();
+    expect(await outcome).toMatchObject({ status });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('bounds compatible 503 retries by the same 50-second deadline', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => json({}, 503, '2'));
+    const started = Date.now();
+    const outcome = getAuthorizedLiveHlsUrl('', 'live_future', 'https://app.example.test', { delivery: 'compatible' });
+    await vi.runAllTimersAsync();
+    await expect(outcome).resolves.toBeNull();
+    expect(Date.now() - started).toBeLessThanOrEqual(50_000);
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(25);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['backend', 'player'])('cancels compatible retry on obsolete %s identity', async cancellation => {
+    let current = true;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({}, 503, '2'));
+    const outcome = getAuthorizedLiveHlsUrl('', 'live_future', 'https://app.example.test', {
+      delivery: 'compatible', isCurrent: () => current,
+    }).catch(error => error);
+    await vi.advanceTimersByTimeAsync(1);
+    if (cancellation === 'backend') rotateBackendRequestScope();
+    else current = false;
+    await vi.runAllTimersAsync();
+    expect(await outcome).toMatchObject({ name: cancellation === 'backend' ? 'StaleBackendRequestError' : 'AbortError' });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    '/api/live/live_future/index.m3u8?ticket=synthetic',
+    '/api/live-compatible/another/index.m3u8?ticket=synthetic',
+    'https://other.example.test/api/live-compatible/live_future/index.m3u8',
+    '//dvr.example.test/api/live-compatible/live_future/index.m3u8',
+  ])('strictly rejects unrelated compatible playlist %s', async playlistUrl => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ playlistUrl }));
+    await expect(getAuthorizedLiveHlsUrl('https://dvr.example.test', 'live_future', 'https://app.example.test', {
+      delivery: 'compatible',
+    })).rejects.toThrow('unrelated playlist');
+  });
+
+  it('explicitly authorizes compatible HLS with the same stored token and backend', async () => {
+    localStorage.setItem('streamvault_auth_token', JSON.stringify('test-secret'));
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({
+      playlistUrl: '/api/live-compatible/live_future/index.m3u8?ticket=synthetic',
+    }));
+    await expect(getAuthorizedLiveHlsUrl('https://dvr.example.test', 'live_future', 'https://app.example.test', {
+      delivery: 'compatible',
+    })).resolves.toBe('https://dvr.example.test/api/live-compatible/live_future/index.m3u8?ticket=synthetic');
+    expect(fetchMock.mock.calls[0][0]).toBe('https://dvr.example.test/api/live-compatible/live_future/authorize');
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('x-streamvault-token')).toBe('test-secret');
+  });
+
   it('fetches a signed feed with the stored token and keeps it on the configured backend', async () => {
     localStorage.setItem('streamvault_auth_token', JSON.stringify('test-secret'));
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ playlistUrl: '/api/live/live_future/index.m3u8?ticket=synthetic' }));
