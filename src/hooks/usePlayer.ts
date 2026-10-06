@@ -831,7 +831,8 @@ export function usePlayer(): {
         }
       } catch { /* ignore */ }
 
-      let lastMediaTime = -1;
+      // Zero is the unstarted media clock, not evidence of first-frame progress.
+      let lastMediaTime = 0;
       let startupReady = false;
       let startupStarted = false;
       let canPlay = false;
@@ -1033,7 +1034,7 @@ export function usePlayer(): {
         };
         video.onsuspend = () => log.debug('HTML5 event: suspend');
         video.onerror = () => {
-          if (!isCurrentPlayback()) return;
+          if (!isCurrentPlayback() || usePlayerStore.getState().status === 'error') return;
           const err = video.error;
           const errMsg = err ? `code=${err.code} message="${err.message}"` : 'unknown';
           log.error(`HTML5 event: error — ${errMsg}`);
@@ -1147,6 +1148,15 @@ export function usePlayer(): {
           player.on(mpegts.Events.ERROR, (type: string, detail: string, info: unknown) => {
             if (!isCurrentPlayback() || activeMpegtsPlayer !== player) return;
             log.error(`mpegts ERROR: type=${type} detail=${detail}`, info);
+            const status = info && typeof info === 'object' && 'code' in info
+              ? Number(info.code) : 0;
+            if (isLiveTs && detail === 'HttpStatusCodeInvalid' && [401, 403, 404, 410].includes(status)) {
+              disableLiveStreamRecovery();
+              activeMpegtsPlayer = null;
+              player.destroy();
+              setError('This live stream is unavailable or was rejected upstream. Tap to retry.');
+              return;
+            }
             if (isLiveTs) {
               setStatus('loading');
               liveStreamRecovery.transportEnded('mpegts-error');

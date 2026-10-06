@@ -54,6 +54,74 @@ async function waitFor<T>(fn: () => Promise<T | null>, ms = 12000): Promise<T> {
   throw Error('packet live readiness deadline exceeded');
 }
 
+it('authorizes and serves authenticated eight-second GOP segments without an unsafe latch', async () => {
+  process.env.STREAMVAULT_AUTH_TOKEN = 'test-only-local-token';
+  const root = await mkdtemp(path.join(tmpdir(), 'sv-packet-long-gop-'));
+  roots.push(root);
+  const sourceFile = path.join(root, 'source.ts');
+  const encode = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error',
+    '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=10:duration=24',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=24',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-threads', '1', '-g', '80', '-keyint_min', '80',
+    '-sc_threshold', '0', '-bf', '0', '-c:a', 'aac', '-f', 'mpegts', sourceFile], { timeout: 15000 });
+  expect(encode.status).toBe(0);
+  const body = await readFile(sourceFile);
+  const upstream = express();
+  let requests = 0;
+  upstream.get('/api/stream/channel-a', (req, res) => {
+    if (req.header('authorization') !== 'Bearer test-only-local-token') { res.status(401).end(); return; }
+    requests++;
+    res.type('video/mp2t').write(body);
+    const packet = Buffer.alloc(188, 0xff); packet.set([0x47, 0x1f, 0xff, 0x10]);
+    const block = Buffer.concat(Array.from({ length: 100 }, () => packet));
+    const pace = setInterval(() => { if (!res.destroyed) res.write(block); }, 100);
+    res.once('close', () => clearInterval(pace));
+  });
+  const proxy = await listen(upstream);
+  const failures: string[] = [];
+  const buffer = createLiveBuffer({ root: path.join(root, 'cache'), packetAware: true, pollMs: 50,
+    onUnsafe: reason => failures.push(reason) });
+  buffers.push(buffer);
+  const app = express();
+  app.use('/api/live', createLiveRouter(buffer, id => id === 'channel-a' ? `${proxy}/api/stream/${id}` : null));
+  const base = await listen(app);
+  const endpoint = `${base}/api/live/channel-a`;
+  expect((await fetch(`${endpoint}/index.m3u8`)).status).toBe(401);
+  // Exercise the duration gate before authorization, independently of cold
+  // PyAV import/FFmpeg startup time on a busy recording host.
+  await waitFor(async () => {
+    const manifest = await buffer.playlist('channel-a', `${proxy}/api/stream/channel-a`);
+    return manifest || failures.length ? true : null;
+  }, 15000);
+  const authorization = await fetch(`${endpoint}/authorize`, { headers: { authorization: 'Bearer test-only-local-token' } });
+  expect(authorization.status, `unsafe reasons=${failures.join(',')}`).toBe(200);
+  const { playlistUrl } = await authorization.json();
+  const playlist = new URL(playlistUrl, base);
+  const manifest = await waitFor(async () => {
+    const res = await fetch(playlist);
+    if (res.status !== 200) return null;
+    const text = await res.text();
+    return (text.match(/^segment\//gm) ?? []).length >= 2 ? text : null;
+  });
+  expect(manifest.includes('#EXT-X-TARGETDURATION:12\n')).toBe(true);
+  const durations = [...manifest.matchAll(/#EXTINF:([\d.]+)/g)].map(match => Number(match[1]));
+  expect(durations.length).toBeGreaterThanOrEqual(2);
+  expect(durations.every(duration => duration >= 8 && duration <= 8.1)).toBe(true);
+  for (const segment of manifest.split('\n').filter(line => line.startsWith('segment/'))) {
+    expect(segment.includes('ticket=')).toBe(true);
+    expect((await fetch(new URL(segment.split('?')[0], playlist))).status).toBe(401);
+    const response = await fetch(new URL(segment, playlist));
+    expect(response.status).toBe(200);
+    expect((await response.arrayBuffer()).byteLength).toBeGreaterThan(188);
+  }
+  const refreshed = await fetch(playlist);
+  expect(refreshed.status).toBe(200);
+  expect((await refreshed.text()).includes('#EXT-X-TARGETDURATION:12\n')).toBe(true);
+  expect(failures).toEqual([]);
+  expect(buffer.activeCount).toBe(1);
+  expect(requests).toBe(1);
+}, 20000);
+
 it('does not kill a progressing replay merely because HLS cannot publish duplicates yet', async () => {
   const [first, second] = await media();
   const upstream = express();
@@ -584,7 +652,13 @@ with av.open(sys.argv[1]) as src, av.open(sys.argv[2], 'w', format='mpegts') as 
     release();
     await waitFor(async () => buffer.activeCount === 0 ? true : null, 10000);
     expect((await fetch(new URL(firstSegment, playlist))).status).toBe(404);
-    expect((await fetch(playlist)).status).toBe(503);
+    const rejected = await fetch(playlist);
+    expect(rejected.status).toBe(501);
+    expect(rejected.headers.get('retry-after')).toBeNull();
+    const rejectedAuthorization = await fetch(`${base}/api/live/channel-a/authorize`, { headers: { authorization: 'Bearer test-only-local-token' } });
+    expect(rejectedAuthorization.status).toBe(501);
+    expect(rejectedAuthorization.headers.get('retry-after')).toBeNull();
+    expect(buffer.isUnsafe('channel-a')).toBe(true);
     await new Promise(resolve => setTimeout(resolve, 500));
     expect(requests).toBe(2);
   }, 35000,

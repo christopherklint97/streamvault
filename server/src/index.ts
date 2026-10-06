@@ -219,7 +219,10 @@ app.use(createArchiveRouter({ store: archiveStore, root: archiveRoot, secret: ar
   prioritize: (id, start, end) => archiveCapture.prioritizeWindow(id, start, end) }));
 const liveBuffer = createLiveBuffer({ root: process.env.STREAMVAULT_LIVE_BUFFER_DIR ||
   path.join(process.env.TMPDIR || '/var/tmp', 'streamvault-live-buffer'),
-  packetAware: packetAwareLiveEnabled(process.env.STREAMVAULT_LIVE_PACKET_AWARE) });
+  packetAware: packetAwareLiveEnabled(process.env.STREAMVAULT_LIVE_PACKET_AWARE),
+  // IDs are validated by packet ingestion; reasons are fixed server categories.
+  // Never log source URLs, tickets, or worker stderr.
+  onUnsafe: (reason, id) => console.warn('Live HLS unavailable', { channelId: id, reason }) });
 app.use('/api/live', createLiveRouter(liveBuffer, id => {
   const channel = getChannelById(id);
   // The existing proxy validates upstream responses and hides credential-bearing

@@ -31,13 +31,12 @@ export async function attachLiveHls(
   const hls: Hls = new HlsPlayer({
     enableWorker: true,
     backBufferLength: 30,
-    // Six advertised TARGETDURATIONs: 24 seconds on this server's target of
-    // four, clamped to the available window. Prioritize headroom over latency.
-    liveSyncDurationCount: 6,
+    // Keep the intentional 24-second, window-clamped headroom independent of
+    // TARGETDURATION: long-GOP feeds need a larger advertised segment bound.
+    liveSyncDuration: 24,
     // Preserve buffered playback rather than seeking nearer the edge after a
-    // replay burst. The default infinite catch-up threshold avoids a seek that
-    // discards the startup lead and emits a visible waiting event.
-    liveMaxLatencyDurationCount: Infinity,
+    // replay burst. Infinite maximum latency keeps catch-up seeks disabled.
+    liveMaxLatencyDuration: Infinity,
   });
   let disposed = false;
   hls.on(HlsPlayer.Events.BUFFER_APPENDED, () => {
