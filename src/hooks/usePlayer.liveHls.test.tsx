@@ -255,8 +255,8 @@ describe('signed live MSE startup lead', () => {
         appended?.();
         canplay.call(video, new Event('canplay'));
         progress?.call(video, new ProgressEvent('progress'));
-        // Cross both watchdog + retry deadlines, still inside authorization's 25s budget.
-        await vi.advanceTimersByTimeAsync(24_000);
+        // Cross both watchdog + retry deadlines, still inside authorization's 50s budget.
+        await vi.advanceTimersByTimeAsync(49_000);
       });
       expect(video.play).not.toHaveBeenCalled();
       if (resolveAuthorization) {

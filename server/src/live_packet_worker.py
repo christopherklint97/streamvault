@@ -127,7 +127,10 @@ class Worker:
             try:
                 return self.open_source()
             except InitialSourceUnavailable:
-                if attempt + 1 == attempts or self.stop.wait(.25):
+                # A provider can reject immediate reopen while releasing the
+                # previous connection. Keep three attempts, but leave one and
+                # two seconds for that cooldown; never refresh media liveness.
+                if attempt + 1 == attempts or self.stop.wait(float(attempt + 1)):
                     raise
 
     def monitor(self):

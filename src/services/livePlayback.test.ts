@@ -79,7 +79,20 @@ describe('live HLS native-player authorization', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('bounds a stalled cold retry including network time to 25 seconds', async () => {
+  it('keeps cold native HLS authorization alive through a forty-second first publication', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({ error: 'Warming up' }, 503, '40'))
+      .mockResolvedValueOnce(json({ playlistUrl: '/api/live/live_future/index.m3u8?ticket=synthetic' }));
+    const result = getAuthorizedLiveHlsUrl('', 'live_future', 'https://app.example.test');
+    await vi.advanceTimersByTimeAsync(39_999);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(result).resolves.toContain('/api/live/live_future/index.m3u8');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('bounds a stalled cold retry including network time to 50 seconds', async () => {
     let retrySignal: AbortSignal | undefined;
     const fetchMock = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(json({ error: 'Warming up' }, 503, '3'))
@@ -92,7 +105,7 @@ describe('live HLS native-player authorization', () => {
       .then(value => { settled = true; return value; }, error => { settled = true; return error; });
     await vi.advanceTimersByTimeAsync(3000);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(21_999);
+    await vi.advanceTimersByTimeAsync(46_999);
     expect(settled).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(settled).toBe(true);
@@ -128,7 +141,7 @@ describe('live HLS native-player authorization', () => {
     expect(settled.mock.calls[0][0].error).toMatchObject({ status });
     expect(text).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
-    await vi.advanceTimersByTimeAsync(24_000);
+    await vi.advanceTimersByTimeAsync(49_000);
     await outcome;
     expect(settled).toHaveBeenCalledExactlyOnceWith({ error: expect.any(ApiError) });
     for (const [, init] of fetchMock.mock.calls) {
@@ -145,8 +158,8 @@ describe('live HLS native-player authorization', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     await vi.runAllTimersAsync();
     await expect(result).resolves.toBeNull();
-    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(25);
-    expect(Date.now() - start).toBeLessThanOrEqual(25_000);
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(50);
+    expect(Date.now() - start).toBeLessThanOrEqual(50_000);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -160,7 +173,7 @@ describe('live HLS native-player authorization', () => {
   it('does not treat an initial stalled transport as permission to downgrade authentication', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise(() => {}));
     const outcome = getAuthorizedLiveHlsUrl('', 'live_future', 'https://app.example.test').catch(error => error);
-    await vi.advanceTimersByTimeAsync(25_000);
+    await vi.advanceTimersByTimeAsync(50_000);
     expect(await outcome).toMatchObject({ name: 'TimeoutError' });
     expect(vi.getTimerCount()).toBe(0);
   });

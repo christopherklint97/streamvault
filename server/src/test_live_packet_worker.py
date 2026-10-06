@@ -112,6 +112,28 @@ class WorkerReopenTests(unittest.TestCase):
             self.assertTrue(worker.received_media)
             self.assertFalse(worker.failure)
 
+    def test_reopen_waits_out_a_three_second_provider_close_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = self.worker(Path(tmp))
+            result = (object(), object(), None)
+            elapsed = 0.
+            def unavailable_until_cooldown():
+                if elapsed < 3.:
+                    raise InitialSourceUnavailable()
+                return result
+            def cancellable_wait(delay):
+                nonlocal elapsed
+                elapsed += delay
+                return False
+            with patch.object(worker, 'open_source', side_effect=unavailable_until_cooldown) as opened, \
+                    patch.object(worker.stop, 'wait', side_effect=cancellable_wait) as waited, \
+                    patch.object(worker, 'note_progress') as progress:
+                self.assertIs(worker.open_continuation_source(), result)
+            self.assertEqual(opened.call_count, 3)
+            self.assertEqual([call.args[0] for call in waited.call_args_list], [1., 2.])
+            progress.assert_not_called()
+            self.assertFalse(worker.failure)
+
     def test_reopen_budget_exhausts_after_three_attempts(self):
         with tempfile.TemporaryDirectory() as tmp:
             worker = self.worker(Path(tmp))

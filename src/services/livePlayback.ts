@@ -1,7 +1,10 @@
 import { ApiError, apiFetch, getBackendRequestScope, StaleBackendRequestError } from './api';
 import { resolveMediaUrl } from './recordingPlayback';
 
-const AUTHORIZATION_BUDGET_MS = 25_000;
+// Allow the server's hard 45-second first-publication deadline to finish.
+// The extra five seconds cover the bounded readiness request/response, not an
+// extension of source/publication liveness or permission to ignore auth errors.
+const AUTHORIZATION_BUDGET_MS = 50_000;
 let authorizationGeneration = 0;
 
 export interface LiveAuthorizationOptions {
