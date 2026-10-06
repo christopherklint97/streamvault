@@ -151,7 +151,8 @@ it('latches a missing staged segment instead of hot-relaunching unverified media
   const proxy = await listen(upstream);
   const root = await mkdtemp(path.join(tmpdir(), 'sv-packet-stage-gap-'));
   roots.push(root);
-  const buffer = createLiveBuffer({ root, packetAware: true, pollMs: 100,
+  const failures: string[] = [];
+  const buffer = createLiveBuffer({ root, packetAware: true, pollMs: 100, onUnsafe: reason => failures.push(reason),
     maxBytesPerChannel: 8_000_000, maxSegmentBytes: 2_000_000 });
   buffers.push(buffer);
   const url = `${proxy}/api/stream/channel-a`;
@@ -159,13 +160,57 @@ it('latches a missing staged segment instead of hot-relaunching unverified media
   const channelDir = (await readdir(root)).find(name => name.startsWith('channel-'))!;
   const workingDir = (await readdir(path.join(root, channelDir))).find(name => name.startsWith('ingest-'))!;
   await writeFile(path.join(root, channelDir, workingDir, 'index.m3u8'), '#EXTM3U\n#EXTINF:2,\n999.ts\n');
-  await waitFor(async () => buffer.activeCount === 0 ? true : null, 8000);
+  try { await waitFor(async () => buffer.activeCount === 0 ? true : null, 8000); }
+  catch (error) {
+    const manifest = await readFile(path.join(root, channelDir, workingDir, 'index.m3u8'), 'utf8').catch(() => '');
+    console.warn('missing-stage diagnostic', JSON.stringify({ failures, active: buffer.activeCount,
+      stageIndices: [...manifest.matchAll(/^(\d+)\.ts$/gm)].map(match => Number(match[1])) }));
+    throw error;
+  }
   for (let attempt = 0; attempt < 10; attempt++) {
     expect(await buffer.playlist('channel-a', url)).toBeNull();
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   expect(requests).toBe(1);
 }, 20000);
+
+it('keeps the same packet channel across a transient HTTP failure between proved source sessions', async () => {
+  const [first, second] = await media();
+  const upstream = express();
+  let requests = 0;
+  upstream.get('/api/stream/channel-a', (_req, res) => {
+    const attempt = ++requests;
+    if (attempt === 2) { res.status(503).end(); return; }
+    res.type('video/mp2t');
+    if (attempt <= 3) {
+      const data = attempt === 1 ? first : second;
+      res.set('Content-Length', String(data.length)).end(data);
+      return;
+    }
+    const packet = Buffer.alloc(188, 0xff);
+    packet.set([0x47, 0x1f, 0xff, 0x10]);
+    const block = Buffer.concat(Array.from({ length: 100 }, () => packet));
+    const pace = setInterval(() => res.write(block), 400);
+    res.once('close', () => clearInterval(pace));
+  });
+  const proxy = await listen(upstream);
+  const root = await mkdtemp(path.join(tmpdir(), 'sv-packet-reopen-retry-'));
+  roots.push(root);
+  const failures: string[] = [];
+  const buffer = createLiveBuffer({ root, packetAware: true, pollMs: 100, onUnsafe: reason => failures.push(reason),
+    maxBytesPerChannel: 8_000_000, maxSegmentBytes: 2_000_000 });
+  buffers.push(buffer);
+  const url = `${proxy}/api/stream/channel-a`;
+  const manifest = await waitFor(async () => {
+    const text = await buffer.playlist('channel-a', url);
+    return requests >= 4 && text?.includes('segment/') ? text : null;
+  }, 12000);
+  expect(manifest).toContain('segment/');
+  expect(requests).toBe(4);
+  expect(failures).toEqual([]);
+  expect(buffer.activeCount).toBe(1);
+  expect((await readdir(root)).filter(name => name.startsWith('channel-'))).toHaveLength(1);
+}, 25000);
 
 it('retries an initial HTTP source failure without treating it as an unsafe media seam', async () => {
   const [first, second] = await media();

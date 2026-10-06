@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from live_packet_worker import Body, InitialSourceUnavailable, Worker
+from live_packet_stitch import UnsafeSeam
 
 
 class WorkerLifetimeTests(unittest.TestCase):
@@ -91,6 +92,49 @@ class WorkerLifetimeTests(unittest.TestCase):
                 watcher.join(timeout=2)
             self.assertGreaterEqual(seen, 2)
             self.assertFalse(worker.failure)
+
+class WorkerReopenTests(unittest.TestCase):
+    def worker(self, stage):
+        worker = Worker('http://127.0.0.1:1/api/stream/channel-a', stage)
+        worker.received_media = True
+        return worker
+
+    def test_transient_reopen_keeps_the_same_worker_and_returns_the_provable_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = self.worker(Path(tmp))
+            child = object()
+            worker.child = child
+            result = (object(), object(), None)
+            with patch.object(worker, 'open_source', side_effect=[InitialSourceUnavailable(), result]) as opened, patch.object(worker.stop, 'wait', return_value=False):
+                self.assertIs(worker.open_continuation_source(), result)
+            self.assertEqual(opened.call_count, 2)
+            self.assertIs(worker.child, child)
+            self.assertTrue(worker.received_media)
+            self.assertFalse(worker.failure)
+
+    def test_reopen_budget_exhausts_after_three_attempts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = self.worker(Path(tmp))
+            with patch.object(worker, 'open_source', side_effect=InitialSourceUnavailable()) as opened, patch.object(worker.stop, 'wait', return_value=False):
+                with self.assertRaises(InitialSourceUnavailable): worker.open_continuation_source()
+            self.assertEqual(opened.call_count, 3)
+
+    def test_cold_start_does_not_hot_retry_inside_the_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = Worker('http://127.0.0.1:1/api/stream/channel-a', Path(tmp))
+            with patch.object(worker, 'open_source', side_effect=InitialSourceUnavailable()) as opened:
+                with self.assertRaises(InitialSourceUnavailable): worker.open_continuation_source()
+            self.assertEqual(opened.call_count, 1)
+
+    def test_cancel_and_unsafe_response_do_not_retry(self):
+        for cancel in (True, False):
+            with self.subTest(cancel=cancel), tempfile.TemporaryDirectory() as tmp:
+                worker = self.worker(Path(tmp))
+                failure = InitialSourceUnavailable() if cancel else UnsafeSeam('source response rejected')
+                with patch.object(worker, 'open_source', side_effect=failure) as opened, patch.object(worker.stop, 'wait', return_value=True):
+                    with self.assertRaises(type(failure)): worker.open_continuation_source()
+                self.assertEqual(opened.call_count, 1)
+
 
 class ScriptedResponse:
     """Deterministic HTTP read outcomes, consumed by real Body/PyAV code."""
@@ -182,11 +226,28 @@ class WorkerInitialTransportTests(unittest.TestCase):
             response = ScriptedResponse(self.media['libx264'], TimeoutError())
             body = Body(response, worker.session_bytes, worker.stop, worker.note_progress)
             with patch.object(worker, 'open_source', side_effect=[
-                    (response, body, None), InitialSourceUnavailable()]) as source:
+                    (response, body, None), InitialSourceUnavailable(), InitialSourceUnavailable(), InitialSourceUnavailable()]) as source:
                 self.assertEqual(worker.run(), 2)
             self.assertTrue(worker.received_media)
             self.assertEqual({item.name for item in stage.iterdir()}, {'UNSAFE'})
-            self.assertEqual(source.call_count, 2)
+            self.assertEqual(source.call_count, 4)
+
+    def test_transport_retry_followed_by_malformed_successor_stays_unsafe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = Path(tmp)
+            worker = Worker('http://127.0.0.1:1/api/stream/channel-a', stage)
+            first = ScriptedResponse(self.media['libx264'], TimeoutError())
+            first_body = Body(first, worker.session_bytes, worker.stop, worker.note_progress)
+            invalid = b'not transport-stream media' * 1000
+            successor = ScriptedResponse(invalid)
+            successor_body = Body(successor, worker.session_bytes, worker.stop, worker.note_progress)
+            with patch.object(worker, 'open_source', side_effect=[
+                    (first, first_body, None), InitialSourceUnavailable(),
+                    (successor, successor_body, len(invalid))]) as source:
+                self.assertEqual(worker.run(), 2)
+            self.assertTrue(worker.received_media)
+            self.assertEqual(source.call_count, 3)
+            self.assertEqual({item.name for item in stage.iterdir()}, {'UNSAFE'})
 
     def test_initial_timeout_after_an_established_presentation_stays_unsafe(self):
         self.assert_classification(ScriptedResponse(error=TimeoutError()), None, 'UNSAFE', received_media=True)

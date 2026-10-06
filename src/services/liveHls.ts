@@ -8,6 +8,7 @@ export async function attachLiveHls(
   onFatal: (detail: string) => void,
   isCurrent: () => boolean = () => true,
   loadHls: () => Promise<typeof import('hls.js')> = () => import('hls.js'),
+  onBufferAppended?: () => void,
 ): Promise<() => void> {
   if (!isCurrent()) throw new Error('Live playback superseded');
   const nativeSupported = !!video.canPlayType('application/vnd.apple.mpegurl');
@@ -30,10 +31,19 @@ export async function attachLiveHls(
   const hls: Hls = new HlsPlayer({
     enableWorker: true,
     backBufferLength: 30,
-    liveSyncDurationCount: 3,
-    liveMaxLatencyDurationCount: 8,
+    // Six advertised TARGETDURATIONs: 24 seconds on this server's target of
+    // four, clamped to the available window. Prioritize headroom over latency.
+    liveSyncDurationCount: 6,
+    // Preserve buffered playback rather than seeking nearer the edge after a
+    // replay burst. The default infinite catch-up threshold avoids a seek that
+    // discards the startup lead and emits a visible waiting event.
+    liveMaxLatencyDurationCount: Infinity,
   });
   let disposed = false;
+  hls.on(HlsPlayer.Events.BUFFER_APPENDED, () => {
+    if (disposed || !isCurrent()) return;
+    onBufferAppended?.();
+  });
   hls.on(HlsPlayer.Events.ERROR, (_event, data) => {
     if (!data.fatal || disposed) return;
     disposed = true;

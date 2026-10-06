@@ -3,6 +3,7 @@ import { attachLiveHls } from './liveHls';
 
 const hlsMock = vi.hoisted(() => ({
   instances: [] as Array<{
+    config: Record<string, unknown>;
     attachMedia: ReturnType<typeof vi.fn>;
     loadSource: ReturnType<typeof vi.fn>;
     destroy: ReturnType<typeof vi.fn>;
@@ -12,12 +13,13 @@ const hlsMock = vi.hoisted(() => ({
 vi.mock('hls.js', () => ({
   default: class {
     static isSupported = () => true;
-    static Events = { ERROR: 'error' };
+    static Events = { ERROR: 'error', BUFFER_APPENDED: 'bufferAppended' };
     attachMedia = vi.fn();
     loadSource = vi.fn();
     destroy = vi.fn();
     on = vi.fn();
-    constructor() { hlsMock.instances.push(this); }
+    config: Record<string, unknown>;
+    constructor(config: Record<string, unknown>) { this.config = config; hlsMock.instances.push(this); }
   },
 }));
 
@@ -58,6 +60,16 @@ describe('shared live HLS playback', () => {
     expect(hls.destroy).toHaveBeenCalledOnce();
   });
 
+  it('targets 24 seconds at the served four-second target without enabling max-latency catch-up', async () => {
+    const video = document.createElement('video');
+    vi.spyOn(video, 'canPlayType').mockReturnValue('');
+    const dispose = await attachLiveHls(video, '/api/live/test/index.m3u8', vi.fn());
+    expect(hlsMock.instances[0].config.liveSyncDurationCount).toBe(6);
+    expect(Number(hlsMock.instances[0].config.liveSyncDurationCount) * 4).toBe(24);
+    expect(hlsMock.instances[0].config.liveMaxLatencyDurationCount).toBe(Infinity);
+    dispose();
+  });
+
   it('retains native HLS as the fallback when MSE is unavailable', async () => {
     const video = document.createElement('video');
     vi.spyOn(video, 'canPlayType').mockReturnValue('maybe');
@@ -68,6 +80,28 @@ describe('shared live HLS playback', () => {
     expect(hlsMock.instances).toHaveLength(0);
     dispose();
   });
+
+  it.each(['superseded', 'disposed', 'fatal'])(
+    'stops forwarding BUFFER_APPENDED after the player is %s', async reason => {
+      const video = document.createElement('video');
+      vi.spyOn(video, 'canPlayType').mockReturnValue('');
+      let current = true;
+      const appended = vi.fn();
+      const dispose = await attachLiveHls(video, '/api/live/test/index.m3u8', vi.fn(),
+        () => current, undefined, appended);
+      const hls = hlsMock.instances[0];
+      const onAppend = hls.on.mock.calls.find(([event]) => event === 'bufferAppended')![1];
+      onAppend();
+      expect(appended).toHaveBeenCalledOnce();
+      if (reason === 'superseded') current = false;
+      else if (reason === 'disposed') dispose();
+      else hls.on.mock.calls.find(([event]) => event === 'error')![1]('error', { fatal: true, details: 'test' });
+      onAppend();
+      expect(appended).toHaveBeenCalledOnce();
+      dispose();
+      expect(hls.destroy).toHaveBeenCalledOnce();
+    },
+  );
 
   it('never attaches an old HLS player after a delayed import and channel switch', async () => {
     const video = document.createElement('video');

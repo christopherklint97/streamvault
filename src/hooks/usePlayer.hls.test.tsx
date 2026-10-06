@@ -7,6 +7,9 @@ import { saveWatchProgress } from '../services/channel-service';
 import { clientLogger } from '../utils/logger';
 
 const { hls } = vi.hoisted(() => ({ hls: { attachMedia: vi.fn(), loadSource: vi.fn(), destroy: vi.fn(), on: vi.fn() } }));
+vi.mock('../utils/logger', () => ({ clientLogger: {
+  debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(),
+} }));
 vi.mock('hls.js', () => ({ default: Object.assign(class MockHls { constructor() { return hls; } }, {
   isSupported: () => true, Events: { ERROR: 'hlsError' },
 }) }));

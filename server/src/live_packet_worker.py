@@ -116,6 +116,20 @@ class Worker:
             connection.close()
             raise
 
+    def open_continuation_source(self):
+        # A failed HTTP reopen has supplied no successor media. Keep the same
+        # mux/stitch state for bounded transport retries; every eventual body
+        # still goes through the unchanged strict A/V overlap proof.
+        attempts = 3 if self.received_media else 1
+        for attempt in range(attempts):
+            if self.stop.is_set():
+                raise InitialSourceUnavailable()
+            try:
+                return self.open_source()
+            except InitialSourceUnavailable:
+                if attempt + 1 == attempts or self.stop.wait(.25):
+                    raise
+
     def monitor(self):
         while not self.stop.wait(.1):
             try:
@@ -152,6 +166,10 @@ class Worker:
         child = None
         try:
             args = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin',
+                    # Input is already validated H.264/AAC TS. Bound discovery
+                    # so a short first body cannot leave FFmpeg awaiting more
+                    # media while the HTTP source only supplies null packets.
+                    '-analyzeduration', '1000000', '-probesize', '1048576',
                     '-f', 'mpegts', '-i', 'pipe:0', '-map', '0:v:0', '-map', '0:a:0',
                     '-c', 'copy', '-f', 'hls', '-hls_time', '2', '-hls_list_size', '64',
                     '-hls_flags', 'delete_segments+temp_file+independent_segments+omit_endlist',
@@ -164,7 +182,7 @@ class Worker:
                 mapped = None
                 # Keep one PyAV mux and one FFmpeg mux for this channel's lifetime.
                 while not self.stop.is_set():
-                    connection, body, length = self.open_source()
+                    connection, body, length = self.open_continuation_source()
                     try:
                         with av.open(body, 'r', format='mpegts') as demux:
                             packets = ts_packets(demux)
