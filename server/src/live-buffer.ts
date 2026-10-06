@@ -9,6 +9,9 @@ import { isAuthorizedRequest } from './security.js';
 
 interface Segment { id: number; name: string; duration: number; bytes: number; discontinuity: boolean; }
 export const packetAwareLiveEnabled = (value: string | undefined): boolean => value === '1';
+// Stream-copy HLS cuts at source keyframes, not the requested two-second cadence.
+// Keep the advertised upper bound fixed for the lifetime of every playlist.
+export const LIVE_HLS_MAX_SEGMENT_SECONDS = 12;
 interface Channel {
   id: string; dir: string; epoch: string; segments: Segment[]; bytes: number; sequence: number; discontinuitySequence: number;
   lastAccess: number; lastPublish: number; worker?: ChildProcess; working?: string;
@@ -20,7 +23,7 @@ export interface LiveBufferOptions {
   stallMs?: number; maxUnpublishedMs?: number; idleMs?: number; retryMs?: number; pollMs?: number; segmentSeconds?: number;
   minFreeBytes?: number; removeChannelDir?: (dir: string) => Promise<void>;
   unsafeMarkerStat?: (file: string) => Promise<void>;
-  onUnsafe?: (reason: string) => void; // fixed, non-URL diagnostic categories
+  onUnsafe?: (reason: string, id?: string) => void; // fixed, non-URL diagnostic categories
   packetAware?: boolean;
 }
 
@@ -59,10 +62,11 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
   const channels = new Map<string, Channel>();
   const unsafeChannels = new Set<string>();
   let unsafeCapacityExhausted = false;
+  const isUnsafe = (id: string): boolean => packetAware && (unsafeCapacityExhausted || unsafeChannels.has(id));
   function markUnsafe(id: string, reason = 'worker_exit') {
     // Bound failed-ID accounting; if exhausted, reject ALL new packet channels
     // until restart rather than forgetting an unsafe one and retrying it.
-    options.onUnsafe?.(reason);
+    options.onUnsafe?.(reason, id);
     if (unsafeChannels.size >= maxChannels * 16) unsafeCapacityExhausted = true;
     else unsafeChannels.add(id);
   }
@@ -148,7 +152,7 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       const key = `${ch.generation}-${name}`;
       const duration = Number(durationText);
       // Never conceal a unique segment by skipping an unpublishable input.
-      if (!Number.isFinite(duration) || duration <= 0 || duration > 4) { await retireUnsafe(ch); return; }
+      if (!Number.isFinite(duration) || duration <= 0 || duration > LIVE_HLS_MAX_SEGMENT_SECONDS) { await retireUnsafe(ch); return; }
       const stage = path.join(ch.working, name);
       let data: Buffer;
       try {
@@ -293,7 +297,7 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
   }
 
   async function get(id: string, url: string) {
-    if (packetAware && (unsafeCapacityExhausted || unsafeChannels.has(id))) return null;
+    if (isUnsafe(id)) return null;
     if (packetAware && (!/^https?:\/\/127\.0\.0\.1:\d+\/api\/stream\/[A-Za-z0-9_-]+(?:\?subs=1)?$/.test(url)
       || !/^[-A-Za-z0-9_]+$/.test(id))) return null;
     let ch = channels.get(id);
@@ -318,12 +322,13 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
   }
 
   return {
+    isUnsafe,
     get activeCount() { return channels.size; },
     get activeReaders() { return activeReaders; },
     async playlist(id: string, url: string, ticket?: string) {
       const ch = await get(id, url);
       if (!ch || !ch.segments.length) return null;
-      const rows = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-TARGETDURATION:4',
+      const rows = ['#EXTM3U', '#EXT-X-VERSION:3', `#EXT-X-TARGETDURATION:${LIVE_HLS_MAX_SEGMENT_SECONDS}`,
         `#EXT-X-MEDIA-SEQUENCE:${ch.segments[0].id}`, `#EXT-X-DISCONTINUITY-SEQUENCE:${ch.discontinuitySequence}`];
       for (const seg of ch.segments) {
         if (seg.discontinuity) rows.push('#EXT-X-DISCONTINUITY');
@@ -386,6 +391,7 @@ export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, so
     const url = source(id);
     if (!url) { res.status(404).end(); return; }
     if (req.query.audio === '1') { res.status(422).end(); return; }
+    if (buffer.isUnsafe(id)) { res.status(501).end(); return; }
     // Native players may not retry an initial 503 playlist. Wait briefly for
     // a published segment; otherwise let the caller use its legacy TS path.
     if (authorizationWaiters >= 8) { res.set('Retry-After', '2').status(503).end(); return; }
@@ -395,11 +401,13 @@ export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, so
       const deadline = Date.now() + 5_000;
       while (Date.now() < deadline && !req.destroyed) {
         const manifest = await buffer.playlist(id, url);
+        if (buffer.isUnsafe(id)) break;
         if (manifest?.includes('\nsegment/')) { ready = true; break; }
         await new Promise(resolve => setTimeout(resolve, 100));
       }
     } finally { authorizationWaiters--; }
     if (req.destroyed) return;
+    if (buffer.isUnsafe(id)) { res.status(501).end(); return; }
     if (!ready) { res.set('Retry-After', '2').status(503).end(); return; }
     const { ticket, expiresAt } = ticketFor(id);
     res.set('Cache-Control', 'private, no-store').json({ playlistUrl: `/api/live/${encodeURIComponent(id)}/index.m3u8?ticket=${ticket}`, expiresAt });
@@ -408,9 +416,11 @@ export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, so
     const id = String(req.params.id);
     const url = prepare(req, res, id);
     if (!url) return;
+    if (buffer.isUnsafe(id)) { res.status(501).end(); return; }
     const ticket = typeof req.query.ticket === 'string' && allowed(req, id) ? req.query.ticket : undefined;
     try {
       const manifest = await buffer.playlist(id, url, ticket);
+      if (buffer.isUnsafe(id)) { res.status(501).end(); return; }
       if (!manifest) { res.set('Retry-After', '2').status(503).end(); return; }
       res.type('application/vnd.apple.mpegurl').send(manifest);
     } catch { res.status(503).end(); }

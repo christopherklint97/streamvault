@@ -183,6 +183,49 @@ describe('signed live MSE startup lead', () => {
     },
   );
 
+  it.each([401, 403, 404, 410])('shows an actionable error for rejected legacy live HTTP %s rather than retrying forever', async code => {
+    mocks.authorize.mockResolvedValue(null as unknown as string);
+    await act(async () => {
+      hookRef.current?.play();
+      await vi.waitFor(() => expect(mocks.mpegtsPlayer.load).toHaveBeenCalled());
+    });
+    const onError = mocks.mpegtsPlayer.on.mock.calls.find(([event]) => event === 'error')![1];
+    await act(async () => onError('NetworkError', 'HttpStatusCodeInvalid', { code, msg: 'test rejection' }));
+    expect(usePlayerStore.getState().status).toBe('error');
+    expect(usePlayerStore.getState().errorMessage).toMatch(/live stream.*retry/i);
+    expect(mocks.mpegtsPlayer.destroy).toHaveBeenCalled();
+    await act(async () => {
+      onError('NetworkError', 'HttpStatusCodeInvalid', { code: 503 });
+      video.dispatchEvent(new Event('error'));
+      video.dispatchEvent(new Event('waiting'));
+      await vi.advanceTimersByTimeAsync(65_000);
+    });
+    expect(usePlayerStore.getState().status).toBe('error');
+    expect(mocks.authorize).toHaveBeenCalledOnce();
+    // A new explicit retry must still be able to attach and play normally.
+    mocks.authorize.mockResolvedValue('/api/live/live_test/index.m3u8?ticket=retry');
+    ranges = [[40, 60]];
+    await ready();
+    expect(video.play).toHaveBeenCalledOnce();
+    expect(usePlayerStore.getState().status).toBe('playing');
+  });
+
+  it('does not shorten first-frame acquisition after an initial zero-time timeupdate', async () => {
+    await act(async () => hookRef.current?.play());
+    video.currentTime = 0;
+    await act(async () => {
+      video.dispatchEvent(new Event('timeupdate'));
+      await vi.advanceTimersByTimeAsync(24_000);
+    });
+    expect(mocks.authorize).toHaveBeenCalledOnce();
+    video.currentTime = 1;
+    await act(async () => {
+      video.dispatchEvent(new Event('timeupdate'));
+      await vi.advanceTimersByTimeAsync(12_250);
+    });
+    expect(mocks.authorize).toHaveBeenCalledTimes(2);
+  });
+
   it.each(['stop', 'channel switch', 'new authorization', 'new authorization with queued retry'])(
     'cannot start from obsolete callbacks or recovery timers after %s', async cancellation => {
       await ready();

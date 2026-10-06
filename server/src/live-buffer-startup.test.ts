@@ -11,17 +11,18 @@ let started: number;
 let buffer: ReturnType<typeof createLiveBuffer>;
 let worker: EventEmitter & { kill: ReturnType<typeof vi.fn>; exitCode: number | null; signalCode: string | null };
 const reasons: string[] = [];
+const unsafe = vi.fn((reason: string) => { reasons.push(reason); });
 const inspected = vi.fn(async () => { throw Object.assign(new Error('absent'), { code: 'ENOENT' }); });
 beforeEach(async () => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(100_000);
-  reasons.length = 0; inspected.mockClear();
+  reasons.length = 0; inspected.mockClear(); unsafe.mockClear();
   root = await mkdtemp(path.join(tmpdir(), 'sv-live-startup-'));
   worker = Object.assign(new EventEmitter(), { exitCode: null as number | null, signalCode: null as string | null,
     kill: vi.fn(() => { queueMicrotask(() => { worker.exitCode = 0; worker.emit('close', 0); }); return true; }) });
   mocks.spawn.mockReset(); mocks.spawn.mockReturnValue(worker);
   buffer = createLiveBuffer({ root, packetAware: true, pollMs: 10, stallMs: 15_000,
-    maxUnpublishedMs: 45_000, idleMs: 120_000, unsafeMarkerStat: inspected, onUnsafe: reason => reasons.push(reason) });
+    maxUnpublishedMs: 45_000, idleMs: 120_000, unsafeMarkerStat: inspected, onUnsafe: unsafe });
   await buffer.playlist('channel-a', 'http://127.0.0.1:1/api/stream/channel-a');
   await vi.waitFor(() => expect(mocks.spawn).toHaveBeenCalledTimes(1));
   started = Date.now();
@@ -41,6 +42,7 @@ it('does not poison a cold worker before its first source byte but still bounds 
   vi.setSystemTime(started + 46_000);
   await vi.waitFor(() => expect(buffer.activeCount).toBe(0));
   expect(reasons).toEqual(['no_new_segments']);
+  expect(unsafe).toHaveBeenCalledExactlyOnceWith('no_new_segments', 'channel-a');
   expect(worker.kill).toHaveBeenCalledWith('SIGTERM');
   expect(await buffer.playlist('channel-a', 'http://127.0.0.1:1/api/stream/channel-a')).toBeNull();
   expect(mocks.spawn).toHaveBeenCalledTimes(1);

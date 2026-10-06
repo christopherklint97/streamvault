@@ -60,13 +60,14 @@ describe('shared live HLS playback', () => {
     expect(hls.destroy).toHaveBeenCalledOnce();
   });
 
-  it('targets 24 seconds at the served four-second target without enabling max-latency catch-up', async () => {
+  it('keeps 24-second headroom independent of long-GOP TARGETDURATION without catch-up seeks', async () => {
     const video = document.createElement('video');
     vi.spyOn(video, 'canPlayType').mockReturnValue('');
     const dispose = await attachLiveHls(video, '/api/live/test/index.m3u8', vi.fn());
-    expect(hlsMock.instances[0].config.liveSyncDurationCount).toBe(6);
-    expect(Number(hlsMock.instances[0].config.liveSyncDurationCount) * 4).toBe(24);
-    expect(hlsMock.instances[0].config.liveMaxLatencyDurationCount).toBe(Infinity);
+    expect(hlsMock.instances[0].config.liveSyncDuration).toBe(24);
+    expect(hlsMock.instances[0].config.liveMaxLatencyDuration).toBe(Infinity);
+    expect(hlsMock.instances[0].config).not.toHaveProperty('liveSyncDurationCount');
+    expect(hlsMock.instances[0].config).not.toHaveProperty('liveMaxLatencyDurationCount');
     dispose();
   });
 

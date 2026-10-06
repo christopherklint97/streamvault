@@ -102,7 +102,7 @@ describe('shared live rolling HLS HTTP', () => {
     expect(firstPlayableMs).toBeLessThan(9000);
     const manifest = await waitPlaylist(playlist, text => text.includes('#EXT-X-DISCONTINUITY') && (text.match(/segment\//g) || []).length >= 2);
     expect(manifest).not.toContain('#EXT-X-ENDLIST');
-    expect(manifest).toContain('#EXT-X-TARGETDURATION:4');
+    expect(manifest).toContain('#EXT-X-TARGETDURATION:12');
     const paths = [...manifest.matchAll(/^(segment\/[^\s]+)$/gm)].map(match => match[1]);
     expect(paths.length).toBeGreaterThan(1);
     const segment = await fetch(new URL(paths[0], playlist));
