@@ -5,6 +5,7 @@ import { usePlayer } from './usePlayer';
 import { usePlayerStore } from '../stores/playerStore';
 import type { getAuthorizedLiveHlsUrl } from '../services/livePlayback';
 import { ApiError, rotateBackendRequestScope } from '../services/api';
+import { clientLogger } from '../utils/logger';
 
 const mocks = vi.hoisted(() => {
   // The module-level recovery singleton captures Date.now in its constructor.
@@ -44,7 +45,7 @@ const Harness = forwardRef<ReturnType<typeof usePlayer>>(function Harness(_props
   return null;
 });
 
-describe('signed live MSE startup lead', () => {
+describe('signed live HLS startup and recovery', () => {
   let root: Root;
   let container: HTMLDivElement;
   let video: HTMLVideoElement;
@@ -57,7 +58,9 @@ describe('signed live MSE startup lead', () => {
     mocks.instances.length = 0;
     mocks.hlsSupported.mockReturnValue(true);
     mocks.authorize.mockReset();
-    mocks.authorize.mockResolvedValue('/api/live/live_test/index.m3u8?ticket=test-only');
+    mocks.authorize.mockImplementation(async (_base, _channel, _origin, options) => options?.delivery === 'compatible'
+      ? '/api/live-compatible/live_test/index.m3u8?ticket=compatible-test'
+      : '/api/live/live_test/index.m3u8?ticket=test-only');
     localStorage.clear();
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 404 }));
     video = document.createElement('video');
@@ -157,14 +160,61 @@ describe('signed live MSE startup lead', () => {
     },
   );
 
-  it.each(['iPhone', 'Safari'])('uses compatible signed native HLS after primary unavailability on %s', async platform => {
+  it.each(['iPhone', 'Safari'])('requests compatible HLS immediately on %s without waiting for or racing primary', async platform => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(platform === 'iPhone'
       ? 'iPhone AppleWebKit/605.1.15 Safari/604.1' : 'Macintosh AppleWebKit/605.1.15 Safari/605.1.15');
     vi.mocked(video.canPlayType).mockReturnValue('maybe');
-    mocks.authorize.mockResolvedValueOnce(null)
-      .mockResolvedValueOnce('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
+    let resolveAuthorization!: (url: string) => void;
+    mocks.authorize.mockImplementationOnce(() => new Promise(resolve => { resolveAuthorization = resolve; }));
+    await act(async () => hookRef.current?.play());
+    expect(mocks.authorize).toHaveBeenCalledOnce();
+    expect(mocks.authorize).toHaveBeenNthCalledWith(1, expect.any(String), 'live_test', window.location.origin,
+      expect.objectContaining({ delivery: 'compatible', isCurrent: expect.any(Function) }));
+    await act(async () => vi.advanceTimersByTimeAsync(49_000));
+    expect(mocks.authorize).toHaveBeenCalledOnce();
+    expect(video.getAttribute('src')).toBeNull();
+    await act(async () => resolveAuthorization('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test'));
+    expect(new URL(video.src).pathname).toBe('/api/live-compatible/live_test/index.m3u8');
+    expect(mocks.instances).toHaveLength(0);
+    expect(mocks.mpegtsPlayer.load).not.toHaveBeenCalled();
+  });
+
+  it('logs credential-safe native authorization and only proven first-media latency', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
+    vi.mocked(video.canPlayType).mockReturnValue('maybe');
+    mocks.authorize.mockImplementationOnce(() => new Promise(resolve => setTimeout(() =>
+      resolve('/api/live-compatible/live_test/index.m3u8?ticket=private-test-ticket'), 1200)));
+    await act(async () => hookRef.current?.play());
+    await act(async () => vi.advanceTimersByTimeAsync(1200));
+    expect(clientLogger.info).toHaveBeenCalledWith(
+      'Native live HLS authorize channelID=live_test delivery=compatible elapsedms=1200');
+    await act(async () => {
+      video.dispatchEvent(new Event('loadeddata'));
+      video.dispatchEvent(new Event('canplay'));
+      video.dispatchEvent(new Event('playing'));
+      video.dispatchEvent(new Event('timeupdate'));
+    });
+    expect(vi.mocked(clientLogger.info).mock.calls.filter(([message]) => message.startsWith('Native live HLS first media'))).toHaveLength(0);
+    await act(async () => vi.advanceTimersByTimeAsync(300));
+    video.currentTime = 1;
+    await act(async () => video.dispatchEvent(new Event('timeupdate')));
+    video.currentTime = 2;
+    await act(async () => video.dispatchEvent(new Event('timeupdate')));
+    const diagnostics = vi.mocked(clientLogger.info).mock.calls.filter(([message]) => message.startsWith('Native live HLS'));
+    expect(diagnostics).toEqual([
+      ['Native live HLS authorize channelID=live_test delivery=compatible elapsedms=1200'],
+      ['Native live HLS first media channelID=live_test delivery=compatible elapsedms=1500'],
+    ]);
+    expect(JSON.stringify(diagnostics)).not.toMatch(/ticket|https?:|\/api\/|Test live|unused/);
+  });
+
+  it.each(['iPhone', 'Safari'])('plays the first compatible signed native HLS authorization on %s', async platform => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(platform === 'iPhone'
+      ? 'iPhone AppleWebKit/605.1.15 Safari/604.1' : 'Macintosh AppleWebKit/605.1.15 Safari/605.1.15');
+    vi.mocked(video.canPlayType).mockReturnValue('maybe');
+    mocks.authorize.mockResolvedValueOnce('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
     await ready();
-    expect(mocks.authorize).toHaveBeenCalledTimes(2);
+    expect(mocks.authorize).toHaveBeenCalledOnce();
     expect(mocks.authorize).toHaveBeenLastCalledWith(expect.any(String), 'live_test', window.location.origin,
       expect.objectContaining({ delivery: 'compatible', isCurrent: expect.any(Function) }));
     expect(new URL(video.src).pathname).toBe('/api/live-compatible/live_test/index.m3u8');
@@ -173,13 +223,14 @@ describe('signed live MSE startup lead', () => {
     expect(mocks.instances).toHaveLength(0);
   });
 
-  it('uses compatible HLS on a normal replacement play after native primary failure', async () => {
+  it('keeps explicit retry compatible after native media failure', async () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
     vi.mocked(video.canPlayType).mockReturnValue('maybe');
-    await ready();
-    await act(async () => video.dispatchEvent(new Event('error')));
     mocks.authorize.mockResolvedValue('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
     await ready();
+    await act(async () => video.dispatchEvent(new Event('error')));
+    expect(usePlayerStore.getState().status).toBe('error');
+    await act(async () => hookRef.current?.retry());
     expect(mocks.authorize).toHaveBeenCalledTimes(2);
     expect(mocks.authorize).toHaveBeenLastCalledWith(expect.any(String), 'live_test', window.location.origin,
       expect.objectContaining({ delivery: 'compatible' }));
@@ -187,27 +238,41 @@ describe('signed live MSE startup lead', () => {
     expect(mocks.mpegtsPlayer.load).not.toHaveBeenCalled();
   });
 
-  it.each(['primary unavailable', 'primary watchdog'])(
-    'stops compatible startup without verified media progress after %s', async primaryFailure => {
+  it('selects compatible HLS again after remount without losing healthy background playback', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
+    vi.mocked(video.canPlayType).mockReturnValue('maybe');
+    mocks.authorize.mockResolvedValue('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
+    await ready();
+    await act(async () => video.dispatchEvent(new Event('timeupdate')));
+    const src = video.getAttribute('src');
+    const pauses = vi.mocked(video.pause).mock.calls.length;
+    await act(async () => root.render(null));
+    await act(async () => root.render(<Harness ref={hookRef} />));
+    expect(usePlayerStore.getState().status).toBe('playing');
+    expect(video.getAttribute('src')).toBe(src);
+    expect(video.pause).toHaveBeenCalledTimes(pauses);
+    expect(mocks.authorize).toHaveBeenCalledOnce();
+    await act(async () => hookRef.current?.retry());
+    expect(mocks.authorize).toHaveBeenCalledTimes(2);
+    expect(mocks.authorize.mock.calls.every(call => call[3]?.delivery === 'compatible')).toBe(true);
+    expect(mocks.mpegtsPlayer.load).not.toHaveBeenCalled();
+  });
+
+  it.each(['zero timeupdate', 'no media events'])(
+    'stops first compatible startup without verified media progress with %s', async startup => {
       vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
       vi.mocked(video.canPlayType).mockReturnValue('maybe');
       ranges = [];
-      if (primaryFailure === 'primary unavailable') mocks.authorize.mockResolvedValueOnce(null);
-      else mocks.authorize.mockResolvedValueOnce('/api/live/live_test/index.m3u8?ticket=test-only');
       mocks.authorize.mockResolvedValue('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
       await act(async () => hookRef.current?.play());
-      if (primaryFailure === 'primary watchdog') {
-        await act(async () => vi.advanceTimersByTimeAsync(30_250));
-      }
-      expect(mocks.authorize).toHaveBeenCalledTimes(2);
+      expect(mocks.authorize).toHaveBeenCalledOnce();
       expect(new URL(video.src).pathname).toBe('/api/live-compatible/live_test/index.m3u8');
       // Neither a zero-time clock event nor ready/play events prove media progress.
       video.currentTime = 0;
-      await act(async () => video.dispatchEvent(new Event('timeupdate')));
+      if (startup === 'zero timeupdate') await act(async () => video.dispatchEvent(new Event('timeupdate')));
       await act(async () => vi.advanceTimersByTimeAsync(29_999));
       expect(usePlayerStore.getState().status).toBe('loading');
-      // Recovery preserves the primary failure's backoff (1s versus initial 250ms).
-      await act(async () => vi.advanceTimersByTimeAsync(primaryFailure === 'primary watchdog' ? 1_001 : 251));
+      await act(async () => vi.advanceTimersByTimeAsync(251));
       expect(usePlayerStore.getState().status).toBe('error');
       expect(usePlayerStore.getState().errorMessage).toMatch(/compatible.*connection.*retry/i);
       await act(async () => {
@@ -218,7 +283,7 @@ describe('signed live MSE startup lead', () => {
         await vi.advanceTimersByTimeAsync(169_250);
       });
       expect(usePlayerStore.getState().status).toBe('error');
-      expect(mocks.authorize).toHaveBeenCalledTimes(2);
+      expect(mocks.authorize).toHaveBeenCalledOnce();
       expect(mocks.mpegtsPlayer.load).not.toHaveBeenCalled();
       expect(mocks.instances).toHaveLength(0);
       // Explicit retry starts a fresh attempt and can still become healthy.
@@ -229,7 +294,8 @@ describe('signed live MSE startup lead', () => {
         video.dispatchEvent(new Event('canplay'));
         video.dispatchEvent(new Event('timeupdate'));
       });
-      expect(mocks.authorize).toHaveBeenCalledTimes(3);
+      expect(mocks.authorize).toHaveBeenCalledTimes(2);
+      expect(mocks.authorize.mock.calls.every(call => call[3]?.delivery === 'compatible')).toBe(true);
       expect(usePlayerStore.getState().status).toBe('playing');
     },
   );
@@ -237,27 +303,25 @@ describe('signed live MSE startup lead', () => {
   it('does not treat compatible readiness or a resolved play promise as media progress', async () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
     vi.mocked(video.canPlayType).mockReturnValue('maybe');
-    mocks.authorize.mockResolvedValueOnce(null)
-      .mockResolvedValue('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
+    mocks.authorize.mockResolvedValue('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
     await ready();
     expect(usePlayerStore.getState().status).toBe('playing');
     await act(async () => vi.advanceTimersByTimeAsync(30_250));
     expect(usePlayerStore.getState().status).toBe('error');
     expect(usePlayerStore.getState().errorMessage).toMatch(/compatible.*retry/i);
     await act(async () => vi.advanceTimersByTimeAsync(65_000));
-    expect(mocks.authorize).toHaveBeenCalledTimes(2);
+    expect(mocks.authorize).toHaveBeenCalledOnce();
     expect(mocks.mpegtsPlayer.load).not.toHaveBeenCalled();
   });
 
   it('recovers later interruptions after compatible native media genuinely advances', async () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
     vi.mocked(video.canPlayType).mockReturnValue('maybe');
-    mocks.authorize.mockResolvedValueOnce(null)
-      .mockResolvedValue('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
+    mocks.authorize.mockResolvedValue('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
     await ready();
     await act(async () => video.dispatchEvent(new Event('timeupdate')));
     await act(async () => vi.advanceTimersByTimeAsync(12_250));
-    expect(mocks.authorize).toHaveBeenCalledTimes(3);
+    expect(mocks.authorize).toHaveBeenCalledTimes(2);
     expect(mocks.authorize).toHaveBeenLastCalledWith(expect.any(String), 'live_test', window.location.origin,
       expect.objectContaining({ delivery: 'compatible' }));
     expect(usePlayerStore.getState().status).toBe('loading');
@@ -268,7 +332,8 @@ describe('signed live MSE startup lead', () => {
       video.dispatchEvent(new Event('timeupdate'));
       await vi.advanceTimersByTimeAsync(12_250);
     });
-    expect(mocks.authorize).toHaveBeenCalledTimes(4);
+    expect(mocks.authorize).toHaveBeenCalledTimes(3);
+    expect(mocks.authorize.mock.calls.every(call => call[3]?.delivery === 'compatible')).toBe(true);
     expect(mocks.mpegtsPlayer.load).not.toHaveBeenCalled();
     expect(mocks.instances).toHaveLength(0);
   });
@@ -276,8 +341,7 @@ describe('signed live MSE startup lead', () => {
   it('retains playing status when a compatible recovery watchdog fires after backend invalidation', async () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
     vi.mocked(video.canPlayType).mockReturnValue('maybe');
-    mocks.authorize.mockResolvedValueOnce(null)
-      .mockResolvedValue('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
+    mocks.authorize.mockResolvedValue('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
     await ready();
     expect(usePlayerStore.getState().status).toBe('playing');
     const src = video.getAttribute('src');
@@ -286,7 +350,7 @@ describe('signed live MSE startup lead', () => {
     await act(async () => vi.advanceTimersByTimeAsync(65_000));
     expect(usePlayerStore.getState().status).toBe('playing');
     expect(usePlayerStore.getState().errorMessage).toBe('');
-    expect(mocks.authorize).toHaveBeenCalledTimes(2);
+    expect(mocks.authorize).toHaveBeenCalledOnce();
     expect(video.play).toHaveBeenCalledOnce();
     expect(video.pause).toHaveBeenCalledTimes(pauses);
     expect(video.getAttribute('src')).toBe(src);
@@ -297,8 +361,7 @@ describe('signed live MSE startup lead', () => {
   it('retains playing status when a compatible native media error fires after backend invalidation', async () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
     vi.mocked(video.canPlayType).mockReturnValue('maybe');
-    mocks.authorize.mockResolvedValueOnce(null)
-      .mockResolvedValue('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
+    mocks.authorize.mockResolvedValue('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
     await ready();
     expect(usePlayerStore.getState().status).toBe('playing');
     const src = video.getAttribute('src');
@@ -310,7 +373,7 @@ describe('signed live MSE startup lead', () => {
     await act(async () => vi.advanceTimersByTimeAsync(65_000));
     expect(usePlayerStore.getState().status).toBe('playing');
     expect(usePlayerStore.getState().errorMessage).toBe('');
-    expect(mocks.authorize).toHaveBeenCalledTimes(2);
+    expect(mocks.authorize).toHaveBeenCalledOnce();
     expect(video.play).toHaveBeenCalledOnce();
     expect(video.pause).toHaveBeenCalledTimes(pauses);
     expect(video.getAttribute('src')).toBe(src);
@@ -322,8 +385,7 @@ describe('signed live MSE startup lead', () => {
     'ignores the compatible first-frame watchdog after %s', async cancellation => {
       vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
       vi.mocked(video.canPlayType).mockReturnValue('maybe');
-      mocks.authorize.mockResolvedValueOnce(null)
-        .mockResolvedValue('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
+      mocks.authorize.mockResolvedValue('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
       await act(async () => hookRef.current?.play());
       await act(async () => {
         if (cancellation === 'stop') hookRef.current?.stop();
@@ -335,7 +397,7 @@ describe('signed live MSE startup lead', () => {
       const status = usePlayerStore.getState().status;
       await act(async () => vi.advanceTimersByTimeAsync(65_000));
       expect(usePlayerStore.getState().status).toBe(status);
-      expect(mocks.authorize).toHaveBeenCalledTimes(2);
+      expect(mocks.authorize).toHaveBeenCalledOnce();
       expect(mocks.mpegtsPlayer.load).not.toHaveBeenCalled();
     },
   );
@@ -346,23 +408,23 @@ describe('signed live MSE startup lead', () => {
     if (failure === 'attachment') vi.spyOn(video, 'load').mockImplementation(() => {
       if (video.getAttribute('src')?.includes('/api/live-compatible/')) throw new Error('Native attachment failed');
     });
-    mocks.authorize.mockResolvedValueOnce(null)
-      .mockResolvedValueOnce('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
+    mocks.authorize.mockResolvedValueOnce('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
     await act(async () => hookRef.current?.play());
     if (failure === 'media') await act(async () => video.dispatchEvent(new Event('error')));
     expect(mocks.mpegtsPlayer.load).not.toHaveBeenCalled();
     expect(usePlayerStore.getState().status).toBe('error');
     expect(usePlayerStore.getState().errorMessage).toMatch(/compatible.*retry/i);
     await act(async () => vi.advanceTimersByTimeAsync(65_000));
-    expect(mocks.authorize).toHaveBeenCalledTimes(2);
+    expect(mocks.authorize).toHaveBeenCalledOnce();
   });
 
-  it.each([401, 403])('never tries compatible HLS or raw TS after primary auth %s', async status => {
+  it.each([401, 403])('never retries or falls back to primary or raw TS after compatible auth %s', async status => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
     vi.mocked(video.canPlayType).mockReturnValue('maybe');
     mocks.authorize.mockRejectedValue(new ApiError(status, 'Synthetic rejection'));
     await act(async () => hookRef.current?.play());
     expect(mocks.authorize).toHaveBeenCalledOnce();
+    expect(mocks.authorize.mock.calls[0][3]?.delivery).toBe('compatible');
     expect(mocks.mpegtsPlayer.load).not.toHaveBeenCalled();
     expect(usePlayerStore.getState().status).toBe('error');
     await act(async () => vi.advanceTimersByTimeAsync(65_000));
@@ -372,7 +434,7 @@ describe('signed live MSE startup lead', () => {
   it('shows a bounded actionable error when compatible authorization remains unavailable', async () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
     vi.mocked(video.canPlayType).mockReturnValue('maybe');
-    mocks.authorize.mockResolvedValueOnce(null).mockImplementationOnce(() =>
+    mocks.authorize.mockImplementationOnce(() =>
       new Promise(resolve => setTimeout(() => resolve(null), 50_000)));
     await act(async () => hookRef.current?.play());
     expect(usePlayerStore.getState().status).toBe('loading');
@@ -384,7 +446,7 @@ describe('signed live MSE startup lead', () => {
       video.dispatchEvent(new Event('waiting'));
       await vi.advanceTimersByTimeAsync(65_000);
     });
-    expect(mocks.authorize).toHaveBeenCalledTimes(2);
+    expect(mocks.authorize).toHaveBeenCalledOnce();
     expect(mocks.mpegtsPlayer.load).not.toHaveBeenCalled();
     expect(video.getAttribute('src')).toBeNull();
   });
@@ -394,10 +456,10 @@ describe('signed live MSE startup lead', () => {
       vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
       vi.mocked(video.canPlayType).mockReturnValue('maybe');
       let resolveCompatible!: (url: string) => void;
-      mocks.authorize.mockResolvedValueOnce(null).mockImplementationOnce(() =>
+      mocks.authorize.mockImplementationOnce(() =>
         new Promise(resolve => { resolveCompatible = resolve; }));
       await act(async () => hookRef.current?.play());
-      const isCurrent = mocks.authorize.mock.calls[1][3]!.isCurrent!;
+      const isCurrent = mocks.authorize.mock.calls[0][3]!.isCurrent!;
       await act(async () => {
         if (cancellation === 'stop') hookRef.current?.stop();
         else if (cancellation === 'channel switch') usePlayerStore.setState({ currentChannel: {
@@ -431,8 +493,15 @@ describe('signed live MSE startup lead', () => {
     expect(video.play).toHaveBeenCalledOnce();
   });
 
-  it.each(['audio', 'finite DVR', 'VOD'])(
-    'keeps %s startup unchanged with less than twelve seconds buffered', async kind => {
+  it.each([
+    ['audio', 'desktop'], ['finite DVR', 'desktop'], ['VOD', 'desktop'],
+    ['audio', 'iPhone'], ['finite DVR', 'iPhone'], ['VOD', 'iPhone'],
+  ])(
+    'keeps %s startup unchanged on %s with less than twelve seconds buffered', async (kind, platform) => {
+      if (platform === 'iPhone') {
+        vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
+        vi.mocked(video.canPlayType).mockReturnValue('maybe');
+      }
       if (kind === 'audio') usePlayerStore.setState({ audioOnly: true });
       else usePlayerStore.setState({ currentChannel: {
         ...usePlayerStore.getState().currentChannel!,

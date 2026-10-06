@@ -224,6 +224,9 @@ describe('usePlayer manual seek integration', () => {
   });
 
   it('opens the same buffered live HLS feed on Samsung instead of a per-view TS response', async () => {
+    // AVPlay remains primary even if the embedded UA advertises native HLS.
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
+    vi.spyOn(video, 'canPlayType').mockReturnValue('maybe');
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => String(url).endsWith('/authorize')
       ? new Response(JSON.stringify({ playlistUrl: '/api/live/live_future/index.m3u8?ticket=synthetic' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
       : new Response('{}', { status: 404 }));
@@ -238,12 +241,14 @@ describe('usePlayer manual seek integration', () => {
     (globalThis as typeof globalThis & { webapis: WebApis }).webapis = { avplay } as unknown as WebApis;
     await act(async () => hookRef.current?.play());
     await vi.waitFor(() => expect(avplay.open).toHaveBeenCalledWith('http://localhost:3000/api/live/live_future/index.m3u8?ticket=synthetic'));
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith('/authorize')).map(([url]) => url))
+      .toEqual(['/api/live/live_future/authorize']);
     await act(async () => hookRef.current?.stop());
   });
 
-  it('uses native buffered live HLS on iPhone instead of a per-view mpegts player', async () => {
+  it('uses compatible native live HLS directly on iPhone instead of primary or a per-view mpegts player', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => String(url).endsWith('/authorize')
-      ? new Response(JSON.stringify({ playlistUrl: '/api/live/live_future/index.m3u8?ticket=synthetic' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      ? new Response(JSON.stringify({ playlistUrl: '/api/live-compatible/live_future/index.m3u8?ticket=synthetic' }), { status: 200, headers: { 'Content-Type': 'application/json' } })
       : new Response('{}', { status: 404 }));
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15');
     vi.spyOn(video, 'canPlayType').mockReturnValue('maybe');
@@ -252,10 +257,47 @@ describe('usePlayer manual seek integration', () => {
       logo: '', group: '', region: '', contentType: 'livetv',
     } });
     await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
-    await vi.waitFor(() => expect(video.src).toBe('http://localhost:3000/api/live/live_future/index.m3u8?ticket=synthetic'));
+    await vi.waitFor(() => expect(video.src).toBe('http://localhost:3000/api/live-compatible/live_future/index.m3u8?ticket=synthetic'));
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith('/authorize')).map(([url]) => url))
+      .toEqual(['/api/live-compatible/live_future/authorize']);
     expect(mpegtsMock.createPlayer).not.toHaveBeenCalled();
     await act(async () => hookRef.current?.stop());
   });
+
+  it.each(['pending first response', 'pending response after 503'])(
+    'hard-aborts native compatible authorization at the total 50-second deadline with %s', async failure => {
+      vi.useFakeTimers();
+      vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15');
+      vi.spyOn(video, 'canPlayType').mockReturnValue('maybe');
+      usePlayerStore.setState({ currentChannel: {
+        id: 'live_future', name: 'Live channel', url: '/unused', logo: '', group: '', region: '', contentType: 'livetv',
+      }, audioOnly: false });
+      let signal: AbortSignal | null | undefined;
+      let requests = 0;
+      vi.mocked(fetch).mockImplementation(async (url, options) => {
+        if (!String(url).endsWith('/authorize')) return new Response('{}', { status: 404 });
+        requests++;
+        if (failure === 'pending response after 503' && requests === 1) {
+          return new Response('{}', { status: 503, headers: { 'Content-Type': 'application/json', 'Retry-After': '2' } });
+        }
+        signal = options?.signal;
+        return new Promise<Response>(() => {});
+      });
+      try {
+        await act(async () => { hookRef.current?.play(); await vi.advanceTimersByTimeAsync(49_999); });
+        expect(usePlayerStore.getState().status).toBe('loading');
+        expect(signal?.aborted).toBe(false);
+        await act(async () => vi.advanceTimersByTimeAsync(1));
+        expect(signal?.aborted).toBe(true);
+        expect(usePlayerStore.getState().status).toBe('error');
+        await act(async () => vi.advanceTimersByTimeAsync(65_000));
+        expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith('/authorize')).map(([url]) => url))
+          .toEqual(Array(failure === 'pending response after 503' ? 2 : 1).fill('/api/live-compatible/live_future/authorize'));
+        expect(mpegtsMock.createPlayer).not.toHaveBeenCalled();
+        expect(video.getAttribute('src')).toBeNull();
+      } finally { await act(async () => hookRef.current?.stop()); }
+    },
+  );
 
   it('keeps one HLS.js live player on desktop while the source reconnects behind the playlist', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => String(url).endsWith('/authorize')
@@ -270,6 +312,8 @@ describe('usePlayer manual seek integration', () => {
     await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
     await vi.waitFor(() => expect(hlsMock.instances).toHaveLength(1));
     expect(hlsMock.instances[0].loadSource).toHaveBeenCalledWith('/api/live/live_future/index.m3u8?ticket=synthetic');
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith('/authorize')).map(([url]) => url))
+      .toEqual(['/api/live/live_future/authorize']);
     expect(mpegtsMock.createPlayer).not.toHaveBeenCalled();
     await act(async () => hookRef.current?.stop());
     expect(hlsMock.instances[0].destroy).toHaveBeenCalledOnce();

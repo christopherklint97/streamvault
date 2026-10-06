@@ -492,7 +492,6 @@ export function usePlayer(): {
   // browser live playback still carries captions so it can expose only tracks
   // that the media element actually detects, with Off enforced by track mode.
   const keepSubsRef = useRef(getSubtitlesEnabled());
-  const nativePrimaryFailureRef = useRef<{ channelId: string; backendGeneration: number } | null>(null);
 
   const play = useCallback(function play(finiteRetryPosition?: number) {
     const channel = usePlayerStore.getState().currentChannel;
@@ -501,6 +500,7 @@ export function usePlayer(): {
       return;
     }
 
+    const playStartedAt = Date.now();
     const setStatus = usePlayerStore.getState().setStatus;
     const setError = usePlayerStore.getState().setError;
     const audioOnly = channel.contentType === 'livetv' && usePlayerStore.getState().audioOnly;
@@ -532,14 +532,8 @@ export function usePlayer(): {
     const nativeVideo = document.getElementById('av-player') as HTMLVideoElement | null;
     const nativeLiveHls = channel.contentType === 'livetv' && !audioOnly && !channel.dvrHls &&
       !(typeof webapis !== 'undefined' && webapis.avplay) && !!nativeVideo && prefersNativeLiveHls(nativeVideo);
-    if (nativePrimaryFailureRef.current?.channelId !== channel.id ||
-        nativePrimaryFailureRef.current?.backendGeneration !== backendGeneration) nativePrimaryFailureRef.current = null;
-    let compatibleLiveHls = nativeLiveHls && !!nativePrimaryFailureRef.current;
-    const noteNativePrimaryFailure = () => {
-      if (nativeLiveHls && !compatibleLiveHls && isCurrentAuthorization()) {
-        nativePrimaryFailureRef.current = { channelId: channel.id, backendGeneration };
-      }
-    };
+    // WebKit needs the bounded compatibility feed from the first request, not
+    // after a primary authorization deadline or a failed first-frame watchdog.
     const failCompatibleLiveHls = () => {
       disableLiveStreamRecovery();
       setError('Compatible Live TV is unavailable. Check the server connection and tap to retry.');
@@ -816,11 +810,10 @@ export function usePlayer(): {
           setStatus('loading');
           // A successful authorization/attachment is not a decoded first frame.
           // Stop the compatible startup watchdog instead of reauthorizing forever.
-          if (nativeLiveHls && compatibleLiveHls && !hasLiveMediaProgress) {
+          if (nativeLiveHls && !hasLiveMediaProgress) {
             failCompatibleLiveHls();
             return;
           }
-          noteNativePrimaryFailure();
           play();
         };
         liveStreamRecovery.begin(channel.id);
@@ -1054,6 +1047,9 @@ export function usePlayer(): {
           }
           if (!isLiveTs || !isCurrentPlayback() || video.currentTime <= lastMediaTime) return;
           lastMediaTime = video.currentTime;
+          if (nativeLiveHls && !hasLiveMediaProgress) {
+            log.info(`Native live HLS first media channelID=${channel.id} delivery=compatible elapsedms=${Date.now() - playStartedAt}`);
+          }
           hasLiveMediaProgress = true;
           liveStreamRecovery.progress();
           recoverDrainedLiveStream();
@@ -1076,8 +1072,7 @@ export function usePlayer(): {
             return;
           }
           if (isLiveTs && isCurrentPlayback()) {
-            if (nativeLiveHls && compatibleLiveHls) { failCompatibleLiveHls(); return; }
-            noteNativePrimaryFailure();
+            if (nativeLiveHls) { failCompatibleLiveHls(); return; }
             setStatus('loading');
             liveStreamRecovery.transportEnded('mpegts-error');
             return;
@@ -1090,7 +1085,6 @@ export function usePlayer(): {
           log.info('HTML5 event: ended');
           if (isLiveTs && isCurrentPlayback()) {
             if (pendingLiveEof) { recoverDrainedLiveStream(true); return; }
-            noteNativePrimaryFailure();
             setStatus('loading');
             liveStreamRecovery.transportEnded('media-ended');
             return;
@@ -1258,7 +1252,6 @@ export function usePlayer(): {
         video.dataset.streamOffset = '0';
         void attachLiveHls(video, playUrl, () => {
           if (!isCurrentPlayback()) return;
-          noteNativePrimaryFailure();
           setStatus('loading');
           liveStreamRecovery.transportEnded('hls-error');
         }, isCurrentPlayback, undefined, attemptPlay).then(dispose => {
@@ -1267,11 +1260,7 @@ export function usePlayer(): {
         }).catch(() => {
           if (!isCurrentPlayback()) return;
           if (nativeLiveHls) {
-            if (compatibleLiveHls) failCompatibleLiveHls();
-            else {
-              noteNativePrimaryFailure();
-              liveStreamRecovery.transportEnded('hls-error');
-            }
+            failCompatibleLiveHls();
             return;
           }
           // An engine without native HLS or MSE support keeps the old TS path.
@@ -1370,20 +1359,13 @@ export function usePlayer(): {
       // only after this authorization succeeds and attaches its player.
       liveStreamRecovery.suspend();
       const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
+      const authorizationStartedAt = Date.now();
       void getAuthorizedLiveHlsUrl(apiBaseUrl, channel.id, window.location.origin, {
         isCurrent: isCurrentAuthorization,
-        ...(compatibleLiveHls ? { delivery: 'compatible' as const } : {}),
+        ...(nativeLiveHls ? { delivery: 'compatible' as const } : {}),
       })
-        .then(async url => {
+        .then(url => {
           if (!isCurrentAuthorization()) return;
-          if (!url && nativeLiveHls && !compatibleLiveHls) {
-            noteNativePrimaryFailure();
-            compatibleLiveHls = true;
-            url = await getAuthorizedLiveHlsUrl(apiBaseUrl, channel.id, window.location.origin, {
-              delivery: 'compatible', isCurrent: isCurrentAuthorization,
-            });
-            if (!isCurrentAuthorization()) return;
-          }
           if (!url && nativeLiveHls) {
             failCompatibleLiveHls();
             return;
@@ -1393,6 +1375,11 @@ export function usePlayer(): {
         .catch(() => {
           if (!isCurrentAuthorization()) return;
           setError('Live playback could not be authorized. Check the server connection.');
+        })
+        .finally(() => {
+          if (nativeLiveHls && isCurrentAuthorization()) {
+            log.info(`Native live HLS authorize channelID=${channel.id} delivery=compatible elapsedms=${Date.now() - authorizationStartedAt}`);
+          }
         });
     } else {
       // Audio-only keeps the legacy audio-transcoding path until the HLS feed
@@ -1402,7 +1389,6 @@ export function usePlayer(): {
   }, []);
 
   const stop = useCallback(() => {
-    nativePrimaryFailureRef.current = null;
     playerRef.current = null;
     subtitleTracksRef.current = [];
     selectedSubtitleIndexRef.current = -1;
