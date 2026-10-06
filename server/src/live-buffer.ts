@@ -226,7 +226,11 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
             try { sourceProgress = (await stat(path.join(ch.working, '.source-progress'))).mtimeMs; }
             catch { /* worker has not started or is closing */ }
           }
-          if (Date.now() - Math.max(ch.lastPublish, sourceProgress) > stallMs) {
+          // A cold worker can still be importing PyAV before its first read.
+          // Only apply the source-silence deadline once bytes or a segment have
+          // existed; the independent first-publication deadline above remains.
+          const sourceStarted = !packetAware || sourceProgress > 0 || ch.lastStageIndex >= 0;
+          if (sourceStarted && Date.now() - Math.max(ch.lastPublish, sourceProgress) > stallMs) {
             if (packetAware) await retireUnsafe(ch, 'source_stall');
             else ch.worker?.kill('SIGKILL');
             return;

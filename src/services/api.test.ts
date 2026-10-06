@@ -65,6 +65,15 @@ describe('apiFetch', () => {
       .rejects.toThrow('cadenceInterval must be at least 2 for occurrence mode');
   });
 
+  it('retains Retry-After metadata on an unavailable API response', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"error":"Warming up"}', {
+      status: 503, headers: { 'Retry-After': '3' },
+    }));
+    await expect(apiFetch('', '/api/live/live_future/authorize')).rejects.toMatchObject({
+      status: 503, message: 'Warming up', retryAfter: '3',
+    });
+  });
+
   it('probes an untrusted backend candidate without disclosing the stored API token', async () => {
     localStorage.setItem('streamvault_auth_token', JSON.stringify('old-backend-secret'));
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ ok: true }), {
@@ -78,6 +87,53 @@ describe('apiFetch', () => {
     expect(url).toBe('http://candidate.example.test:3002/api/status');
     expect(new Headers(init?.headers).has('x-streamvault-token')).toBe(false);
     expect(new Headers(init?.headers).has('authorization')).toBe(false);
+  });
+
+  it('rejects an old backend error body after the request scope rotates', async () => {
+    let resolveBody!: (text: string) => void;
+    const response = new Response(null, { status: 503 });
+    vi.spyOn(response, 'text').mockReturnValue(new Promise<string>(resolve => { resolveBody = resolve; }));
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(response);
+    const oldRequest = apiFetch('https://backend-a.test', '/api/live/live_future/authorize');
+    const result = expect(oldRequest).rejects.toBeInstanceOf(StaleBackendRequestError);
+    await vi.waitFor(() => expect(response.text).toHaveBeenCalled());
+    rotateBackendRequestScope();
+    resolveBody('{"error":"Warming up"}');
+    await result;
+  });
+
+  it.each([401, 403])('prefers stale scope over %s headers when the backend rotates before consumption', async status => {
+    let resolveResponse!: (response: Response) => void;
+    vi.spyOn(globalThis, 'fetch').mockReturnValue(new Promise<Response>(resolve => {
+      resolveResponse = resolve;
+    }));
+    const response = new Response(null, { status });
+    const text = vi.spyOn(response, 'text').mockReturnValue(new Promise<string>(() => {}));
+    const result = expect(apiFetch('https://backend-a.test', '/api/config'))
+      .rejects.toBeInstanceOf(StaleBackendRequestError);
+
+    resolveResponse(response);
+    // fetchBackend sees the current scope; rotate before apiFetch consumes headers.
+    await Promise.resolve();
+    rotateBackendRequestScope();
+    await result;
+    expect(text).not.toHaveBeenCalled();
+  });
+
+  it('preserves the caller cancellation error and signal', async () => {
+    const controller = new AbortController();
+    const cancellation = new DOMException('Caller cancelled', 'AbortError');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(cancellation);
+    await expect(apiFetch('', '/api/config', { signal: controller.signal })).rejects.toBe(cancellation);
+    expect(fetchMock.mock.calls[0][1]?.signal).toBe(controller.signal);
+  });
+
+  it.each([null, '', 'override-token'])('honors tokenOverride=%s rather than the stored token', async tokenOverride => {
+    localStorage.setItem('streamvault_auth_token', JSON.stringify('stored-token'));
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 202 }));
+    await apiFetch('', '/api/config', undefined, tokenOverride);
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('x-streamvault-token'))
+      .toBe(tokenOverride || null);
   });
 
   it('rejects an old backend response after the request scope rotates', async () => {

@@ -27,6 +27,8 @@ class Body:
         self.response, self.limit, self.stopped, self.on_bytes = response, limit, stopped, on_bytes
         self.used = 0
         self.failed = False
+        self.eof = False
+        self.prefix = bytearray()
 
     def read(self, size):
         if self.stopped.is_set() or self.failed:
@@ -41,7 +43,11 @@ class Body:
             return b''
         self.used += len(data)
         if data:
+            # Bound diagnostic framing evidence; never retain the whole body.
+            self.prefix.extend(data[:max(0, 188 * 3 - len(self.prefix))])
             self.on_bytes()
+        else:
+            self.eof = True
         return data
 
 
@@ -110,6 +116,20 @@ class Worker:
             connection.close()
             raise
 
+    def open_continuation_source(self):
+        # A failed HTTP reopen has supplied no successor media. Keep the same
+        # mux/stitch state for bounded transport retries; every eventual body
+        # still goes through the unchanged strict A/V overlap proof.
+        attempts = 3 if self.received_media else 1
+        for attempt in range(attempts):
+            if self.stop.is_set():
+                raise InitialSourceUnavailable()
+            try:
+                return self.open_source()
+            except InitialSourceUnavailable:
+                if attempt + 1 == attempts or self.stop.wait(.25):
+                    raise
+
     def monitor(self):
         while not self.stop.wait(.1):
             try:
@@ -146,6 +166,10 @@ class Worker:
         child = None
         try:
             args = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin',
+                    # Input is already validated H.264/AAC TS. Bound discovery
+                    # so a short first body cannot leave FFmpeg awaiting more
+                    # media while the HTTP source only supplies null packets.
+                    '-analyzeduration', '1000000', '-probesize', '1048576',
                     '-f', 'mpegts', '-i', 'pipe:0', '-map', '0:v:0', '-map', '0:a:0',
                     '-c', 'copy', '-f', 'hls', '-hls_time', '2', '-hls_list_size', '64',
                     '-hls_flags', 'delete_segments+temp_file+independent_segments+omit_endlist',
@@ -158,7 +182,7 @@ class Worker:
                 mapped = None
                 # Keep one PyAV mux and one FFmpeg mux for this channel's lifetime.
                 while not self.stop.is_set():
-                    connection, body, length = self.open_source()
+                    connection, body, length = self.open_continuation_source()
                     try:
                         with av.open(body, 'r', format='mpegts') as demux:
                             packets = ts_packets(demux)
@@ -183,6 +207,16 @@ class Worker:
                                 or (body.failed and (length is not None or body.used < 188 * 100))
                                 or self.stop.is_set()):
                             raise UnsafeSeam('source body incomplete or interrupted')
+                    except (av.FFmpegError, StopIteration):
+                        # Body turns socket errors into EOF for PyAV's C read
+                        # callback. Restore their transport meaning only before
+                        # any accepted packet; explicit UnsafeSeam validation
+                        # failures and all established presentations stay latched.
+                        if (not self.received_media and not self.stop.is_set() and not self.failure
+                                and all(body.prefix[offset] == 0x47 for offset in range(0, len(body.prefix), 188))
+                                and (body.failed or (body.eof and length is not None and body.used != length))):
+                            raise InitialSourceUnavailable() from None
+                        raise
                     finally:
                         with self.lock:
                             self.connection = None

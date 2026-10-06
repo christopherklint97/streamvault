@@ -56,6 +56,7 @@ class Stitcher:
         self.probe_seconds = probe_seconds
         self.history = {k: deque(maxlen=history_packets) for k in ('video', 'audio')}
         self.pending_video: Packet | None = None
+        self.pending_audio: Packet | None = None
         self.duplicates = {'video': 0, 'audio': 0}
         self.sessions = 0
         self.failed = False
@@ -65,7 +66,8 @@ class Stitcher:
             if packet.kind not in self.history or packet.pts is None or packet.dts is None or not packet.data:
                 self.failed = True
                 raise UnsafeSeam('unsupported or timestamp-less packet')
-            previous_stamp = (stamp(self.pending_video) if packet.kind == 'video' and self.pending_video
+            pending = self.pending_video if packet.kind == 'video' else self.pending_audio
+            previous_stamp = (stamp(pending) if pending
                               else self.history[packet.kind][-1] if self.history[packet.kind] else None)
             if previous_stamp and not 0 < packet.dts - previous_stamp.dts <= 90000:
                 self.failed = True
@@ -77,8 +79,12 @@ class Stitcher:
                     yield previous
                 self.pending_video = packet
             else:
-                self.history['audio'].append(stamp(packet))
-                yield packet
+                # EOF can flush an incomplete ADTS frame. Keep the tail private.
+                if self.pending_audio:
+                    previous = self.pending_audio
+                    self.history['audio'].append(stamp(previous))
+                    yield previous
+                self.pending_audio = packet
 
     def feed(self, packets: Iterable[Packet]) -> Iterator[Packet]:
         if self.failed:
@@ -88,7 +94,7 @@ class Stitcher:
             yield from self._publish(packets)
             return
         self.sessions += 1
-        if self.pending_video is None or any(len(h) < self.min_run for h in self.history.values()):
+        if self.pending_video is None or self.pending_audio is None or any(len(h) < self.min_run for h in self.history.values()):
             self.failed = True
             raise UnsafeSeam('too little retained history')
         try:
@@ -173,9 +179,11 @@ class Stitcher:
                 if kind == 'video' and replacement is None:
                     raise UnsafeSeam('unexpected video without held replacement')
                 if kind == 'audio' and not ready['audio']:
-                    last = snapshot['audio'][-1]
-                    if shifted.dts <= last.dts or shifted.pts <= last.pts:
-                        raise UnsafeSeam('audio timestamp did not advance')
+                    held = self.pending_audio
+                    if (shifted.pts != held.pts or shifted.dts != held.dts
+                        or shifted.keyframe != held.keyframe or not shifted.data.startswith(held.data)):
+                        raise UnsafeSeam('withheld audio cannot be safely replaced')
+                    self.duplicates['audio'] += 1
                     ready['audio'] = True
                 accepted.append(shifted)
 
@@ -186,16 +194,17 @@ class Stitcher:
         # A simultaneous packet may already be buffered. No output escaped before
         # full dual-stream proof; resume a bounded one-packet streaming lag now.
         self.pending_video = None
+        self.pending_audio = None
         shifted_tail = (replace(p, pts=p.pts + offset, dts=p.dts + offset) for p in source)
         yield from self._publish(chain(accepted, shifted_tail))
 
     def finish(self) -> Iterator[Packet]:
         if self.failed:
             raise UnsafeSeam('cannot finalize failed presentation')
-        if self.pending_video:
-            packet = self.pending_video
-            self.pending_video = None
-            self.history['video'].append(stamp(packet))
+        pending = sorted((p for p in (self.pending_video, self.pending_audio) if p), key=lambda p: p.dts)
+        self.pending_video = self.pending_audio = None
+        for packet in pending:
+            self.history[packet.kind].append(stamp(packet))
             yield packet
 
 

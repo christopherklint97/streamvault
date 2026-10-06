@@ -787,7 +787,9 @@ export function usePlayer(): {
       const isLiveTs = channel.contentType === 'livetv';
       video.dataset.channelId = channel.id;
       const playbackGeneration = ++html5PlaybackGeneration;
-      const isCurrentPlayback = () => playbackGeneration === html5PlaybackGeneration;
+      const isCurrentPlayback = () => playbackGeneration === html5PlaybackGeneration &&
+        (!authorizedLiveUrl || (authorizationGeneration === liveAuthorizationGeneration &&
+          usePlayerStore.getState().currentChannel?.id === channel.id));
       if (isLiveTs) {
         restartActiveLiveStream = play;
         liveStreamRecovery.begin(channel.id);
@@ -834,6 +836,7 @@ export function usePlayer(): {
       let startupStarted = false;
       let canPlay = false;
       let playAttempted = false;
+      let signedLiveHlsStartup = false;
       let pendingLiveEof = false;
       let eofSettled = false;
       let finiteRecoveryStarted = false;
@@ -909,6 +912,21 @@ export function usePlayer(): {
       const attemptPlay = () => {
         if (!startupReady || !canPlay || playAttempted || !isCurrentPlayback() ||
             usePlayerStore.getState().status === 'error') return;
+        // Only signed live Hls.js/MSE startup needs this lead. Native WebKit
+        // HLS may not preload twelve seconds while paused; finite media and
+        // legacy MPEG-TS/audio retain their existing startup behavior.
+        if (signedLiveHlsStartup && !audioOnly && !channel.dvrHls &&
+            !channel.recordingId && video.src.startsWith('blob:')) {
+          const position = video.currentTime;
+          let lead = 0;
+          for (let i = 0; i < video.buffered.length; i++) {
+            if (video.buffered.start(i) <= position && video.buffered.end(i) > position) {
+              lead = video.buffered.end(i) - position;
+              break;
+            }
+          }
+          if (lead < 12) return;
+        }
         playAttempted = true;
         log.info('HTML5: startup ready — attempting play()');
         void video.play().then(() => {
@@ -958,12 +976,16 @@ export function usePlayer(): {
           log.info(`HTML5 event: loadeddata, readyState=${video.readyState}`);
           armFiniteHlsStallTimer();
           void completeHtml5Startup();
+          if (signedLiveHlsStartup) attemptPlay();
         };
         video.oncanplay = () => {
           canPlay = true;
           attemptPlay();
         };
+        video.onprogress = signedLiveHlsStartup ? attemptPlay : null;
+        video.oncanplaythrough = signedLiveHlsStartup ? attemptPlay : null;
         video.onseeked = () => {
+          if (signedLiveHlsStartup) attemptPlay();
           if (!channel.dvrHls || !isCurrentPlayback() || !Number.isFinite(video.currentTime)) return;
           // A backward seek resets the progress baseline; old high-water marks
           // must not make healthy playback look stalled at the new position.
@@ -1068,6 +1090,7 @@ export function usePlayer(): {
       log.info(`HTML5: starting ${channel.dvrHls ? 'finite DVR HLS' : channel.contentType} playback`);
 
       const startMpegTsPlayback = () => {
+        signedLiveHlsStartup = false;
         // Native video cannot demux a saved MPEG-TS master either.
         log.info(`HTML5: loading mpegts.js for ${isLiveTs ? 'live' : 'recorded'} MPEG-TS playback...`);
         setupEvents();
@@ -1174,6 +1197,7 @@ export function usePlayer(): {
         });
       };
       if (isLiveTs && authorizedLiveUrl) {
+        signedLiveHlsStartup = true;
         setupEvents();
         const syncLiveHlsSubtitles = () => {
           if (!isCurrentPlayback()) return;
@@ -1191,7 +1215,7 @@ export function usePlayer(): {
           if (!isCurrentPlayback()) return;
           setStatus('loading');
           liveStreamRecovery.transportEnded('hls-error');
-        }, isCurrentPlayback).then(dispose => {
+        }, isCurrentPlayback, undefined, attemptPlay).then(dispose => {
           if (!isCurrentPlayback()) { dispose(); return; }
           disposeFiniteHls = dispose;
         }).catch(() => {
@@ -1287,7 +1311,14 @@ export function usePlayer(): {
     }
     };
     if (channel.contentType === 'livetv' && !audioOnly) {
-      void getAuthorizedLiveHlsUrl(useChannelStore.getState().apiBaseUrl, channel.id)
+      // Replacement authorization owns the next session. Cancel the previous
+      // watchdog/queued retry without resetting backoff; begin() rearms recovery
+      // only after this authorization succeeds and attaches its player.
+      liveStreamRecovery.suspend();
+      void getAuthorizedLiveHlsUrl(useChannelStore.getState().apiBaseUrl, channel.id, window.location.origin, {
+        isCurrent: () => authorizationGeneration === liveAuthorizationGeneration &&
+          usePlayerStore.getState().currentChannel?.id === channel.id,
+      })
         .then(startPlayback)
         .catch(() => {
           if (authorizationGeneration !== liveAuthorizationGeneration ||

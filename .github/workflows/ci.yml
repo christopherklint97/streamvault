@@ -68,7 +68,7 @@ jobs:
           docker run --rm -v "$PWD:/checkout" -w /checkout/server streamvault-ci:packet \
             npm run test -- --run --no-file-parallelism --maxWorkers=1 --testTimeout=30000
           docker run --rm -v "$PWD:/checkout" -w /checkout/server/src streamvault-ci:packet \
-            /usr/bin/python3 -m unittest -v test_live_packet_worker
+            /usr/bin/python3 -m unittest -v test_live_packet_worker test_live_packet_stitch
 
   arm64-image:
     runs-on: ubuntu-24.04-arm

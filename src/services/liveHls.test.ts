@@ -3,6 +3,7 @@ import { attachLiveHls } from './liveHls';
 
 const hlsMock = vi.hoisted(() => ({
   instances: [] as Array<{
+    config: Record<string, unknown>;
     attachMedia: ReturnType<typeof vi.fn>;
     loadSource: ReturnType<typeof vi.fn>;
     destroy: ReturnType<typeof vi.fn>;
@@ -12,19 +13,32 @@ const hlsMock = vi.hoisted(() => ({
 vi.mock('hls.js', () => ({
   default: class {
     static isSupported = () => true;
-    static Events = { ERROR: 'error' };
+    static Events = { ERROR: 'error', BUFFER_APPENDED: 'bufferAppended' };
     attachMedia = vi.fn();
     loadSource = vi.fn();
     destroy = vi.fn();
     on = vi.fn();
-    constructor() { hlsMock.instances.push(this); }
+    config: Record<string, unknown>;
+    constructor(config: Record<string, unknown>) { this.config = config; hlsMock.instances.push(this); }
   },
 }));
 
 describe('shared live HLS playback', () => {
   afterEach(() => { hlsMock.instances.length = 0; vi.restoreAllMocks(); });
 
+  it('uses Hls.js on Chromium even when native HLS is advertised', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36');
+    const video = document.createElement('video');
+    vi.spyOn(video, 'canPlayType').mockReturnValue('maybe');
+    const dispose = await attachLiveHls(video, '/api/live/live_future/index.m3u8', vi.fn());
+    expect(hlsMock.instances).toHaveLength(1);
+    expect(hlsMock.instances[0].attachMedia).toHaveBeenCalledWith(video);
+    expect(video.src).toBe('');
+    dispose();
+  });
+
   it('keeps iPhone/native playback attached to one rolling playlist across source EOF', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1');
     const video = document.createElement('video');
     vi.spyOn(video, 'canPlayType').mockReturnValue('maybe');
     const dispose = await attachLiveHls(video, '/api/live/live_future/index.m3u8', vi.fn());
@@ -45,6 +59,49 @@ describe('shared live HLS playback', () => {
     dispose();
     expect(hls.destroy).toHaveBeenCalledOnce();
   });
+
+  it('targets 24 seconds at the served four-second target without enabling max-latency catch-up', async () => {
+    const video = document.createElement('video');
+    vi.spyOn(video, 'canPlayType').mockReturnValue('');
+    const dispose = await attachLiveHls(video, '/api/live/test/index.m3u8', vi.fn());
+    expect(hlsMock.instances[0].config.liveSyncDurationCount).toBe(6);
+    expect(Number(hlsMock.instances[0].config.liveSyncDurationCount) * 4).toBe(24);
+    expect(hlsMock.instances[0].config.liveMaxLatencyDurationCount).toBe(Infinity);
+    dispose();
+  });
+
+  it('retains native HLS as the fallback when MSE is unavailable', async () => {
+    const video = document.createElement('video');
+    vi.spyOn(video, 'canPlayType').mockReturnValue('maybe');
+    const module = await import('hls.js');
+    vi.spyOn(module.default, 'isSupported').mockReturnValue(false);
+    const dispose = await attachLiveHls(video, '/api/live/live_future/index.m3u8', vi.fn());
+    expect(video.src).toContain('/api/live/live_future/index.m3u8');
+    expect(hlsMock.instances).toHaveLength(0);
+    dispose();
+  });
+
+  it.each(['superseded', 'disposed', 'fatal'])(
+    'stops forwarding BUFFER_APPENDED after the player is %s', async reason => {
+      const video = document.createElement('video');
+      vi.spyOn(video, 'canPlayType').mockReturnValue('');
+      let current = true;
+      const appended = vi.fn();
+      const dispose = await attachLiveHls(video, '/api/live/test/index.m3u8', vi.fn(),
+        () => current, undefined, appended);
+      const hls = hlsMock.instances[0];
+      const onAppend = hls.on.mock.calls.find(([event]) => event === 'bufferAppended')![1];
+      onAppend();
+      expect(appended).toHaveBeenCalledOnce();
+      if (reason === 'superseded') current = false;
+      else if (reason === 'disposed') dispose();
+      else hls.on.mock.calls.find(([event]) => event === 'error')![1]('error', { fatal: true, details: 'test' });
+      onAppend();
+      expect(appended).toHaveBeenCalledOnce();
+      dispose();
+      expect(hls.destroy).toHaveBeenCalledOnce();
+    },
+  );
 
   it('never attaches an old HLS player after a delayed import and channel switch', async () => {
     const video = document.createElement('video');
