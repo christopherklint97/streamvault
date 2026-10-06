@@ -205,6 +205,46 @@ class WorkerInitialTransportTests(unittest.TestCase):
             self.assertEqual({item.name for item in stage.iterdir()}, {marker}, worker.failure_type)
             return worker, body
 
+    def test_default_read_timeout_survives_a_three_and_half_second_media_gap(self):
+        data = self.media['libx264']
+        class Source(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Type', 'video/mp2t')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                midpoint = len(data) // 2
+                try:
+                    self.wfile.write(data[:midpoint])
+                    self.wfile.flush()
+                    time.sleep(3.5)
+                    self.wfile.write(data[midpoint:])
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Source)
+        serve = threading.Thread(target=server.serve_forever, daemon=True)
+        serve.start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                worker = Worker(f'http://127.0.0.1:{server.server_port}/api/stream/channel-a', Path(tmp))
+                connection, body, length = worker.open_source()
+                try:
+                    received = bytearray()
+                    while chunk := body.read(16 * 1024):
+                        received.extend(chunk)
+                    self.assertFalse(body.failed)
+                    self.assertEqual(bytes(received), data)
+                    self.assertEqual(length, len(data))
+                    self.assertLess(worker.source_timeout, 15.)
+                finally:
+                    connection.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            serve.join(timeout=2)
+
     def test_initial_body_timeout_without_media_is_retryable(self):
         worker, body = self.assert_classification(ScriptedResponse(error=TimeoutError()), None, 'RETRYABLE')
         self.assertTrue(body.failed)

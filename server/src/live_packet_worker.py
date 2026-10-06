@@ -17,6 +17,10 @@ from urllib.parse import urlsplit
 import av
 from live_packet_stitch import Stitcher, UnsafeSeam, ts_packets
 
+# Long-GOP sources can deliver media in bursts. Keep socket waits below the
+# owner's unchanged 15-second source-silence watchdog, not below a normal GOP.
+DEFAULT_SOURCE_TIMEOUT_SECONDS = 10.
+
 
 class InitialSourceUnavailable(Exception):
     """No source media was accepted; a later authorization may try again."""
@@ -53,7 +57,7 @@ class Body:
 
 class Worker:
     def __init__(self, source: str, directory: Path, *, session_bytes=64 * 1024 * 1024,
-                 disk_bytes=64 * 1024 * 1024, source_timeout=3., idle_seconds=180.):
+                 disk_bytes=64 * 1024 * 1024, source_timeout=DEFAULT_SOURCE_TIMEOUT_SECONDS, idle_seconds=180.):
         parts = urlsplit(source)
         if (parts.scheme != 'http' or parts.hostname != '127.0.0.1' or not parts.port
                 or parts.username or parts.password or parts.fragment or not parts.path.startswith('/api/stream/')
@@ -265,7 +269,7 @@ def main():
     parser.add_argument('--directory', type=Path, required=True)
     parser.add_argument('--disk-bytes', type=int, required=True)
     parser.add_argument('--session-bytes', type=int, default=64 * 1024 * 1024)
-    parser.add_argument('--source-timeout', type=float, default=3.)
+    parser.add_argument('--source-timeout', type=float, default=DEFAULT_SOURCE_TIMEOUT_SECONDS)
     args = parser.parse_args()
     try:
         worker = Worker(args.source, args.directory, disk_bytes=args.disk_bytes,
