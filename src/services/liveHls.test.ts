@@ -24,7 +24,19 @@ vi.mock('hls.js', () => ({
 describe('shared live HLS playback', () => {
   afterEach(() => { hlsMock.instances.length = 0; vi.restoreAllMocks(); });
 
+  it('uses Hls.js on Chromium even when native HLS is advertised', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36');
+    const video = document.createElement('video');
+    vi.spyOn(video, 'canPlayType').mockReturnValue('maybe');
+    const dispose = await attachLiveHls(video, '/api/live/live_future/index.m3u8', vi.fn());
+    expect(hlsMock.instances).toHaveLength(1);
+    expect(hlsMock.instances[0].attachMedia).toHaveBeenCalledWith(video);
+    expect(video.src).toBe('');
+    dispose();
+  });
+
   it('keeps iPhone/native playback attached to one rolling playlist across source EOF', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1');
     const video = document.createElement('video');
     vi.spyOn(video, 'canPlayType').mockReturnValue('maybe');
     const dispose = await attachLiveHls(video, '/api/live/live_future/index.m3u8', vi.fn());
@@ -44,6 +56,17 @@ describe('shared live HLS playback', () => {
     expect(hls.loadSource).toHaveBeenCalledWith('/api/live/live_future/index.m3u8');
     dispose();
     expect(hls.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('retains native HLS as the fallback when MSE is unavailable', async () => {
+    const video = document.createElement('video');
+    vi.spyOn(video, 'canPlayType').mockReturnValue('maybe');
+    const module = await import('hls.js');
+    vi.spyOn(module.default, 'isSupported').mockReturnValue(false);
+    const dispose = await attachLiveHls(video, '/api/live/live_future/index.m3u8', vi.fn());
+    expect(video.src).toContain('/api/live/live_future/index.m3u8');
+    expect(hlsMock.instances).toHaveLength(0);
+    dispose();
   });
 
   it('never attaches an old HLS player after a delayed import and channel switch', async () => {

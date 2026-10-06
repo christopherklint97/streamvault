@@ -1287,7 +1287,10 @@ export function usePlayer(): {
     }
     };
     if (channel.contentType === 'livetv' && !audioOnly) {
-      void getAuthorizedLiveHlsUrl(useChannelStore.getState().apiBaseUrl, channel.id)
+      void getAuthorizedLiveHlsUrl(useChannelStore.getState().apiBaseUrl, channel.id, window.location.origin, {
+        isCurrent: () => authorizationGeneration === liveAuthorizationGeneration &&
+          usePlayerStore.getState().currentChannel?.id === channel.id,
+      })
         .then(startPlayback)
         .catch(() => {
           if (authorizationGeneration !== liveAuthorizationGeneration ||

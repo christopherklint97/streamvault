@@ -1,5 +1,6 @@
 """A viewed packet worker must outlive long upstream responses and wall time."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import http.client
 from pathlib import Path
 import subprocess
 import tempfile
@@ -8,7 +9,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from live_packet_worker import Worker
+from live_packet_worker import Body, InitialSourceUnavailable, Worker
 
 
 class WorkerLifetimeTests(unittest.TestCase):
@@ -90,6 +91,106 @@ class WorkerLifetimeTests(unittest.TestCase):
                 watcher.join(timeout=2)
             self.assertGreaterEqual(seen, 2)
             self.assertFalse(worker.failure)
+
+class ScriptedResponse:
+    """Deterministic HTTP read outcomes, consumed by real Body/PyAV code."""
+    def __init__(self, data=b'', error=None):
+        self.data, self.error = data, error
+
+    def read(self, size):
+        if self.data:
+            data, self.data = self.data[:size], self.data[size:]
+            return data
+        if self.error:
+            raise self.error
+        return b''
+
+    def close(self):
+        pass
+
+
+class WorkerInitialTransportTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.fixtures = tempfile.TemporaryDirectory()
+        root = Path(cls.fixtures.name)
+        cls.media = {}
+        for codec in ('libx264', 'mpeg2video'):
+            fixture = root / f'{codec}.ts'
+            subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                            '-f', 'lavfi', '-i', 'testsrc2=size=160x90:rate=10:duration=3',
+                            '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=44100:duration=3',
+                            '-c:v', codec, '-g', '20', '-bf', '0', '-c:a', 'aac',
+                            '-f', 'mpegts', str(fixture)], check=True, capture_output=True, timeout=25)
+            cls.media[codec] = fixture.read_bytes()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.fixtures.cleanup()
+
+    def assert_classification(self, response, length, marker, *, received_media=False):
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = Path(tmp)
+            worker = Worker('http://127.0.0.1:1/api/stream/channel-a', stage)
+            worker.received_media = received_media
+            body = Body(response, worker.session_bytes, worker.stop, worker.note_progress)
+            with patch.object(worker, 'open_source', return_value=(response, body, length)):
+                self.assertEqual(worker.run(), 2)
+            self.assertEqual({item.name for item in stage.iterdir()}, {marker}, worker.failure_type)
+            return worker, body
+
+    def test_initial_body_timeout_without_media_is_retryable(self):
+        worker, body = self.assert_classification(ScriptedResponse(error=TimeoutError()), None, 'RETRYABLE')
+        self.assertTrue(body.failed)
+        self.assertFalse(worker.received_media)
+
+    def test_initial_body_http_truncation_without_media_is_retryable(self):
+        self.assert_classification(ScriptedResponse(error=http.client.IncompleteRead(b'', 188)), 188, 'RETRYABLE')
+
+    def test_initial_length_delimited_eof_without_media_is_retryable(self):
+        self.assert_classification(ScriptedResponse(), 188, 'RETRYABLE')
+
+    def test_initial_transport_timeout_after_only_ts_headers_is_retryable(self):
+        self.assert_classification(ScriptedResponse(self.media['libx264'][:188], TimeoutError()), None, 'RETRYABLE')
+
+    def test_initial_truncation_after_only_ts_headers_is_retryable(self):
+        self.assert_classification(ScriptedResponse(self.media['libx264'][:188]), len(self.media['libx264']), 'RETRYABLE')
+
+    def test_complete_malformed_body_stays_unsafe(self):
+        data = b'not transport-stream media' * 1000
+        self.assert_classification(ScriptedResponse(data), len(data), 'UNSAFE')
+
+    def test_malformed_body_with_a_transport_timeout_stays_unsafe(self):
+        data = b'not transport-stream media' * 1000
+        self.assert_classification(ScriptedResponse(data, TimeoutError()), None, 'UNSAFE')
+
+    def test_incompatible_codec_before_any_accepted_media_stays_unsafe(self):
+        data = self.media['mpeg2video']
+        worker, _ = self.assert_classification(ScriptedResponse(data), len(data), 'UNSAFE')
+        self.assertFalse(worker.received_media)
+        self.assertEqual(worker.failure_type, 'UnsafeSeam')
+
+    def test_body_truncation_after_accepted_media_stays_unsafe(self):
+        data = self.media['libx264']
+        worker, _ = self.assert_classification(ScriptedResponse(data), len(data) + 188, 'UNSAFE')
+        self.assertTrue(worker.received_media)
+
+    def test_unavailable_successor_after_accepted_media_stays_unsafe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = Path(tmp)
+            worker = Worker('http://127.0.0.1:1/api/stream/channel-a', stage)
+            response = ScriptedResponse(self.media['libx264'], TimeoutError())
+            body = Body(response, worker.session_bytes, worker.stop, worker.note_progress)
+            with patch.object(worker, 'open_source', side_effect=[
+                    (response, body, None), InitialSourceUnavailable()]) as source:
+                self.assertEqual(worker.run(), 2)
+            self.assertTrue(worker.received_media)
+            self.assertEqual({item.name for item in stage.iterdir()}, {'UNSAFE'})
+            self.assertEqual(source.call_count, 2)
+
+    def test_initial_timeout_after_an_established_presentation_stays_unsafe(self):
+        self.assert_classification(ScriptedResponse(error=TimeoutError()), None, 'UNSAFE', received_media=True)
+
 
 if __name__ == '__main__':
     unittest.main()

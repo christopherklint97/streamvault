@@ -206,6 +206,23 @@ describe('usePlayer manual seek integration', () => {
     }
   });
 
+  it('stops cold live authorization retries when the viewer stops playback', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.mocked(globalThis.fetch).mockImplementation(async url => String(url).endsWith('/authorize')
+      ? new Response(JSON.stringify({ error: 'Warming up' }), { status: 503, headers: { 'Content-Type': 'application/json', 'Retry-After': '2' } })
+      : new Response('{}', { status: 404 }));
+    usePlayerStore.setState({ currentChannel: {
+      id: 'live_future', name: 'ESPN live', url: '/test-only-source', logo: '', group: '', region: '', contentType: 'livetv',
+    } });
+    await act(async () => { hookRef.current?.play(); await vi.advanceTimersByTimeAsync(0); });
+    const before = fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/authorize')).length;
+    expect(before).toBe(1);
+    await act(async () => hookRef.current?.stop());
+    await act(async () => vi.advanceTimersByTimeAsync(6_000));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/authorize'))).toHaveLength(before);
+    expect(mpegtsMock.createPlayer).not.toHaveBeenCalled();
+  });
+
   it('opens the same buffered live HLS feed on Samsung instead of a per-view TS response', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => String(url).endsWith('/authorize')
       ? new Response(JSON.stringify({ playlistUrl: '/api/live/live_future/index.m3u8?ticket=synthetic' }), { status: 200, headers: { 'Content-Type': 'application/json' } })

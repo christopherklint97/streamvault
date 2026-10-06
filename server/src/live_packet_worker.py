@@ -27,6 +27,8 @@ class Body:
         self.response, self.limit, self.stopped, self.on_bytes = response, limit, stopped, on_bytes
         self.used = 0
         self.failed = False
+        self.eof = False
+        self.prefix = bytearray()
 
     def read(self, size):
         if self.stopped.is_set() or self.failed:
@@ -41,7 +43,11 @@ class Body:
             return b''
         self.used += len(data)
         if data:
+            # Bound diagnostic framing evidence; never retain the whole body.
+            self.prefix.extend(data[:max(0, 188 * 3 - len(self.prefix))])
             self.on_bytes()
+        else:
+            self.eof = True
         return data
 
 
@@ -183,6 +189,16 @@ class Worker:
                                 or (body.failed and (length is not None or body.used < 188 * 100))
                                 or self.stop.is_set()):
                             raise UnsafeSeam('source body incomplete or interrupted')
+                    except (av.FFmpegError, StopIteration):
+                        # Body turns socket errors into EOF for PyAV's C read
+                        # callback. Restore their transport meaning only before
+                        # any accepted packet; explicit UnsafeSeam validation
+                        # failures and all established presentations stay latched.
+                        if (not self.received_media and not self.stop.is_set() and not self.failure
+                                and all(body.prefix[offset] == 0x47 for offset in range(0, len(body.prefix), 188))
+                                and (body.failed or (body.eof and length is not None and body.used != length))):
+                            raise InitialSourceUnavailable() from None
+                        raise
                     finally:
                         with self.lock:
                             self.connection = None

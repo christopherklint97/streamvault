@@ -12,11 +12,13 @@ export class BackendUnavailableError extends Error {
 
 export class ApiError extends Error {
   readonly status: number;
+  readonly retryAfter: string | null;
 
-  constructor(status: number, statusText: string, detail?: string) {
+  constructor(status: number, statusText: string, detail?: string, retryAfter: string | null = null) {
     super(detail || `API error: ${status} ${statusText}`);
     this.name = 'ApiError';
     this.status = status;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -29,6 +31,11 @@ export class StaleBackendRequestError extends Error {
 
 let backendRequestGeneration = 0;
 let backendRequestController = typeof AbortController === 'undefined' ? null : new AbortController();
+
+/** Capture the backend scope for operations spanning several API requests. */
+export function getBackendRequestScope(): { generation: number; signal?: AbortSignal } {
+  return { generation: backendRequestGeneration, signal: backendRequestController?.signal };
+}
 
 export function rotateBackendRequestScope(): void {
   backendRequestGeneration++;
@@ -100,7 +107,7 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
         // Keep the stable status fallback for non-JSON error pages.
       }
     }
-    throw new ApiError(response.status, response.statusText, detail);
+    throw new ApiError(response.status, response.statusText, detail, response.headers.get('Retry-After'));
   }
   return (text ? JSON.parse(text) : undefined) as T;
 }
@@ -131,7 +138,16 @@ export async function apiFetch<T = any>(
   if (token && !headers.has('x-streamvault-token')) headers.set('x-streamvault-token', token);
 
   const response = await fetchBackend(`${baseUrl}${path}`, { ...options, headers });
-  const data = await parseJsonResponse<T>(response);
+  if (generation !== backendRequestGeneration) throw new StaleBackendRequestError();
+  // Auth rejection is terminal on headers: a stalled body must not hide it
+  // behind a caller's timeout or allow a fallback to unauthenticated playback.
+  if (response.status === 401 || response.status === 403) {
+    throw new ApiError(response.status, response.statusText, undefined, response.headers.get('Retry-After'));
+  }
+  const data = await parseJsonResponse<T>(response).catch(error => {
+    if (generation !== backendRequestGeneration) throw new StaleBackendRequestError();
+    throw error;
+  });
   if (generation !== backendRequestGeneration) throw new StaleBackendRequestError();
   return data;
 }
