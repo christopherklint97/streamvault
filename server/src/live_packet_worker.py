@@ -17,6 +17,10 @@ from urllib.parse import urlsplit
 import av
 from live_packet_stitch import Stitcher, UnsafeSeam, ts_packets
 
+# Long-GOP sources can deliver media in bursts. Keep socket waits below the
+# owner's unchanged 15-second source-silence watchdog, not below a normal GOP.
+DEFAULT_SOURCE_TIMEOUT_SECONDS = 10.
+
 
 class InitialSourceUnavailable(Exception):
     """No source media was accepted; a later authorization may try again."""
@@ -53,7 +57,7 @@ class Body:
 
 class Worker:
     def __init__(self, source: str, directory: Path, *, session_bytes=64 * 1024 * 1024,
-                 disk_bytes=64 * 1024 * 1024, source_timeout=3., idle_seconds=180.):
+                 disk_bytes=64 * 1024 * 1024, source_timeout=DEFAULT_SOURCE_TIMEOUT_SECONDS, idle_seconds=180.):
         parts = urlsplit(source)
         if (parts.scheme != 'http' or parts.hostname != '127.0.0.1' or not parts.port
                 or parts.username or parts.password or parts.fragment or not parts.path.startswith('/api/stream/')
@@ -127,7 +131,10 @@ class Worker:
             try:
                 return self.open_source()
             except InitialSourceUnavailable:
-                if attempt + 1 == attempts or self.stop.wait(.25):
+                # A provider can reject immediate reopen while releasing the
+                # previous connection. Keep three attempts, but leave one and
+                # two seconds for that cooldown; never refresh media liveness.
+                if attempt + 1 == attempts or self.stop.wait(float(attempt + 1)):
                     raise
 
     def monitor(self):
@@ -184,7 +191,11 @@ class Worker:
                 while not self.stop.is_set():
                     connection, body, length = self.open_continuation_source()
                     try:
-                        with av.open(body, 'r', format='mpegts') as demux:
+                        # Discover supported TS tracks within bounded media
+                        # time/bytes; a valid initial burst followed by silence
+                        # must not wait for the longer socket timeout to demux.
+                        with av.open(body, 'r', format='mpegts',
+                                     options={'analyzeduration': '1000000', 'probesize': '1048576'}) as demux:
                             packets = ts_packets(demux)
                             first = next(packets)
                             self.received_media = True
@@ -262,7 +273,7 @@ def main():
     parser.add_argument('--directory', type=Path, required=True)
     parser.add_argument('--disk-bytes', type=int, required=True)
     parser.add_argument('--session-bytes', type=int, default=64 * 1024 * 1024)
-    parser.add_argument('--source-timeout', type=float, default=3.)
+    parser.add_argument('--source-timeout', type=float, default=DEFAULT_SOURCE_TIMEOUT_SECONDS)
     args = parser.parse_args()
     try:
         worker = Worker(args.source, args.directory, disk_bytes=args.disk_bytes,

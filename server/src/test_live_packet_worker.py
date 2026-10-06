@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+import av
 
 from live_packet_worker import Body, InitialSourceUnavailable, Worker
 from live_packet_stitch import UnsafeSeam
@@ -112,6 +113,28 @@ class WorkerReopenTests(unittest.TestCase):
             self.assertTrue(worker.received_media)
             self.assertFalse(worker.failure)
 
+    def test_reopen_waits_out_a_three_second_provider_close_cooldown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = self.worker(Path(tmp))
+            result = (object(), object(), None)
+            elapsed = 0.
+            def unavailable_until_cooldown():
+                if elapsed < 3.:
+                    raise InitialSourceUnavailable()
+                return result
+            def cancellable_wait(delay):
+                nonlocal elapsed
+                elapsed += delay
+                return False
+            with patch.object(worker, 'open_source', side_effect=unavailable_until_cooldown) as opened, \
+                    patch.object(worker.stop, 'wait', side_effect=cancellable_wait) as waited, \
+                    patch.object(worker, 'note_progress') as progress:
+                self.assertIs(worker.open_continuation_source(), result)
+            self.assertEqual(opened.call_count, 3)
+            self.assertEqual([call.args[0] for call in waited.call_args_list], [1., 2.])
+            progress.assert_not_called()
+            self.assertFalse(worker.failure)
+
     def test_reopen_budget_exhausts_after_three_attempts(self):
         with tempfile.TemporaryDirectory() as tmp:
             worker = self.worker(Path(tmp))
@@ -182,6 +205,54 @@ class WorkerInitialTransportTests(unittest.TestCase):
                 self.assertEqual(worker.run(), 2)
             self.assertEqual({item.name for item in stage.iterdir()}, {marker}, worker.failure_type)
             return worker, body
+
+    def test_default_read_timeout_survives_a_three_and_half_second_media_gap(self):
+        data = self.media['libx264']
+        class Source(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Type', 'video/mp2t')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                midpoint = len(data) // 2
+                try:
+                    self.wfile.write(data[:midpoint])
+                    self.wfile.flush()
+                    time.sleep(3.5)
+                    self.wfile.write(data[midpoint:])
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Source)
+        serve = threading.Thread(target=server.serve_forever, daemon=True)
+        serve.start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                worker = Worker(f'http://127.0.0.1:{server.server_port}/api/stream/channel-a', Path(tmp))
+                connection, body, length = worker.open_source()
+                try:
+                    received = bytearray()
+                    while chunk := body.read(16 * 1024):
+                        received.extend(chunk)
+                    self.assertFalse(body.failed)
+                    self.assertEqual(bytes(received), data)
+                    self.assertEqual(length, len(data))
+                    self.assertLess(worker.source_timeout, 15.)
+                finally:
+                    connection.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            serve.join(timeout=2)
+
+    def test_bounded_input_discovery_still_validates_real_media_and_truncation(self):
+        data = self.media['libx264']
+        with patch('live_packet_worker.av.open', wraps=av.open) as opened:
+            worker, _ = self.assert_classification(ScriptedResponse(data), len(data) + 188, 'UNSAFE')
+        self.assertTrue(worker.received_media)
+        demux_call = next(call for call in opened.call_args_list if call.args[1] == 'r')
+        self.assertEqual(demux_call.kwargs['options'], {'analyzeduration': '1000000', 'probesize': '1048576'})
 
     def test_initial_body_timeout_without_media_is_retryable(self):
         worker, body = self.assert_classification(ScriptedResponse(error=TimeoutError()), None, 'RETRYABLE')

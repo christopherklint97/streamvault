@@ -1,6 +1,12 @@
 import type Hls from 'hls.js';
 import { isAppleMobile } from '../utils/platform';
 
+/** WebKit's native path, shared with live authorization transport selection. */
+export function prefersNativeLiveHls(video: HTMLVideoElement): boolean {
+  const safari = /Safari\//.test(navigator.userAgent) && !/(Chrome|Chromium|Edg|OPR)\//.test(navigator.userAgent);
+  return !!video.canPlayType('application/vnd.apple.mpegurl') && (isAppleMobile() || safari);
+}
+
 /** Attach a rolling live HLS playlist without replacing the player at source EOF. */
 export async function attachLiveHls(
   video: HTMLVideoElement,
@@ -19,8 +25,7 @@ export async function attachLiveHls(
   };
   // Chromium can advertise native HLS but keep too little lead to cover source
   // replay catch-up. Prefer the controlled MSE buffer there; retain WebKit HLS.
-  const safari = /Safari\//.test(navigator.userAgent) && !/(Chrome|Chromium|Edg|OPR)\//.test(navigator.userAgent);
-  if (nativeSupported && (isAppleMobile() || safari)) return nativeAttach();
+  if (prefersNativeLiveHls(video)) return nativeAttach();
 
   const { default: HlsPlayer } = await loadHls();
   if (!isCurrent()) throw new Error('Live playback superseded');

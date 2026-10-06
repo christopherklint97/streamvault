@@ -650,7 +650,11 @@ with av.open(sys.argv[1]) as src, av.open(sys.argv[2], 'w', format='mpegts') as 
     const firstSegment = manifest.split('\n').find(line => line.startsWith('segment/'))!;
     expect((await fetch(new URL(firstSegment, playlist))).status).toBe(200);
     release();
-    await waitFor(async () => buffer.activeCount === 0 ? true : null, 10000);
+    // A silent body now has a bounded ten-second socket read, while the owner
+    // independently enforces fifteen seconds of source silence. Allow that
+    // existing owner deadline plus inspection/retirement margin, not forty-five
+    // seconds of publication grace, for this deliberately silent successor.
+    await waitFor(async () => buffer.activeCount === 0 ? true : null, failure === 'silent-source' ? 18000 : 10000);
     expect((await fetch(new URL(firstSegment, playlist))).status).toBe(404);
     const rejected = await fetch(playlist);
     expect(rejected.status).toBe(501);
