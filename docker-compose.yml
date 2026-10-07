@@ -1,6 +1,7 @@
 services:
   server:
     container_name: streamvault-server
+    init: true
     build:
       context: .
       dockerfile: Dockerfile
@@ -20,13 +21,18 @@ services:
       # Comma-separated explicit CORS origins. Empty keeps current LAN-friendly behavior.
       - STREAMVAULT_ALLOWED_ORIGINS=${STREAMVAULT_ALLOWED_ORIGINS:-}
     # Leave capacity for SSH, DNS and other host services during transcoding.
-    cpus: "2.5"
+    cpus: "2.0"
     mem_limit: 2g
     memswap_limit: 3g
     pids_limit: 256
+    blkio_config:
+      weight: 100
     stop_grace_period: 30s
     healthcheck:
-      start_period: 5m
+      interval: 1m
+      timeout: 10s
+      retries: 5
+      start_period: 10m
     logging:
       driver: json-file
       options:

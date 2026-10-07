@@ -21,6 +21,7 @@ import MovieDetail from './components/MovieDetail';
 import Home from './pages/Home';
 import EpgGuide from './components/EpgGuide';
 import Recordings from './pages/Recordings';
+import RecordingDetail from './pages/RecordingDetail';
 
 import Settings from './pages/Settings';
 
@@ -83,6 +84,7 @@ function AppContent() {
   const currentView = useAppStore((s) => s.currentView);
   const selectedSeries = useAppStore((s) => s.selectedSeries);
   const selectedMovie = useAppStore((s) => s.selectedMovie);
+  const selectedRecordingId = useAppStore((s) => s.selectedRecordingId);
   const visitedViews = useAppStore((s) => s.visitedViews);
   const isLoading = useChannelStore((s) => s.isLoading);
   const loadingMessage = useChannelStore((s) => s.loadingMessage);
@@ -99,7 +101,7 @@ function AppContent() {
     history.replaceState({ view: 'home', group: null }, '');
 
     const handlePopState = () => {
-      useAppStore.getState().goBack();
+      useAppStore.getState().handlePopNavigation();
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
@@ -195,6 +197,8 @@ function AppContent() {
         return <EpgGuide />;
       case 'recordings':
         return <Recordings />;
+      case 'recordingDetail':
+        return selectedRecordingId ? <RecordingDetail recordingId={selectedRecordingId} /> : <Recordings />;
       case 'player':
         return <Player />;
       case 'settings':

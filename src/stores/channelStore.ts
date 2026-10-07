@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { Channel, Program, Category, SeriesInfo, MovieInfo } from '../types';
 import { getItem, setItem } from '../utils/storage';
 import { useAppStore } from './appStore';
+import { apiFetch } from '../services/api';
 
 const toast = (msg: string) => useAppStore.getState().showToastMessage(msg);
 
@@ -45,6 +46,7 @@ interface ChannelState {
   crawlProgress: string;
   lastCrawlTime: number;
   apiBaseUrl: string;
+  commercialAutoSkip: boolean;
   _hydrated: boolean;
 }
 
@@ -66,7 +68,7 @@ function buildProgramIndex(programs: Program[]): Map<string, Program[]> {
 
 declare const __SERVER_URL__: string;
 const API_BASE_URL_KEY = 'streamvault_api_url';
-const API_TOKEN_KEY = 'streamvault_auth_token';
+
 const DEFAULT_SERVER_URL: string = typeof __SERVER_URL__ !== 'undefined' ? __SERVER_URL__ : '';
 // When served from the same origin (PWA), API is always available via relative paths
 export const SAME_ORIGIN = !DEFAULT_SERVER_URL;
@@ -87,7 +89,7 @@ interface ChannelActions {
   fetchSeriesInfo: (seriesId: number) => Promise<SeriesInfo | null>;
   fetchMovieInfo: (vodId: number) => Promise<MovieInfo | null>;
   fetchConfig: () => Promise<void>;
-  saveConfig: (config: Record<string, string>) => Promise<void>;
+  saveConfig: (config: Record<string, string | boolean>) => Promise<boolean>;
   triggerSync: () => Promise<void>;
   cancelSync: () => void;
   triggerCrawl: () => Promise<void>;
@@ -98,17 +100,6 @@ interface ChannelActions {
   hydrate: () => Promise<void>;
 }
 
-async function apiFetch(baseUrl: string, path: string, options?: RequestInit) {
-  const url = `${baseUrl}${path}`;
-  const token = getItem(API_TOKEN_KEY, '');
-  const headers = new Headers(options?.headers);
-  if (token) headers.set('x-streamvault-token', token);
-  const response = await fetch(url, { ...options, headers });
-  if (!response.ok) {
-    throw new Error(`API error: ${response.status} ${response.statusText}`);
-  }
-  return response.json();
-}
 
 let pollInterval: ReturnType<typeof setTimeout> | null = null;
 let fetchAbortController: AbortController | null = null;
@@ -148,6 +139,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
   crawlProgress: '',
   lastCrawlTime: 0,
   apiBaseUrl: SAME_ORIGIN ? '' : getItem<string>(API_BASE_URL_KEY, DEFAULT_SERVER_URL),
+  commercialAutoSkip: false,
   _hydrated: false,
 
   setApiBaseUrl: (url: string) => {
@@ -356,25 +348,29 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     if (!hasApi(apiBaseUrl)) return;
     try {
       const data = await apiFetch(apiBaseUrl, '/api/config');
+      const current = get();
       set({
-        inputMode: data.inputMode || 'xtream',
-        playlistUrl: data.playlistUrl || '',
-        epgUrl: data.epgUrl || '',
+        inputMode: typeof data.inputMode === 'string' ? data.inputMode as InputMode : current.inputMode,
+        playlistUrl: typeof data.playlistUrl === 'string' ? data.playlistUrl : current.playlistUrl,
+        epgUrl: typeof data.epgUrl === 'string' ? data.epgUrl : current.epgUrl,
         xtreamCredentials: {
-          serverUrl: data.xtreamServer || '',
-          username: data.xtreamUsername || '',
-          password: data.xtreamPassword || '',
+          serverUrl: typeof data.xtreamServer === 'string' ? data.xtreamServer : current.xtreamCredentials.serverUrl,
+          username: typeof data.xtreamUsername === 'string' ? data.xtreamUsername : current.xtreamCredentials.username,
+          password: typeof data.xtreamPassword === 'string' ? data.xtreamPassword : current.xtreamCredentials.password,
         },
-        syncInterval: data.syncInterval || '24h',
+        syncInterval: typeof data.syncInterval === 'string' ? data.syncInterval as SyncInterval : current.syncInterval,
+        commercialAutoSkip: typeof data.commercialAutoSkip === 'boolean'
+          ? data.commercialAutoSkip
+          : current.commercialAutoSkip,
       });
     } catch (err) {
       toast(`Failed to fetch config: ${err}`);
     }
   },
 
-  saveConfig: async (config: Record<string, string>) => {
+  saveConfig: async (config: Record<string, string | boolean>) => {
     const { apiBaseUrl } = get();
-    if (!hasApi(apiBaseUrl)) return;
+    if (!hasApi(apiBaseUrl)) return false;
     try {
       await apiFetch(apiBaseUrl, '/api/config', {
         method: 'PUT',
@@ -382,23 +378,29 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
         body: JSON.stringify(config),
       });
       // Update local state to match
-      if (config.inputMode) set({ inputMode: config.inputMode as InputMode });
-      if (config.playlistUrl !== undefined) set({ playlistUrl: config.playlistUrl });
-      if (config.epgUrl !== undefined) set({ epgUrl: config.epgUrl });
+      if (typeof config.inputMode === 'string') set({ inputMode: config.inputMode as InputMode });
+      if (typeof config.playlistUrl === 'string') set({ playlistUrl: config.playlistUrl });
+      if (typeof config.epgUrl === 'string') set({ epgUrl: config.epgUrl });
       if (config.xtreamServer !== undefined || config.xtreamUsername !== undefined || config.xtreamPassword !== undefined) {
         const creds = get().xtreamCredentials;
         set({
           xtreamCredentials: {
-            serverUrl: config.xtreamServer ?? creds.serverUrl,
-            username: config.xtreamUsername ?? creds.username,
-            password: config.xtreamPassword ?? creds.password,
+            serverUrl: typeof config.xtreamServer === 'string' ? config.xtreamServer : creds.serverUrl,
+            username: typeof config.xtreamUsername === 'string' ? config.xtreamUsername : creds.username,
+            password: typeof config.xtreamPassword === 'string' ? config.xtreamPassword : creds.password,
           },
         });
       }
-      if (config.syncInterval) set({ syncInterval: config.syncInterval as SyncInterval });
+      if (typeof config.syncInterval === 'string') set({ syncInterval: config.syncInterval as SyncInterval });
+      if (config.commercialAutoSkip !== undefined) {
+        set({ commercialAutoSkip: config.commercialAutoSkip === true });
+      }
+      set({ error: null });
+      return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to save config';
       set({ error: msg });
+      return false;
     }
   },
 

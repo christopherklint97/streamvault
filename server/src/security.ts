@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import net from 'node:net';
 
 export interface ConfigResponse {
@@ -9,6 +10,7 @@ export interface ConfigResponse {
   xtreamUsername: string;
   xtreamPassword: string;
   syncInterval: string;
+  commercialAutoSkip: boolean;
 }
 
 export interface MaskedConfigResponse extends ConfigResponse {
@@ -35,6 +37,41 @@ export function isAuthorizedRequest(authorization: string | undefined, expectedT
   const bearer = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : authorization;
   const candidateHeader = Array.isArray(headerToken) ? headerToken[0] : headerToken;
   return bearer === expectedToken || candidateHeader === expectedToken;
+}
+
+function playbackSignature(recordingId: string, expiresAt: number, secret: string): string {
+  return createHmac('sha256', secret).update(`${recordingId}\u001f${expiresAt}`).digest('base64url');
+}
+
+export function createRecordingPlaybackTicket(
+  recordingId: string,
+  secret: string,
+  now = Date.now(),
+  ttlMs = 12 * 60 * 60_000,
+): { ticket: string; expiresAt: number } {
+  if (!secret) throw new Error('Playback tickets require an authentication secret');
+  if (!Number.isSafeInteger(ttlMs) || ttlMs < 1 || ttlMs > 24 * 60 * 60_000) throw new Error('Invalid playback ticket lifetime');
+  const expiresAt = now + ttlMs;
+  return { ticket: `${expiresAt}.${playbackSignature(recordingId, expiresAt, secret)}`, expiresAt };
+}
+
+export function canAccessRecordingStream(
+  recordingId: string,
+  authToken: string | undefined,
+  ticket: string | undefined,
+  now = Date.now(),
+): boolean {
+  if (!authToken) return true;
+  if (!ticket || ticket.length > 256) return false;
+  const separator = ticket.indexOf('.');
+  if (separator <= 0 || ticket.indexOf('.', separator + 1) !== -1) return false;
+  const expiresText = ticket.slice(0, separator);
+  if (!/^\d{1,16}$/.test(expiresText)) return false;
+  const expiresAt = Number(expiresText);
+  if (!Number.isSafeInteger(expiresAt) || expiresAt < now) return false;
+  const supplied = Buffer.from(ticket.slice(separator + 1));
+  const expected = Buffer.from(playbackSignature(recordingId, expiresAt, authToken));
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }
 
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {

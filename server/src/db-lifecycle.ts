@@ -80,6 +80,20 @@ export function findLatestValidBackup(backupDir: string): string | null {
   return null;
 }
 
+/** Cheap startup check: completed backups are validated before their atomic rename. */
+export function isDatabaseBackupDue(backupDir: string, maxAgeMs: number, now = Date.now()): boolean {
+  if (!fs.existsSync(backupDir)) return true;
+  let newestMtime = 0;
+  for (const name of fs.readdirSync(backupDir)) {
+    if (!/^streamvault-\d{4}-\d{2}-\d{2}\.db$/.test(name)) continue;
+    try {
+      const stat = fs.statSync(path.join(backupDir, name));
+      if (stat.isFile() && stat.size > 0) newestMtime = Math.max(newestMtime, stat.mtimeMs);
+    } catch { /* a concurrent cleanup can remove an old snapshot */ }
+  }
+  return newestMtime === 0 || now - newestMtime >= maxAgeMs;
+}
+
 export function restoreLatestValidBackup(destination: string, backupDir: string): string | null {
   const source = findLatestValidBackup(backupDir);
   if (!source) return null;

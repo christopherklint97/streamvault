@@ -3,12 +3,33 @@ import type { ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getRecording, updateRecording, getRecordingsByStatus, getConfig } from './db.js';
+import {
+  getConfig,
+  getRecording,
+  getRecordingsByStatus,
+  updateRecording,
+  updateRecordingIfStatus,
+} from './db.js';
 import { resolveStreamUrl, VLC_HEADERS } from './stream-utils.js';
 import { logger } from './logger.js';
+import { cancelCommercialAnalysis, notifyCommercialAnalysisQueued } from './commercial-analysis-worker.js';
+import {
+  buildCaptureSegmentPath,
+  buildMasterCaptureArgs,
+  buildRecordingArtifactPaths,
+  createOnceFinalizer,
+  discoverRecordingArtifacts,
+  finalizeRecordingMedia,
+  nextCaptureAttemptIndex,
+  parseConfiguredConcurrency,
+  shouldRetryCapture,
+} from './recorder-media.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_RECORDINGS_DIR = path.join(__dirname, '..', 'data', 'recordings');
+const DEFAULT_MAX_CONCURRENT = 3;
+const RETRY_DELAY_MS = 10_000;
+const FORCE_KILL_DELAY_MS = 10_000;
 
 function getRecordingsDir(): string {
   return process.env.RECORDINGS_DIR || DEFAULT_RECORDINGS_DIR;
@@ -17,18 +38,41 @@ function getRecordingsDir(): string {
 interface ActiveRecording {
   id: string;
   process: ChildProcess;
-  retried: boolean;
+  retryCount: number;
+  stopping: boolean;
+  resumeAfterStop: boolean;
+  exitCode: number | null;
+  finishOnce: () => Promise<void>;
+  done: Promise<void>;
+}
+
+interface StartingRecording {
+  done: Promise<void>;
+  resolve: () => void;
+}
+
+interface FinalizingRecording {
+  controller: AbortController;
+  promise: Promise<void>;
 }
 
 const activeRecordings = new Map<string, ActiveRecording>();
-const MAX_CONCURRENT = 3;
+const startingRecordings = new Map<string, StartingRecording>();
+const finalizingRecordings = new Map<string, FinalizingRecording>();
+const retryCounts = new Map<string, number>();
+const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+let stoppingAll = false;
 
 export function getActiveCount(): number {
-  return activeRecordings.size;
+  return activeRecordings.size + startingRecordings.size + finalizingRecordings.size;
+}
+
+export function getCaptureCount(): number {
+  return activeRecordings.size + startingRecordings.size;
 }
 
 export function isRecordingActive(id: string): boolean {
-  return activeRecordings.has(id);
+  return activeRecordings.has(id) || startingRecordings.has(id) || finalizingRecordings.has(id);
 }
 
 /** Check available disk space in bytes. Returns Infinity if unable to check. */
@@ -41,42 +85,207 @@ function getFreeDiskSpace(dir: string): number {
   }
 }
 
-/** Get total disk usage of recordings directory in bytes */
+/** Get total disk usage of recordings directory in bytes. */
 export function getRecordingsDiskUsage(): number {
   const dir = getRecordingsDir();
   if (!fs.existsSync(dir)) return 0;
   let total = 0;
-  const walk = (d: string) => {
-    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
-      const full = path.join(d, entry.name);
+  const walk = (directory: string) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const full = path.join(directory, entry.name);
       if (entry.isDirectory()) walk(full);
-      else total += fs.statSync(full).size;
+      else {
+        try { total += fs.statSync(full).size; } catch { /* file raced with cleanup */ }
+      }
     }
   };
   walk(dir);
   return total;
 }
 
-export async function startRecording(id: string): Promise<void> {
-  const rec = getRecording(id);
-  if (!rec) {
-    logger.error(`Recording ${id} not found`);
+function recordingPaths(recordingsDir: string, dateDir: string, id: string) {
+  const part = path.join(dateDir, `${id}.ts.part`);
+  const master = path.join(dateDir, `${id}.ts`);
+  const derivativePart = path.join(dateDir, `${id}.mp4.part`);
+  const derivative = path.join(dateDir, `${id}.mp4`);
+  return {
+    part,
+    master,
+    derivativePart,
+    derivative,
+    masterRelative: path.relative(recordingsDir, master),
+    derivativeRelative: path.relative(recordingsDir, derivative),
+  };
+}
+
+function isCaptureSegment(file: string, id: string): boolean {
+  const name = path.basename(file);
+  return name.startsWith(`${id}.segment-`) && (name.endsWith('.ts') || name.endsWith('.ts.part'));
+}
+
+function normalizeLegacyCapturePart(id: string): void {
+  const root = getRecordingsDir();
+  let artifacts = discoverRecordingArtifacts(root, id);
+  const legacyParts = artifacts.filter(file => path.basename(file) === `${id}.ts.part`);
+  for (const legacyPart of legacyParts) {
+    const attempt = nextCaptureAttemptIndex(artifacts, id);
+    const target = buildCaptureSegmentPath(path.dirname(legacyPart), id, attempt);
+    try {
+      fs.renameSync(legacyPart, target);
+      artifacts = [...artifacts.filter(file => file !== legacyPart), target];
+    } catch (error) {
+      logger.warn(`Recording ${id}: could not preserve legacy capture part: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+}
+
+function recoveryPaths(id: string): ReturnType<typeof recordingPaths> | null {
+  const root = getRecordingsDir();
+  const artifacts = discoverRecordingArtifacts(root, id);
+  const preferred = artifacts.find(file => path.basename(file) === `${id}.ts`)
+    ?? artifacts.find(file => path.basename(file) === `${id}.ts.part`)
+    ?? artifacts.find(file => isCaptureSegment(file, id))
+    ?? artifacts.find(file => path.basename(file) === `${id}.mp4.part`);
+  return preferred ? recordingPaths(root, path.dirname(preferred), id) : null;
+}
+
+function removeRecordingArtifacts(id: string): number {
+  const root = getRecordingsDir();
+  const recording = getRecording(id);
+  const artifacts = new Set(discoverRecordingArtifacts(root, id));
+  if (recording) {
+    for (const artifact of buildRecordingArtifactPaths(root, recording)) artifacts.add(artifact);
+  }
+  let deletedBytes = 0;
+  for (const artifact of artifacts) {
+    try {
+      const stat = fs.statSync(artifact);
+      if (stat.isFile()) deletedBytes += stat.size;
+    } catch { /* file may already be gone */ }
+    try { fs.rmSync(artifact, { force: true }); } catch { /* best effort */ }
+  }
+  return deletedBytes;
+}
+
+async function publishCompletedRecording(
+  id: string,
+  paths: ReturnType<typeof recordingPaths>,
+): Promise<void> {
+  const existing = finalizingRecordings.get(id);
+  if (existing) return existing.promise;
+
+  const current = getRecording(id);
+  if (!current || current.status === 'cancelled') return;
+  if (current.status !== 'finalizing' &&
+      !updateRecordingIfStatus(id, ['recording', 'scheduled'], { status: 'finalizing', error: null })) {
     return;
   }
 
-  if (activeRecordings.size >= MAX_CONCURRENT) {
-    const maxConcurrent = parseInt(getConfig('max_concurrent_recordings', String(MAX_CONCURRENT)), 10);
-    if (activeRecordings.size >= maxConcurrent) {
-      updateRecording(id, { status: 'failed', error: `Max concurrent recordings (${maxConcurrent}) reached` });
-      logger.error(`Recording ${id}: max concurrent recordings reached`);
-      return;
+  const controller = new AbortController();
+  const promise = (async () => {
+    try {
+      const segments = discoverRecordingArtifacts(getRecordingsDir(), id)
+        .filter(file => isCaptureSegment(file, id));
+      const result = await finalizeRecordingMedia({ ...paths, segments }, { signal: controller.signal });
+      const hasDerivative = result.derivativeError === null;
+      const now = Date.now();
+      const published = updateRecordingIfStatus(id, ['finalizing'], {
+        status: 'completed',
+        actual_end: now,
+        master_file_path: paths.masterRelative,
+        derivative_file_path: hasDerivative ? paths.derivativeRelative : null,
+        derivative_error: result.derivativeError,
+        file_path: hasDerivative ? paths.derivativeRelative : paths.masterRelative,
+        file_size: result.masterSize + (hasDerivative ? result.derivativeSize : 0),
+        duration: result.durationSeconds,
+        error: null,
+        analysis_state: 'queued',
+        analysis_error: null,
+        analysis_requested_at: now,
+        analysis_started_at: null,
+        analysis_completed_at: null,
+      });
+      if (!published) {
+        removeRecordingArtifacts(id);
+        return;
+      }
+      notifyCommercialAnalysisQueued();
+      logger.info(
+        `Recording ${id}: completed (${(result.masterSize / 1e6).toFixed(1)}MB master, ${result.durationSeconds}s)` +
+        (result.derivativeError ? `; MP4 derivative failed: ${result.derivativeError}` : ''),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const failed = updateRecordingIfStatus(id, ['finalizing'], {
+        status: 'failed',
+        actual_end: Date.now(),
+        error: `Failed to finalize recording: ${message}`,
+      });
+      if (failed) logger.error(`Recording ${id}: failed to finalize master: ${message}`);
+      else removeRecordingArtifacts(id);
+    } finally {
+      if (finalizingRecordings.get(id)?.controller === controller) finalizingRecordings.delete(id);
+      retryCounts.delete(id);
     }
+  })();
+  finalizingRecordings.set(id, { controller, promise });
+  return promise;
+}
+
+function createStartingRecording(id: string): StartingRecording {
+  let resolve!: () => void;
+  const done = new Promise<void>(settle => { resolve = settle; });
+  const starting = { done, resolve };
+  startingRecordings.set(id, starting);
+  return starting;
+}
+
+function finishStartingRecording(id: string, starting: StartingRecording): void {
+  if (startingRecordings.get(id) === starting) startingRecordings.delete(id);
+  starting.resolve();
+}
+
+function scheduleRetry(id: string): void {
+  const previous = retryTimers.get(id);
+  if (previous) clearTimeout(previous);
+  const timer = setTimeout(() => {
+    retryTimers.delete(id);
+    void startRecording(id);
+  }, RETRY_DELAY_MS);
+  timer.unref?.();
+  retryTimers.set(id, timer);
+}
+
+export async function startRecording(id: string): Promise<void> {
+  if (stoppingAll || isRecordingActive(id)) return;
+  const rec = getRecording(id);
+  if (!rec || rec.status === 'cancelled') {
+    if (!rec) logger.error(`Recording ${id} not found`);
+    return;
   }
 
   const recordingsDir = getRecordingsDir();
   fs.mkdirSync(recordingsDir, { recursive: true });
+  normalizeLegacyCapturePart(id);
 
-  // Check disk space (refuse if < 1GB free)
+  if (Date.now() >= rec.end_time) {
+    const recovered = recoveryPaths(id);
+    if (recovered) await publishCompletedRecording(id, recovered);
+    else updateRecordingIfStatus(id, ['scheduled', 'recording'], {
+      status: 'failed', error: 'Recording window ended before capture started', actual_end: Date.now(),
+    });
+    return;
+  }
+
+  const maxConcurrent = parseConfiguredConcurrency(
+    getConfig('max_concurrent_recordings', String(DEFAULT_MAX_CONCURRENT)),
+    DEFAULT_MAX_CONCURRENT,
+  );
+  if (getCaptureCount() >= maxConcurrent) {
+    logger.warn(`Recording ${id}: capture concurrency temporarily saturated (${maxConcurrent}); leaving scheduled`);
+    return;
+  }
+
   const freeSpace = getFreeDiskSpace(recordingsDir);
   if (freeSpace < 1_073_741_824) {
     updateRecording(id, { status: 'failed', error: 'Insufficient disk space (< 1GB free)' });
@@ -84,223 +293,248 @@ export async function startRecording(id: string): Promise<void> {
     return;
   }
 
-  // Create date-based subdirectory
   const now = new Date();
   const dateDir = path.join(
     recordingsDir,
     String(now.getFullYear()),
     String(now.getMonth() + 1).padStart(2, '0'),
-    String(now.getDate()).padStart(2, '0')
+    String(now.getDate()).padStart(2, '0'),
   );
   fs.mkdirSync(dateDir, { recursive: true });
+  const paths = recordingPaths(recordingsDir, dateDir, id);
+  const attemptIndex = nextCaptureAttemptIndex(discoverRecordingArtifacts(recordingsDir, id), id);
+  const capturePart = buildCaptureSegmentPath(dateDir, id, attemptIndex);
 
-  const outputFile = path.join(dateDir, `${id}.mp4`);
-  const relPath = path.relative(recordingsDir, outputFile);
-
+  const starting = createStartingRecording(id);
   let streamUrl: string;
   try {
     streamUrl = await resolveStreamUrl(rec.channel_id);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Failed to resolve stream URL';
-    updateRecording(id, { status: 'failed', error: msg });
-    logger.error(`Recording ${id}: ${msg}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to resolve stream URL';
+    updateRecordingIfStatus(id, ['scheduled', 'recording'], { status: 'failed', error: message });
+    logger.error(`Recording ${id}: ${message}`);
+    finishStartingRecording(id, starting);
     return;
   }
 
-  logger.info(`Recording ${id}: starting ffmpeg for "${rec.title}" → ${relPath}`);
-
-  const headerArgs: string[] = [];
-  for (const [key, val] of Object.entries(VLC_HEADERS)) {
-    headerArgs.push('-headers', `${key}: ${val}\r\n`);
+  const current = getRecording(id);
+  if (stoppingAll || !current || current.status === 'cancelled') {
+    finishStartingRecording(id, starting);
+    return;
   }
 
-  const ffmpeg = spawn('ffmpeg', [
-    '-reconnect', '1',
-    '-reconnect_streamed', '1',
-    '-reconnect_delay_max', '30',
-    ...headerArgs,
-    '-i', streamUrl,
-    // H.264 CRF 23 (visually transparent) with medium preset for quality/speed balance
-    '-c:v', 'libx264',
-    '-crf', '23',
-    '-preset', 'medium',
-    // Copy audio as-is (already compressed AAC/MP3)
-    '-c:a', 'copy',
-    '-f', 'mp4',
-    '-movflags', '+frag_keyframe+empty_moov',
-    '-y',
-    outputFile,
-  ], {
+  const retryCount = retryCounts.get(id) ?? 0;
+  logger.info(`Recording ${id}: starting stream-copy attempt ${attemptIndex + 1} for "${rec.title}" → ${path.relative(recordingsDir, capturePart)}`);
+  const ffmpeg = spawn('ffmpeg', buildMasterCaptureArgs(streamUrl, capturePart, VLC_HEADERS), {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
-  const active: ActiveRecording = { id, process: ffmpeg, retried: false };
-  activeRecordings.set(id, active);
+  const active = {} as ActiveRecording;
+  const finishAttempt = createOnceFinalizer(async () => {
+    if (activeRecordings.get(id) === active) activeRecordings.delete(id);
+    const recording = getRecording(id);
+    if (!recording || recording.status === 'cancelled') return;
 
-  updateRecording(id, {
-    status: 'recording',
-    actual_start: Date.now(),
-    file_path: relPath,
+    if (active.stopping) {
+      if (active.resumeAfterStop) {
+        updateRecordingIfStatus(id, ['recording'], {
+          status: 'scheduled', actual_end: null, error: null,
+        });
+        return;
+      }
+      await publishCompletedRecording(id, paths);
+      return;
+    }
+
+    const endedAt = Date.now();
+    if (shouldRetryCapture(active.retryCount, endedAt, recording.end_time, active.exitCode)) {
+      retryCounts.set(id, active.retryCount + 1);
+      updateRecordingIfStatus(id, ['recording'], { status: 'scheduled', error: null });
+      logger.warn(`Recording ${id}: ffmpeg exited early with code ${String(active.exitCode)}, retrying once in 10s...`);
+      scheduleRetry(id);
+      return;
+    }
+
+    await publishCompletedRecording(id, paths);
   });
+
+  let resolveDone!: () => void;
+  const done = new Promise<void>(resolve => { resolveDone = resolve; });
+  Object.assign(active, {
+    id,
+    process: ffmpeg,
+    retryCount,
+    stopping: false,
+    resumeAfterStop: false,
+    exitCode: null,
+    finishOnce: finishAttempt,
+    done,
+  });
+  activeRecordings.set(id, active);
+  finishStartingRecording(id, starting);
+
+  const markedRecording = updateRecordingIfStatus(id, ['scheduled', 'recording'], {
+    status: 'recording',
+    actual_start: rec.actual_start ?? Date.now(),
+    actual_end: null,
+    file_path: null,
+    master_file_path: null,
+    derivative_file_path: null,
+    derivative_error: null,
+    error: null,
+  });
+  if (!markedRecording) {
+    ffmpeg.kill('SIGKILL');
+  }
 
   ffmpeg.stderr?.on('data', (data: Buffer) => {
     const line = data.toString().trim();
     if (line) logger.debug(`ffmpeg [${id}]: ${line}`);
   });
-
-  ffmpeg.on('close', (code) => {
-    activeRecordings.delete(id);
-    const recording = getRecording(id);
-    if (!recording) return;
-
-    if (recording.status === 'cancelled') {
-      logger.info(`Recording ${id}: cancelled`);
-      return;
-    }
-
-    // Check if we stopped it intentionally (status already set to completed)
-    if (recording.status === 'completed') {
-      logger.info(`Recording ${id}: completed`);
-      return;
-    }
-
-    if (code === 0 || code === 255) {
-      // Normal exit (255 = SIGINT)
-      finishRecording(id, outputFile);
-    } else {
-      // Unexpected exit — retry once if still within time window
-      const now = Date.now();
-      if (!active.retried && now < recording.end_time) {
-        logger.warn(`Recording ${id}: ffmpeg exited with code ${code}, retrying in 10s...`);
-        active.retried = true;
-        updateRecording(id, { status: 'scheduled' });
-        setTimeout(() => startRecording(id), 10_000);
-      } else {
-        updateRecording(id, {
-          status: 'failed',
-          error: `ffmpeg exited with code ${code}`,
-          actual_end: now,
-        });
-        logger.error(`Recording ${id}: ffmpeg failed with code ${code}`);
-      }
-    }
+  const settle = () => {
+    void active.finishOnce().catch(error => {
+      logger.error(`Recording ${id}: terminal capture handling failed: ${error instanceof Error ? error.message : error}`);
+    }).finally(resolveDone);
+  };
+  ffmpeg.once('close', code => {
+    active.exitCode = code;
+    settle();
   });
-
-  ffmpeg.on('error', (err) => {
-    activeRecordings.delete(id);
-    updateRecording(id, {
-      status: 'failed',
-      error: err.message,
-      actual_end: Date.now(),
-    });
-    logger.error(`Recording ${id}: ffmpeg error: ${err.message}`);
+  ffmpeg.once('error', error => {
+    logger.error(`Recording ${id}: ffmpeg error: ${error.message}`);
+    settle();
   });
 }
 
-function finishRecording(id: string, outputFile: string): void {
-  let fileSize = 0;
-  let duration = 0;
-  try {
-    const stat = fs.statSync(outputFile);
-    fileSize = stat.size;
-  } catch { /* file may not exist */ }
+export async function stopRecording(id: string, preserveIfFuture = false): Promise<void> {
+  const starting = startingRecordings.get(id);
+  if (starting) await starting.done;
 
-  const rec = getRecording(id);
-  if (rec?.actual_start) {
-    duration = Math.round((Date.now() - rec.actual_start) / 1000);
-  }
-
-  updateRecording(id, {
-    status: 'completed',
-    actual_end: Date.now(),
-    file_size: fileSize,
-    duration,
-  });
-  logger.info(`Recording ${id}: completed (${(fileSize / 1e6).toFixed(1)}MB, ${duration}s)`);
-}
-
-export async function stopRecording(id: string): Promise<void> {
   const active = activeRecordings.get(id);
   if (!active) {
-    logger.warn(`Recording ${id}: not active, cannot stop`);
+    const finalizing = finalizingRecordings.get(id);
+    if (finalizing) await finalizing.promise;
     return;
   }
 
   logger.info(`Recording ${id}: stopping...`);
-
-  // Send SIGINT for graceful stop
+  const recording = getRecording(id);
+  active.resumeAfterStop = preserveIfFuture && Boolean(recording && Date.now() < recording.end_time);
+  active.stopping = true;
   active.process.kill('SIGINT');
-
-  // Mark as completed before ffmpeg exits
-  const rec = getRecording(id);
-  const recordingsDir = getRecordingsDir();
-  const outputFile = rec?.file_path ? path.join(recordingsDir, rec.file_path) : null;
-
-  // Wait up to 10s for graceful exit, then SIGKILL
   const forceKillTimer = setTimeout(() => {
-    if (activeRecordings.has(id)) {
+    if (activeRecordings.get(id) === active) {
       logger.warn(`Recording ${id}: force killing ffmpeg`);
       active.process.kill('SIGKILL');
     }
-  }, 10_000);
-
-  active.process.on('close', () => {
+  }, FORCE_KILL_DELAY_MS);
+  forceKillTimer.unref?.();
+  try {
+    await active.done;
+  } finally {
     clearTimeout(forceKillTimer);
-    if (outputFile) finishRecording(id, outputFile);
-    else updateRecording(id, { status: 'completed', actual_end: Date.now() });
-  });
+  }
 }
 
-export async function cancelRecording(id: string, deleteFile = false): Promise<void> {
+export async function cancelRecording(id: string, _deleteFile = false): Promise<void> {
   updateRecording(id, { status: 'cancelled', actual_end: Date.now() });
+  retryCounts.delete(id);
+  const retryTimer = retryTimers.get(id);
+  if (retryTimer) clearTimeout(retryTimer);
+  retryTimers.delete(id);
+
+  const starting = startingRecordings.get(id);
+  if (starting) await starting.done;
 
   const active = activeRecordings.get(id);
   if (active) {
     active.process.kill('SIGKILL');
-    activeRecordings.delete(id);
+    await active.done;
   }
 
-  if (deleteFile) {
-    const rec = getRecording(id);
-    if (rec?.file_path) {
-      const fullPath = path.join(getRecordingsDir(), rec.file_path);
-      try { fs.unlinkSync(fullPath); } catch { /* ok */ }
-    }
+  const finalizing = finalizingRecordings.get(id);
+  if (finalizing) {
+    finalizing.controller.abort();
+    await finalizing.promise;
   }
 
-  logger.info(`Recording ${id}: cancelled${deleteFile ? ' (file deleted)' : ''}`);
+  // Capture/finalization artifacts are unpublished and unusable after cancellation;
+  // always remove them so cancelled rows cannot strand disk space. `deleteFile`
+  // is retained for API compatibility and logging only.
+  removeRecordingArtifacts(id);
+  logger.info(`Recording ${id}: cancelled${_deleteFile ? ' (file deleted)' : ''}`);
 }
 
-export function deleteRecordingFile(id: string): void {
-  const rec = getRecording(id);
-  if (rec?.file_path) {
-    const fullPath = path.join(getRecordingsDir(), rec.file_path);
-    try { fs.unlinkSync(fullPath); } catch { /* ok */ }
-  }
+/** Await any writer for this recording, then remove every exact-id artifact. */
+export async function deleteRecordingFile(id: string): Promise<number> {
+  await cancelCommercialAnalysis(id);
+  if (isRecordingActive(id)) await cancelRecording(id, false);
+  return removeRecordingArtifacts(id);
 }
 
-/** Get full path for a recording file */
+/** Stop captures gracefully and await capture finalization before database shutdown. */
+export async function stopAllRecordings(): Promise<void> {
+  stoppingAll = true;
+  for (const timer of retryTimers.values()) clearTimeout(timer);
+  retryTimers.clear();
+  await Promise.all([...startingRecordings.values()].map(starting => starting.done));
+  await Promise.all([...activeRecordings.keys()].map(id => stopRecording(id, true)));
+  await Promise.all([...finalizingRecordings.values()].map(finalizing => finalizing.promise));
+}
+
+/** Get full path for the preferred recording playback file. */
 export function getRecordingFilePath(id: string): string | null {
   const rec = getRecording(id);
   if (!rec?.file_path) return null;
-  const fullPath = path.join(getRecordingsDir(), rec.file_path);
-  if (!fs.existsSync(fullPath)) return null;
+  const fullPath = path.resolve(getRecordingsDir(), rec.file_path);
+  const root = path.resolve(getRecordingsDir());
+  if (!fullPath.startsWith(`${root}${path.sep}`) || !fs.existsSync(fullPath)) return null;
   return fullPath;
 }
 
-/** Recover recordings that were active when the server stopped */
+/** Get full path for the finalized master transport stream. */
+export function getRecordingMasterFilePath(id: string): string | null {
+  const rec = getRecording(id);
+  if (!rec?.master_file_path) return null;
+  const fullPath = path.resolve(getRecordingsDir(), rec.master_file_path);
+  const root = path.resolve(getRecordingsDir());
+  if (!fullPath.startsWith(`${root}${path.sep}`) || !fs.existsSync(fullPath)) return null;
+  return fullPath;
+}
+
+/** Recover captures and finalization interrupted by a server stop. */
 export async function recoverRecordings(): Promise<void> {
-  const active = getRecordingsByStatus('recording');
+  const interrupted = [
+    ...getRecordingsByStatus('recording'),
+    ...getRecordingsByStatus('finalizing'),
+  ];
+  const cancelled = getRecordingsByStatus('cancelled');
+  for (const rec of cancelled) removeRecordingArtifacts(rec.id);
   const now = Date.now();
 
-  for (const rec of active) {
-    if (now < rec.end_time) {
+  // Restore every still-live capture first so the scheduler can resume it on its
+  // immediate startup tick, regardless of how long older media takes to finish.
+  for (const rec of interrupted) {
+    if (rec.status === 'recording' && now < rec.end_time) {
+      normalizeLegacyCapturePart(rec.id);
       logger.info(`Recovering recording ${rec.id}: "${rec.title}" (still within time window)`);
-      updateRecording(rec.id, { status: 'scheduled' });
-      // Will be picked up by scheduler on next tick
+      updateRecordingIfStatus(rec.id, ['recording'], { status: 'scheduled', error: null });
+    }
+  }
+
+  for (const rec of interrupted) {
+    if (rec.status === 'recording' && now < rec.end_time) continue;
+    normalizeLegacyCapturePart(rec.id);
+    const paths = recoveryPaths(rec.id);
+    if (paths) {
+      logger.info(`Recovering recording ${rec.id}: finalizing captured media`);
+      updateRecordingIfStatus(rec.id, ['recording'], { status: 'finalizing', error: null });
+      void publishCompletedRecording(rec.id, paths);
     } else {
-      logger.warn(`Recording ${rec.id}: was active but past end time, marking failed`);
-      updateRecording(rec.id, { status: 'failed', error: 'Server restarted after end time', actual_end: now });
+      logger.warn(`Recording ${rec.id}: interrupted without recoverable media, marking failed`);
+      updateRecordingIfStatus(rec.id, ['recording', 'finalizing'], {
+        status: 'failed', error: 'Server restarted without recoverable capture data', actual_end: now,
+      });
     }
   }
 }

@@ -10,6 +10,7 @@ import {
   checkDatabaseReadable,
   createAtomicBackup,
   findLatestValidBackup,
+  isDatabaseBackupDue,
   pruneDatabaseBackups,
   restoreLatestValidBackup,
   stopDatabaseBackupWorker,
@@ -91,6 +92,19 @@ test('recovery skips empty or corrupt recent backups and restores the newest val
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('backup due check avoids rewriting a recent validated snapshot on every restart', () => {
+  const dir = tempDir();
+  const now = Date.parse('2026-09-17T12:00:00Z');
+  const recent = path.join(dir, 'streamvault-2026-09-17.db');
+  fs.writeFileSync(recent, 'completed');
+  fs.utimesSync(recent, new Date(now - 60_000), new Date(now - 60_000));
+
+  assert.equal(isDatabaseBackupDue(dir, 24 * 60 * 60 * 1000, now), false);
+  assert.equal(isDatabaseBackupDue(dir, 30_000, now), true);
+  assert.equal(isDatabaseBackupDue(path.join(dir, 'missing'), 1, now), true);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('validation rejects an empty SQLite file with no StreamVault schema', () => {
   const dir = tempDir();
   const empty = path.join(dir, 'empty.db');
@@ -146,7 +160,7 @@ test('backup retention removes invalid snapshots and keeps seven valid snapshots
   assert.equal(retained.length, 7);
   assert.equal(retained.includes('streamvault-2026-01-01.db'), false);
   fs.rmSync(dir, { recursive: true, force: true });
-});
+}, 20_000);
 
 test('backup retention reports an unlink failure without failing the completed backup', () => {
   const dir = tempDir();

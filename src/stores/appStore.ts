@@ -14,9 +14,11 @@ interface AppState {
   selectedGroup: string | null;
   selectedSeries: Channel | null;
   selectedMovie: Channel | null;
+  selectedRecordingId: string | null;
   showExitDialog: boolean;
   showToast: boolean;
   toastMessage: string;
+  navigationBlocker: (() => boolean) | null;
   /** Search/filter state keyed by view name (channels, movies, series) */
   browseStates: Record<string, BrowseState>;
   /** Views that have been visited and should stay mounted */
@@ -24,10 +26,13 @@ interface AppState {
 }
 
 interface AppActions {
-  navigate: (view: View) => void;
-  navigateToSeries: (series: Channel) => void;
-  navigateToMovie: (movie: Channel) => void;
-  goBack: () => void;
+  navigate: (view: View) => boolean;
+  navigateToSeries: (series: Channel) => boolean;
+  navigateToMovie: (movie: Channel) => boolean;
+  navigateToRecording: (recordingId: string) => boolean;
+  goBack: () => boolean;
+  handlePopNavigation: () => boolean;
+  setNavigationBlocker: (blocker: (() => boolean) | null) => () => void;
   selectGroup: (group: string) => void;
   clearGroup: () => void;
   showExitConfirm: () => void;
@@ -68,13 +73,17 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
   selectedGroup: null,
   selectedSeries: initialSeries,
   selectedMovie: null,
+  selectedRecordingId: null,
   showExitDialog: false,
   showToast: false,
   toastMessage: '',
+  navigationBlocker: null,
   browseStates: initialBrowse,
   visitedViews: initialUrl.view !== 'home' ? { [initialUrl.view]: true } : {},
 
   navigate: (view: View) => {
+    const blocker = get().navigationBlocker;
+    if (blocker && !blocker()) return false;
     const { currentView, viewStack } = get();
     pushState(view);
     set({
@@ -84,9 +93,12 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
       selectedGroup: null,
       showExitDialog: false,
     });
+    return true;
   },
 
   navigateToSeries: (series: Channel) => {
+    const blocker = get().navigationBlocker;
+    if (blocker && !blocker()) return false;
     const { currentView, viewStack } = get();
     pushState('seriesDetail');
     set({
@@ -95,9 +107,12 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
       selectedSeries: series,
       showExitDialog: false,
     });
+    return true;
   },
 
   navigateToMovie: (movie: Channel) => {
+    const blocker = get().navigationBlocker;
+    if (blocker && !blocker()) return false;
     const { currentView, viewStack } = get();
     pushState('movieDetail');
     set({
@@ -106,6 +121,21 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
       selectedMovie: movie,
       showExitDialog: false,
     });
+    return true;
+  },
+
+  navigateToRecording: (recordingId: string) => {
+    const blocker = get().navigationBlocker;
+    if (blocker && !blocker()) return false;
+    const { currentView, viewStack } = get();
+    pushState('recordingDetail');
+    set({
+      viewStack: [...viewStack, currentView],
+      currentView: 'recordingDetail',
+      selectedRecordingId: recordingId,
+      showExitDialog: false,
+    });
+    return true;
   },
 
   selectGroup: (group: string) => {
@@ -118,6 +148,8 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
   },
 
   goBack: () => {
+    const blocker = get().navigationBlocker;
+    if (blocker && !blocker()) return false;
     const { currentView, viewStack, selectedGroup } = get();
 
     // If we have a view stack, pop from it
@@ -129,15 +161,16 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
         currentView: prevView,
         selectedSeries: currentView === 'seriesDetail' ? null : get().selectedSeries,
         selectedMovie: currentView === 'movieDetail' ? null : get().selectedMovie,
+        selectedRecordingId: currentView === 'recordingDetail' ? null : get().selectedRecordingId,
         showExitDialog: false,
       });
-      return;
+      return true;
     }
 
     // If inside a group, go back to group list
     if (selectedGroup) {
       set({ selectedGroup: null });
-      return;
+      return true;
     }
 
     // From a content view, go home
@@ -148,11 +181,28 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
         selectedGroup: null,
         showExitDialog: false,
       });
-      return;
+      return true;
     }
 
     // Already on home - show exit dialog
     set({ showExitDialog: true });
+    return true;
+  },
+
+  handlePopNavigation: () => {
+    const moved = get().goBack();
+    if (!moved) {
+      const { currentView, selectedGroup } = get();
+      history.pushState({ view: currentView, group: selectedGroup || null }, '');
+    }
+    return moved;
+  },
+
+  setNavigationBlocker: (blocker) => {
+    set({ navigationBlocker: blocker });
+    return () => {
+      if (get().navigationBlocker === blocker) set({ navigationBlocker: null });
+    };
   },
 
   showExitConfirm: () => {

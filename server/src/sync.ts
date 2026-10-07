@@ -13,6 +13,7 @@ import { logger } from './logger.js';
 import { fetchXtreamCategories, fetchAllCategoryStreams, fetchEpgForStreams } from './xtream.js';
 import type { XtreamConfig } from './xtream.js';
 import { matchRules } from './recording-scheduler.js';
+import { nextScheduledCrawl, shouldCrawlAtStartup } from './crawl-schedule.js';
 
 export type SyncPhase = 'idle' | 'fetching-playlist' | 'parsing-playlist' | 'fetching-epg' | 'parsing-epg' | 'done' | 'error';
 
@@ -216,7 +217,7 @@ export function cancelCrawl(): void {
   logger.info('Crawl cancelled');
 }
 
-/** Schedule crawl 3 times a day at 3 AM, 11 AM, 7 PM (every 8 hours) */
+/** Schedule the expensive full catalog crawl once a day during the quietest hour. */
 function scheduleNextCrawl(): void {
   if (scheduledCrawlTimer) { clearTimeout(scheduledCrawlTimer); scheduledCrawlTimer = null; }
 
@@ -224,25 +225,8 @@ function scheduleNextCrawl(): void {
   if (inputMode !== 'xtream') return;
   if (!getXtreamConfig()) return;
 
-  const crawlHours = [3, 11, 19]; // 3 AM, 11 AM, 7 PM
   const now = new Date();
-  let nextCrawl: Date | null = null;
-
-  // Find the next crawl time today or tomorrow
-  for (const hour of crawlHours) {
-    const candidate = new Date(now);
-    candidate.setHours(hour, 0, 0, 0);
-    if (candidate.getTime() > now.getTime()) {
-      nextCrawl = candidate;
-      break;
-    }
-  }
-  if (!nextCrawl) {
-    // All today's slots have passed, schedule first slot tomorrow
-    nextCrawl = new Date(now);
-    nextCrawl.setDate(nextCrawl.getDate() + 1);
-    nextCrawl.setHours(crawlHours[0], 0, 0, 0);
-  }
+  const nextCrawl = nextScheduledCrawl(now);
 
   const msUntil = nextCrawl.getTime() - now.getTime();
   const hoursUntil = (msUntil / 3600000).toFixed(1);
@@ -474,14 +458,17 @@ export function startupSync(): void {
   // If we have no cached streams but have categories, start a background crawl
   const inputMode = getConfig('input_mode', 'manual');
   if (inputMode === 'xtream') {
-    const lastCrawl = parseInt(getConfig('last_crawl_time', '0'), 10);
     const channelCount = getChannelCount();
-    if (channelCount === 0 || (now - lastCrawl) > 8 * 60 * 60 * 1000) {
-      // No streams cached or crawl is stale — start background crawl
-      logger.info('Starting background stream crawl (no cached streams or crawl stale)...');
+    if (shouldCrawlAtStartup(channelCount)) {
+      // Populate a new installation, but never turn a service restart into a
+      // repeat of an interrupted full crawl. Cached data remains usable until
+      // the next quiet-hours run.
+      logger.info('Starting background stream crawl (catalog is empty)...');
       setTimeout(() => startCrawl(), 5000); // Delay 5s to let startup finish
     } else {
-      logger.info(`Streams cached (${channelCount}), last crawl ${((now - lastCrawl) / 3600000).toFixed(1)}h ago`);
+      const lastCrawl = parseInt(getConfig('last_crawl_time', '0'), 10);
+      const age = lastCrawl > 0 ? `${((now - lastCrawl) / 3600000).toFixed(1)}h ago` : 'not recorded';
+      logger.info(`Streams cached (${channelCount}), last crawl ${age}; deferring refresh to quiet hours`);
     }
     scheduleNextCrawl();
   }

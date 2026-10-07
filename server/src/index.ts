@@ -18,25 +18,51 @@ function setStreamSocketOpts(res: import('express').Response): void {
 import {
   getChannels, getChannelById, getChannelsByIds, getChannelsByGroup, getChannelCount, getChannelCountByGroup, getGroups, getRegions,
   getPrograms, getProgramsByChannelIds, getProgramsByChannel, saveProgramsForChannels,
+  getProgramByAiringKey, getProgramByLegacyIdentity,
   getConfig, setConfig,
   getCategories, getCategoryByName, getContentTypeCounts,
   saveChannelsForCategory, markCategoryFetched,
   searchChannelsByName, getChannelCountByContentType,
   getChannelsByContentTypeCursor, getChannelsByGroupCursor,
-  insertRecording, updateRecording, deleteRecording, getRecording, getRecordings,
+  insertRecording, insertRecordingForAiring, updateRecording, deleteRecording, getRecording, getRecordings,
+  getCommercialSegments, queueCommercialAnalysis, replaceCommercialSegmentsIfIdle,
   insertRecordingRule, updateRecordingRule, deleteRecordingRule, getRecordingRules, getRecordingRule,
-  closeDatabase, backupDatabase, getDatabaseHealth,
+  closeDatabase, backupDatabaseIfDue, getDatabaseHealth,
 } from './db.js';
-import type { DBRecording } from './db.js';
+import type { DBRecording, DBRecordingRule } from './db.js';
 import { getStatus, sync, cancelSync, startupSync, startCrawl, cancelCrawl } from './sync.js';
 import { fetchXtreamStreamsByCategory, fetchXtreamShortEpg, fetchAllCategoryStreams, fetchXtreamSeriesInfo, fetchXtreamVodInfo } from './xtream.js';
 import type { XtreamConfig } from './xtream.js';
 import { logger } from './logger.js';
 import { requestStream, pickHeader, VLC_HEADERS } from './stream-utils.js';
 import { prewarmUpstream } from './http-agent.js';
-import { startRecording, stopRecording, cancelRecording, deleteRecordingFile, getRecordingFilePath } from './recorder.js';
-import { startScheduler, getSchedulerStatus, matchRules } from './recording-scheduler.js';
-import { recoverRecordings } from './recorder.js';
+import {
+  startRecording,
+  stopRecording,
+  stopAllRecordings,
+  cancelRecording,
+  deleteRecordingFile,
+  getRecordingFilePath,
+  getRecordingMasterFilePath,
+  recoverRecordings,
+} from './recorder.js';
+import { startScheduler, stopScheduler, getSchedulerStatus, matchRules } from './recording-scheduler.js';
+import {
+  isCommercialAnalysisAvailable,
+  notifyCommercialAnalysisQueued,
+  startCommercialAnalysisWorker,
+  stopCommercialAnalysisWorker,
+} from './commercial-analysis-worker.js';
+import {
+  deriveProgramAiringKey,
+  mapCommercialSegmentsResponse,
+  mapRecordingForApi,
+  parseBooleanConfig,
+  validateCommercialSegmentReplacement,
+  validateCommercialSkipOverride,
+  validateFromProgramLookup,
+  validateRecordingRulePayload,
+} from './recording-api.js';
 import { rewriteHlsManifest } from './hls.js';
 import { buildFragmentedMp4Args } from './vod-remux.js';
 import { buildBrowserCompatibleVideoArgs } from './browser-transcode.js';
@@ -59,7 +85,15 @@ import {
   type ProbedSubtitleTrack,
 } from './subtitles.js';
 import { parseByteRange } from './ranges.js';
-import { allowedProxyHostsFromConfig, maskConfigResponse, normalizeAllowedOrigins, requireAuth, validateExternalHttpUrl } from './security.js';
+import {
+  allowedProxyHostsFromConfig,
+  canAccessRecordingStream,
+  createRecordingPlaybackTicket,
+  maskConfigResponse,
+  normalizeAllowedOrigins,
+  requireAuth,
+  validateExternalHttpUrl,
+} from './security.js';
 import { isDatabaseCorruptionError, stopDatabaseBackupWorker } from './db-lifecycle.js';
 import {
   ConcurrentStreamLimiter,
@@ -1533,7 +1567,7 @@ app.get('/api/recordings', requireAuth, (_req, res) => {
     return;
   }
   const recordings = getRecordings({ status, limit, offset });
-  res.json({ recordings });
+  res.json({ recordings: recordings.map(mapRecordingForApi) });
 });
 
 app.post('/api/recordings', requireAuth, (req, res) => {
@@ -1571,25 +1605,35 @@ app.post('/api/recordings', requireAuth, (req, res) => {
     });
   }
 
-  res.json({ recording });
+  res.json({ recording: mapRecordingForApi(getRecording(id) ?? recording) });
 });
 
 app.post('/api/recordings/from-program', requireAuth, (req, res) => {
-  const { channelId, programStart, programStop, title } = req.body;
-  if (!channelId || !Number.isFinite(programStart) || !Number.isFinite(programStop) || programStop <= programStart) {
-    res.status(400).json({ error: 'channelId, programStart, and programStop required' });
+  let lookup: ReturnType<typeof validateFromProgramLookup>;
+  try {
+    lookup = validateFromProgramLookup(req.body);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
     return;
   }
-  const channel = getChannelById(channelId);
+  const program = lookup.kind === 'airingKey'
+    ? getProgramByAiringKey(lookup.airingKey)
+    : getProgramByLegacyIdentity(lookup.channelId, lookup.programStart, lookup.programStop);
+  if (!program) {
+    res.status(404).json({ error: 'Program airing not found' });
+    return;
+  }
+  const airingKey = deriveProgramAiringKey(program);
+  const channel = getChannelById(program.channel_id);
   const id = randomUUID();
   const recording: DBRecording = {
     id,
-    channel_id: channelId,
-    channel_name: channel?.name || channelId,
-    title: title || 'Recording',
+    channel_id: program.channel_id,
+    channel_name: channel?.name || program.channel_id,
+    title: program.title || 'Recording',
     status: 'scheduled',
-    start_time: programStart,
-    end_time: programStop,
+    start_time: program.start_time,
+    end_time: program.stop_time,
     actual_start: null,
     actual_end: null,
     file_path: null,
@@ -1597,18 +1641,20 @@ app.post('/api/recordings/from-program', requireAuth, (req, res) => {
     duration: 0,
     error: null,
     rule_id: null,
-    program_title: title || null,
+    program_title: program.title || null,
+    airing_key: airingKey,
+    content_key: program.content_key ?? null,
     created_at: Date.now(),
   };
-  insertRecording(recording);
+  const inserted = insertRecordingForAiring(recording);
 
-  if (programStart <= Date.now()) {
+  if (inserted.id === id && program.start_time <= Date.now()) {
     startRecording(id).catch(err => {
       logger.error(`Failed to start immediate recording: ${err}`);
     });
   }
 
-  res.json({ recording });
+  res.json({ recording: mapRecordingForApi(getRecording(inserted.id) ?? inserted) });
 });
 
 app.get('/api/recordings/:id', requireAuth, (req, res) => {
@@ -1618,55 +1664,158 @@ app.get('/api/recordings/:id', requireAuth, (req, res) => {
     res.status(404).json({ error: 'Recording not found' });
     return;
   }
-  res.json({ recording });
+  res.json({ recording: mapRecordingForApi(recording) });
 });
 
-app.delete('/api/recordings/:id', requireAuth, (req, res) => {
+app.get('/api/recordings/:id/commercial-segments', requireAuth, (req, res) => {
   const recordingId = String(req.params.id);
   const recording = getRecording(recordingId);
   if (!recording) {
     res.status(404).json({ error: 'Recording not found' });
     return;
   }
-  if (recording.status === 'recording') {
-    cancelRecording(recordingId, true).catch(() => {});
-  } else {
-    deleteRecordingFile(recordingId);
+  const segments = getCommercialSegments(recordingId);
+  const globalAutoSkip = parseBooleanConfig(getConfig('commercial_auto_skip', 'false'), false);
+  res.json(mapCommercialSegmentsResponse(recording, segments, globalAutoSkip));
+});
+
+app.post('/api/recordings/:id/analyze', requireAuth, (req, res) => {
+  const recordingId = String(req.params.id);
+  const recording = getRecording(recordingId);
+  if (!recording) {
+    res.status(404).json({ error: 'Recording not found' });
+    return;
   }
+  if (recording.status !== 'completed' || !getRecordingMasterFilePath(recordingId)) {
+    res.status(409).json({ error: 'Commercial analysis requires a completed master recording' });
+    return;
+  }
+  if (recording.analysis_state === 'queued' || recording.analysis_state === 'analyzing') {
+    res.status(409).json({ error: 'Commercial analysis is already queued or running' });
+    return;
+  }
+  if (!isCommercialAnalysisAvailable()) {
+    res.status(503).json({ error: 'Comskip unavailable; commercial analysis is not installed' });
+    return;
+  }
+  if (!queueCommercialAnalysis(recordingId, Date.now())) {
+    res.status(409).json({ error: 'Commercial analysis is already queued or running' });
+    return;
+  }
+  notifyCommercialAnalysisQueued();
+  res.status(202).json({ status: 'queued' });
+});
+
+app.put('/api/recordings/:id/commercial-segments', requireAuth, (req, res) => {
+  const recordingId = String(req.params.id);
+  const recording = getRecording(recordingId);
+  if (!recording) {
+    res.status(404).json({ error: 'Recording not found' });
+    return;
+  }
+  if (recording.analysis_state === 'queued' || recording.analysis_state === 'analyzing') {
+    res.status(409).json({ error: 'Commercial segments cannot be edited while analysis is queued or running' });
+    return;
+  }
+  let segments;
+  try {
+    segments = validateCommercialSegmentReplacement(req.body?.segments, recording.duration);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    return;
+  }
+  const nextState = segments.some(segment => segment.reviewState === 'suggested') ? 'review_needed' : 'ready';
+  if (!replaceCommercialSegmentsIfIdle(recordingId, segments, nextState, Date.now())) {
+    res.status(409).json({ error: 'Commercial segments cannot be edited while analysis is queued or running' });
+    return;
+  }
+  const updated = getRecording(recordingId)!;
+  const globalAutoSkip = parseBooleanConfig(getConfig('commercial_auto_skip', 'false'), false);
+  res.json(mapCommercialSegmentsResponse(updated, getCommercialSegments(recordingId), globalAutoSkip));
+});
+
+app.patch('/api/recordings/:id/commercial-skip', requireAuth, (req, res) => {
+  const recordingId = String(req.params.id);
+  const recording = getRecording(recordingId);
+  if (!recording) {
+    res.status(404).json({ error: 'Recording not found' });
+    return;
+  }
+  let enabled: boolean | null;
+  try {
+    enabled = validateCommercialSkipOverride(req.body?.enabled);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    return;
+  }
+  updateRecording(recordingId, { commercial_skip_override: enabled === null ? null : enabled ? 1 : 0 });
+  const updated = getRecording(recordingId)!;
+  const globalAutoSkip = parseBooleanConfig(getConfig('commercial_auto_skip', 'false'), false);
+  res.json(mapCommercialSegmentsResponse(updated, getCommercialSegments(recordingId), globalAutoSkip));
+});
+
+app.delete('/api/recordings/:id', requireAuth, async (req, res) => {
+  const recordingId = String(req.params.id);
+  const recording = getRecording(recordingId);
+  if (!recording) {
+    res.status(404).json({ error: 'Recording not found' });
+    return;
+  }
+  await deleteRecordingFile(recordingId);
   deleteRecording(recordingId);
   res.json({ ok: true });
 });
 
-app.post('/api/recordings/:id/cancel', requireAuth, (req, res) => {
+app.post('/api/recordings/:id/cancel', requireAuth, async (req, res) => {
   const recordingId = String(req.params.id);
   const recording = getRecording(recordingId);
   if (!recording) {
     res.status(404).json({ error: 'Recording not found' });
     return;
   }
-  if (recording.status === 'recording') {
-    cancelRecording(recordingId).catch(() => {});
-  } else if (recording.status === 'scheduled') {
-    updateRecording(recordingId, { status: 'cancelled' });
+  if (['scheduled', 'recording', 'finalizing'].includes(recording.status)) {
+    await cancelRecording(recordingId, true);
   }
   res.json({ ok: true });
 });
 
-app.post('/api/recordings/:id/stop', requireAuth, (req, res) => {
+app.post('/api/recordings/:id/stop', requireAuth, async (req, res) => {
   const recordingId = String(req.params.id);
   const recording = getRecording(recordingId);
   if (!recording) {
     res.status(404).json({ error: 'Recording not found' });
     return;
   }
-  if (recording.status === 'recording') {
-    stopRecording(recordingId).catch(() => {});
+  if (recording.status === 'recording' || recording.status === 'finalizing') {
+    await stopRecording(recordingId);
   }
   res.json({ ok: true });
+});
+
+app.post('/api/recordings/:id/playback-ticket', requireAuth, (req, res) => {
+  const recordingId = String(req.params.id);
+  if (!getRecordingFilePath(recordingId)) {
+    res.status(404).json({ error: 'Recording file not found' });
+    return;
+  }
+  const authToken = process.env.STREAMVAULT_AUTH_TOKEN;
+  const directUrl = `/api/recordings/${encodeURIComponent(recordingId)}/stream`;
+  if (!authToken) {
+    res.json({ url: directUrl, expiresAt: Date.now() + 60_000 });
+    return;
+  }
+  const { ticket, expiresAt } = createRecordingPlaybackTicket(recordingId, authToken);
+  res.json({ url: `${directUrl}?ticket=${encodeURIComponent(ticket)}`, expiresAt });
 });
 
 app.get('/api/recordings/:id/stream', (req, res) => {
-  const filePath = getRecordingFilePath(String(req.params.id));
+  const recordingId = String(req.params.id);
+  const ticket = typeof req.query.ticket === 'string' ? req.query.ticket : undefined;
+  if (!canAccessRecordingStream(recordingId, process.env.STREAMVAULT_AUTH_TOKEN, ticket)) {
+    res.status(401).json({ error: 'Valid playback ticket required' });
+    return;
+  }
+  const filePath = getRecordingFilePath(recordingId);
   if (!filePath) {
     res.status(404).json({ error: 'Recording file not found' });
     return;
@@ -1720,26 +1869,26 @@ app.get('/api/recording-rules', requireAuth, (_req, res) => {
 });
 
 app.post('/api/recording-rules', requireAuth, (req, res) => {
-  const { channelId, channelName, matchTitle, matchType, paddingBefore, paddingAfter, maxRecordings } = req.body;
-  if (!channelId || !matchTitle) {
-    res.status(400).json({ error: 'channelId and matchTitle required' });
-    return;
-  }
-  if (matchType !== undefined && !['contains', 'exact', 'startsWith'].includes(matchType)) {
-    res.status(400).json({ error: 'Invalid matchType' });
+  let payload: ReturnType<typeof validateRecordingRulePayload>;
+  try {
+    payload = validateRecordingRulePayload(req.body, false);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
     return;
   }
   const id = randomUUID();
   insertRecordingRule({
     id,
-    channel_id: channelId,
-    channel_name: channelName || channelId,
-    match_title: matchTitle,
-    match_type: matchType || 'contains',
-    enabled: 1,
-    padding_before: paddingBefore ?? 120_000,
-    padding_after: paddingAfter ?? 300_000,
-    max_recordings: maxRecordings ?? 0,
+    channel_id: payload.channel_id!,
+    channel_name: payload.channel_name!,
+    match_title: payload.match_title!,
+    match_type: payload.match_type!,
+    enabled: payload.enabled ?? 1,
+    padding_before: payload.padding_before!,
+    padding_after: payload.padding_after!,
+    max_recordings: payload.max_recordings!,
+    airing_policy: 'every',
+    repeat_policy: payload.repeat_policy as DBRecordingRule['repeat_policy'],
     created_at: Date.now(),
   });
   // Immediately check for matches
@@ -1754,20 +1903,14 @@ app.put('/api/recording-rules/:id', requireAuth, (req, res) => {
     res.status(404).json({ error: 'Rule not found' });
     return;
   }
-  const updates: Record<string, unknown> = {};
-  if (req.body.matchTitle !== undefined) updates.match_title = req.body.matchTitle;
-  if (req.body.matchType !== undefined) {
-    if (!['contains', 'exact', 'startsWith'].includes(req.body.matchType)) {
-      res.status(400).json({ error: 'Invalid matchType' });
-      return;
-    }
-    updates.match_type = req.body.matchType;
+  let updates: ReturnType<typeof validateRecordingRulePayload>;
+  try {
+    updates = validateRecordingRulePayload(req.body, true);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    return;
   }
-  if (req.body.enabled !== undefined) updates.enabled = req.body.enabled ? 1 : 0;
-  if (req.body.paddingBefore !== undefined) updates.padding_before = req.body.paddingBefore;
-  if (req.body.paddingAfter !== undefined) updates.padding_after = req.body.paddingAfter;
-  if (req.body.maxRecordings !== undefined) updates.max_recordings = req.body.maxRecordings;
-  updateRecordingRule(ruleId, updates);
+  updateRecordingRule(ruleId, updates as Partial<Omit<DBRecordingRule, 'id'>>);
   res.json({ rule: getRecordingRule(ruleId) });
 });
 
@@ -1787,11 +1930,16 @@ app.get('/api/config', requireAuth, (_req, res) => {
     xtreamUsername: getConfig('xtream_username'),
     xtreamPassword: getConfig('xtream_password'),
     syncInterval: getConfig('sync_interval', '24h'),
+    commercialAutoSkip: parseBooleanConfig(getConfig('commercial_auto_skip', 'false'), false),
   }));
 });
 
 app.put('/api/config', requireAuth, (req, res) => {
-  const { inputMode, playlistUrl, epgUrl, xtreamServer, xtreamUsername, xtreamPassword, syncInterval } = req.body;
+  const { inputMode, playlistUrl, epgUrl, xtreamServer, xtreamUsername, xtreamPassword, syncInterval, commercialAutoSkip } = req.body;
+  if (commercialAutoSkip !== undefined && typeof commercialAutoSkip !== 'boolean') {
+    res.status(400).json({ error: 'commercialAutoSkip must be a boolean' });
+    return;
+  }
   if (inputMode !== undefined && !['xtream', 'manual'].includes(inputMode)) {
     res.status(400).json({ error: 'Invalid inputMode' });
     return;
@@ -1816,6 +1964,7 @@ app.put('/api/config', requireAuth, (req, res) => {
   if (xtreamUsername !== undefined) setConfig('xtream_username', xtreamUsername);
   if (xtreamPassword !== undefined && xtreamPassword !== '') setConfig('xtream_password', xtreamPassword);
   if (syncInterval !== undefined) setConfig('sync_interval', syncInterval);
+  if (commercialAutoSkip !== undefined) setConfig('commercial_auto_skip', commercialAutoSkip ? 'true' : 'false');
   res.json({ ok: true });
 });
 
@@ -1893,25 +2042,32 @@ app.get('/{*path}', (req, res) => {
 
 // ---------- Start ----------
 
+const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const STARTUP_BACKUP_DELAY_MS = 10 * 60 * 1000;
+
 const httpServer = app.listen(PORT, '0.0.0.0', () => {
   logger.info(`StreamVault server listening on http://0.0.0.0:${PORT}`);
   startupSync();
   // Prewarm DNS+TLS to the Xtream upstream so first user click hits a warm socket
   const xtreamServer = getConfig('xtream_server');
   if (xtreamServer) prewarmUpstream(xtreamServer);
-  // Start recording scheduler and recover any interrupted recordings
+  // Start recording scheduler, recover interrupted recordings, and resume analysis.
+  startCommercialAnalysisWorker();
   recoverRecordings().then(() => {
     startScheduler();
   }).catch(err => {
     logger.error(`Failed to recover recordings: ${err}`);
     startScheduler();
   });
-  // Initial backup on boot, then daily.
-  backupDatabase();
+  // A restart must not immediately rewrite the entire database. After startup
+  // settles, back up only if no recent validated snapshot exists.
+  const startupBackupTimer = setTimeout(() => {
+    void backupDatabaseIfDue(BACKUP_INTERVAL_MS);
+  }, STARTUP_BACKUP_DELAY_MS);
+  startupBackupTimer.unref();
 });
 
-const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const backupTimer = setInterval(() => { backupDatabase(); }, BACKUP_INTERVAL_MS);
+const backupTimer = setInterval(() => { void backupDatabaseIfDue(BACKUP_INTERVAL_MS); }, BACKUP_INTERVAL_MS);
 if (typeof backupTimer.unref === 'function') backupTimer.unref();
 
 // ---------- Graceful shutdown ----------
@@ -1922,11 +2078,14 @@ function shutdown(signal: string): void {
   shuttingDown = true;
   logger.info(`Received ${signal}, shutting down gracefully...`);
   clearInterval(backupTimer);
+  const schedulerShutdown = stopScheduler().catch(error => {
+    logger.warn(`Scheduler shutdown failed: ${error instanceof Error ? error.message : error}`);
+  });
 
   const forceExit = setTimeout(() => {
     logger.error('Shutdown grace period exceeded, forcing exit');
     process.exit(1);
-  }, 8000);
+  }, 30_000);
   forceExit.unref();
 
   const backupShutdown = stopDatabaseBackupWorker().catch(error => {
@@ -1940,7 +2099,14 @@ function shutdown(signal: string): void {
     });
   });
 
-  void Promise.all([backupShutdown, httpShutdown]).then(() => {
+  const recorderAndAnalysisShutdown = (async () => {
+    await Promise.all([schedulerShutdown, stopAllRecordings()]);
+    await stopCommercialAnalysisWorker();
+  })().catch(error => {
+    logger.warn(`Recorder/analysis shutdown failed: ${error instanceof Error ? error.message : error}`);
+  });
+
+  void Promise.all([backupShutdown, httpShutdown, recorderAndAnalysisShutdown]).then(() => {
     closeDatabase();
     clearTimeout(forceExit);
     process.exit(0);

@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useSyncExternalStore } from 'react';
 import type MpegtsType from 'mpegts.js';
 import { usePlayerStore } from '../stores/playerStore';
 import { useChannelStore } from '../stores/channelStore';
@@ -22,10 +22,77 @@ import { isAppleMobile } from '../utils/platform';
 import { getHtml5WatchProgress, getResumePosition } from '../utils/media-progress';
 import { LiveStreamRecovery } from '../utils/live-stream-recovery';
 import { hasDecodedFrameProgress, withLiveStreamOptions } from '../utils/live-stream-options';
+import { isCastConnected } from '../utils/cast';
+import { commercialSkipSession } from '../services/commercialSkipSession';
+import type { CommercialSkipSnapshot } from '../services/commercialSkipSession';
+import {
+  getInitialResumeTarget,
+  retryPlaybackSeek,
+  seekAvPlay,
+  seekHtml5,
+} from '../services/playbackSeek';
+import { useRecordingStore } from '../stores/recordingStore';
+import {
+  getAvPlayClockReading,
+  getHtml5ClockReading,
+  playbackClock,
+  routePlaybackClock,
+} from '../services/playbackClock';
 
 const toast = (msg: string) => useAppStore.getState().showToastMessage(msg);
 
 const PROGRESS_SAVE_INTERVAL = 10_000; // Save progress every 10 seconds
+
+let manualSeekIntentRevision = 0;
+let latestManualSeekTarget: number | null = null;
+
+function registerManualSeekIntent(target: number | null): void {
+  manualSeekIntentRevision += 1;
+  latestManualSeekTarget = target;
+  commercialSkipSession.noteManualSeek();
+}
+
+function resetManualSeekIntent(): void {
+  manualSeekIntentRevision += 1;
+  latestManualSeekTarget = null;
+}
+
+export function seekRecordingPlayback(targetSeconds: number, signal?: AbortSignal): Promise<void> {
+  if (typeof webapis !== 'undefined' && webapis.avplay) {
+    const intentRevisionAtStart = manualSeekIntentRevision;
+    const restoreLatestManualIntent = () => {
+      if (manualSeekIntentRevision === intentRevisionAtStart || latestManualSeekTarget === null) return;
+      try { webapis.avplay.seekTo(latestManualSeekTarget * 1000); } catch { /* the manual seek already reported errors */ }
+    };
+    return retryPlaybackSeek(
+      () => seekAvPlay(webapis.avplay, targetSeconds, 3_000, signal, restoreLatestManualIntent),
+      { signal },
+    );
+  }
+  const video = document.getElementById('av-player') as HTMLVideoElement | null;
+  if (!video) return Promise.reject(new Error('Video element not found'));
+  return retryPlaybackSeek(
+    () => seekHtml5(video, targetSeconds, 3_000, signal),
+    { signal },
+  );
+}
+
+function beginCommercialPlayback(channel: Channel): number {
+  if (!channel.recordingId) return commercialSkipSession.reset();
+  return commercialSkipSession.loadPlayback({
+    recordingId: channel.recordingId,
+    duration: channel.duration ?? 0,
+    seek: seekRecordingPlayback,
+    fetchMetadata: async () => {
+      const metadata = await useRecordingStore.getState().fetchCommercialSegments(
+        channel.recordingId!,
+        { force: true, silent: true },
+      );
+      if (!metadata) throw new Error('Commercial metadata unavailable');
+      return metadata;
+    },
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Module-level state — persists across Player mount/unmount so background
@@ -218,11 +285,19 @@ function setupMediaSession(channelName: string) {
   });
   navigator.mediaSession.setActionHandler('seekbackward', () => {
     const v = getVideo();
-    if (v) v.currentTime = Math.max(0, v.currentTime - 10);
+    if (v) {
+      const target = Math.max(0, v.currentTime - 10);
+      registerManualSeekIntent(target);
+      v.currentTime = target;
+    }
   });
   navigator.mediaSession.setActionHandler('seekforward', () => {
     const v = getVideo();
-    if (v) v.currentTime = Math.min(v.duration || Infinity, v.currentTime + 10);
+    if (v) {
+      const target = Math.min(v.duration || Infinity, v.currentTime + 10);
+      registerManualSeekIntent(target);
+      v.currentTime = target;
+    }
   });
 }
 
@@ -241,6 +316,9 @@ function stopPlayback() {
 
   stopBgProgressTracking();
   html5PlaybackGeneration += 1;
+  playbackClock.reset();
+  resetManualSeekIntent();
+  commercialSkipSession.reset();
   disableLiveStreamRecovery();
   clearBrowserSubtitleTrack();
   browserSubtitleSession.clear();
@@ -305,8 +383,13 @@ export function usePlayer(): {
   stop: () => void;
   retry: () => void;
   togglePlay: () => void;
+  beginManualSeek: () => void;
   seek: (time: number) => void;
   getVideoElement: () => HTMLVideoElement | null;
+  playbackPosition: number;
+  playbackDuration: number;
+  commercialSkip: CommercialSkipSnapshot;
+  undoCommercialSkip: () => Promise<boolean>;
   playerState: PlayerState;
   subtitleTracks: SubtitleTrack[];
   currentSubtitleIndex: number;
@@ -314,6 +397,16 @@ export function usePlayer(): {
   selectSubtitleTrack: (index: number) => void;
 } {
   const store = usePlayerStore();
+  const clockSnapshot = useSyncExternalStore(
+    playbackClock.subscribe,
+    playbackClock.getSnapshot,
+    playbackClock.getSnapshot,
+  );
+  const commercialSkip = useSyncExternalStore(
+    commercialSkipSession.subscribe,
+    commercialSkipSession.getSnapshot,
+    commercialSkipSession.getSnapshot,
+  );
   const restoredBrowserSubtitles = browserSubtitleSession.forChannel(
     usePlayerStore.getState().currentChannel?.id,
   );
@@ -351,6 +444,8 @@ export function usePlayer(): {
     }
 
     setStatus('loading');
+    const clockGeneration = playbackClock.begin(channel.duration ?? 0);
+    const commercialGeneration = beginCommercialPlayback(channel);
 
     // Try AVPlay first (Samsung Tizen), fallback to HTML5 video
     if (typeof webapis !== 'undefined' && webapis.avplay) {
@@ -359,12 +454,13 @@ export function usePlayer(): {
       const isLive = channel.contentType === 'livetv';
       try {
         const avplay = webapis.avplay;
+        let startupReady = false;
         clearAvplayStallTimer();
         avplay.close();
         // Route through the server proxy for every media type. Tizen live
         // playback retains subtitle data so AVPlay can inventory real TEXT
         // tracks; setSilentSubtitle enforces the persisted Off state.
-        const isRecording = channel.id.startsWith('recording_');
+        const isRecording = Boolean(channel.recordingId);
         const playerPath = isRecording
           ? channel.url
           : getStreamUrl(channel.id, channel.url, isLive ? true : keepSubsRef.current, isLive, audioOnly);
@@ -436,9 +532,19 @@ export function usePlayer(): {
             setStatus('playing');
             clearAvplayStallTimer();
           },
-          oncurrentplaytime: () => {
+          oncurrentplaytime: (timeMs: number) => {
             // Progress means the stream is alive — cancel any pending watchdog.
             clearAvplayStallTimer();
+            let durationMs = 0;
+            try { durationMs = avplay.getDuration(); } catch { /* unavailable while preparing */ }
+            routePlaybackClock(
+              playbackClock,
+              clockGeneration,
+              getAvPlayClockReading(timeMs, durationMs, channel.duration),
+              isCastConnected() ? undefined : commercialSkipSession,
+              commercialGeneration,
+              startupReady,
+            );
           },
           onevent: () => {},
           onerror: () => {
@@ -461,25 +567,64 @@ export function usePlayer(): {
         });
         avplay.prepareAsync(
           () => {
-            log.info('AVPlay: prepared, starting playback');
-            if (resumePosition > 0) {
-              avplay.seekTo(resumePosition * 1000);
-            }
-            avplay.play();
-            setStatus('playing');
-            const tracks = tizenPlayer.refreshSubtitleTracks();
-            subtitleTracksRef.current = tracks;
-            setSubtitleTracks(tracks);
-            const selectedIndex = selectPreferredSubtitleTrack(
-              tracks,
-              keepSubsRef.current,
-              getSubtitleLanguage(),
-            );
-            selectedSubtitleIndexRef.current = selectedIndex;
-            setCurrentSubtitleIndex(selectedIndex);
-            tizenPlayer.setSubtitleTrack(selectedIndex);
-            startBgProgressTracking();
-            setupMediaSession(channel.name);
+            log.info('AVPlay: prepared, completing initial resume');
+            const completeStartup = async () => {
+              if (resumePosition > 0) {
+                let preparedDurationMs = 0;
+                try { preparedDurationMs = avplay.getDuration(); } catch { /* duration can be unavailable */ }
+                const resumeTarget = getInitialResumeTarget(
+                  resumePosition,
+                  preparedDurationMs / 1000,
+                );
+                try {
+                  await retryPlaybackSeek(() => seekAvPlay(avplay, resumeTarget));
+                } catch (error) {
+                  if (playbackClock.getSnapshot().generation !== clockGeneration) return;
+                  log.warn('AVPlay: initial resume failed; starting from zero', error);
+                  toast('Could not resume playback; playing from the beginning');
+                  try {
+                    await seekAvPlay(avplay, 0, 1_000);
+                  } catch (resetError) {
+                    log.warn('AVPlay: zero-position fallback seek failed; playing prepared media', resetError);
+                  }
+                }
+              }
+              if (playbackClock.getSnapshot().generation !== clockGeneration) return;
+              startupReady = true;
+              let currentTimeMs = 0;
+              let durationMs = 0;
+              try {
+                currentTimeMs = avplay.getCurrentTime();
+                durationMs = avplay.getDuration();
+              } catch { /* the first AVPlay clock callback will publish */ }
+              routePlaybackClock(
+                playbackClock,
+                clockGeneration,
+                getAvPlayClockReading(currentTimeMs, durationMs, channel.duration),
+                isCastConnected() ? undefined : commercialSkipSession,
+                commercialGeneration,
+                startupReady,
+              );
+              avplay.play();
+              setStatus('playing');
+              const tracks = tizenPlayer.refreshSubtitleTracks();
+              subtitleTracksRef.current = tracks;
+              setSubtitleTracks(tracks);
+              const selectedIndex = selectPreferredSubtitleTrack(
+                tracks,
+                keepSubsRef.current,
+                getSubtitleLanguage(),
+              );
+              selectedSubtitleIndexRef.current = selectedIndex;
+              setCurrentSubtitleIndex(selectedIndex);
+              tizenPlayer.setSubtitleTrack(selectedIndex);
+              startBgProgressTracking();
+              setupMediaSession(channel.name);
+            };
+            void completeStartup().catch((error) => {
+              log.error('AVPlay: startup failed', error);
+              setError('Could not start playback');
+            });
           },
           () => {
             log.error('AVPlay: prepare failed');
@@ -545,26 +690,76 @@ export function usePlayer(): {
       } catch { /* ignore */ }
 
       let lastMediaTime = -1;
+      let startupReady = false;
+      let startupStarted = false;
+      let canPlay = false;
+      let playAttempted = false;
+      const updateHtml5Clock = () => {
+        routePlaybackClock(
+          playbackClock,
+          clockGeneration,
+          getHtml5ClockReading(
+            video.currentTime,
+            video.duration,
+            Number(video.dataset.streamOffset || '0'),
+            channel.duration,
+          ),
+          isCastConnected() ? undefined : commercialSkipSession,
+          commercialGeneration,
+          startupReady,
+        );
+      };
+      const attemptPlay = () => {
+        if (!startupReady || !canPlay || playAttempted || !isCurrentPlayback()) return;
+        playAttempted = true;
+        log.info('HTML5: startup ready — attempting play()');
+        void video.play().then(() => {
+          if (!isCurrentPlayback()) return;
+          log.info('HTML5: play() succeeded');
+          setStatus('playing');
+        }).catch((error) => {
+          log.error('HTML5: play() rejected', error);
+          if (isLiveTs && isCurrentPlayback()) disableLiveStreamRecovery();
+          if (isCurrentPlayback()) setError('Playback blocked — tap to retry');
+        });
+      };
+      const completeHtml5Startup = async () => {
+        if (startupStarted) return;
+        startupStarted = true;
+        try {
+          if (resumePosition > 0 && !needsBrowserTranscode && !appleMobileVodPath) {
+            const resumeTarget = getInitialResumeTarget(resumePosition, video.duration);
+            await retryPlaybackSeek(() => seekHtml5(video, resumeTarget));
+          }
+        } catch (error) {
+          if (!isCurrentPlayback()) return;
+          log.warn('HTML5: initial resume failed; starting from zero', error);
+          toast('Could not resume playback; playing from the beginning');
+          try {
+            await seekHtml5(video, 0, 1_000);
+          } catch (resetError) {
+            log.warn('HTML5: zero-position fallback seek failed; playing prepared media', resetError);
+          }
+        }
+        if (!isCurrentPlayback()) return;
+        startupReady = true;
+        updateHtml5Clock();
+        startBgProgressTracking();
+        attemptPlay();
+      };
       const setupEvents = () => {
         video.onloadstart = () => log.debug('HTML5 event: loadstart');
-        video.onloadedmetadata = () => log.info(`HTML5 event: loadedmetadata, duration=${video.duration}, videoWidth=${video.videoWidth}x${video.videoHeight}`);
+        video.onloadedmetadata = () => {
+          log.info(`HTML5 event: loadedmetadata, duration=${video.duration}, videoWidth=${video.videoWidth}x${video.videoHeight}`);
+        };
+        video.ondurationchange = updateHtml5Clock;
         video.onloadeddata = () => {
           log.info(`HTML5 event: loadeddata, readyState=${video.readyState}`);
-          if (resumePosition > 0 && !needsBrowserTranscode && !appleMobileVodPath) {
-            video.currentTime = resumePosition;
-          }
-          startBgProgressTracking();
+          void completeHtml5Startup();
         };
         video.oncanplay = () => {
-          log.info('HTML5 event: canplay — attempting play()');
-          video.play().then(() => {
-            log.info('HTML5: play() succeeded');
-            setStatus('playing');
-          }).catch((e) => {
-            log.error('HTML5: play() rejected on canplay', e);
-            if (isLiveTs && isCurrentPlayback()) disableLiveStreamRecovery();
-            setError('Playback blocked — tap to retry');
-          });
+          canPlay = true;
+          attemptPlay();
         };
         video.onwaiting = () => {
           log.debug('HTML5 event: waiting');
@@ -579,6 +774,7 @@ export function usePlayer(): {
           setupMediaSession(channel.name);
         };
         video.ontimeupdate = () => {
+          updateHtml5Clock();
           if (!isLiveTs || !isCurrentPlayback() || video.currentTime <= lastMediaTime) return;
           lastMediaTime = video.currentTime;
           liveStreamRecovery.progress();
@@ -614,7 +810,7 @@ export function usePlayer(): {
         };
       };
 
-      const isRecording = channel.id.startsWith('recording_');
+      const isRecording = Boolean(channel.recordingId);
       // Recordings have a direct server URL; live/VOD go through stream proxy
       const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
       const appleMobileVodPath = isAppleMobile()
@@ -622,7 +818,7 @@ export function usePlayer(): {
         : null;
       const needsBrowserTranscode = !isLiveTs && !isRecording && !appleMobileVodPath;
       const playUrl = isRecording
-        ? `${apiBaseUrl}${channel.url}`
+        ? channel.url
         : appleMobileVodPath
           ? `${apiBaseUrl}${appleMobileVodPath}`
             : needsBrowserTranscode
@@ -822,8 +1018,13 @@ export function usePlayer(): {
     }
   }, []);
 
+  const beginManualSeek = useCallback(() => {
+    registerManualSeekIntent(null);
+  }, []);
+
   const seek = useCallback((time: number) => {
     const targetTime = normalizePlaybackStart(time);
+    registerManualSeekIntent(targetTime);
     if (typeof webapis !== 'undefined' && webapis.avplay) {
       try { webapis.avplay.seekTo(targetTime * 1000); } catch (err) { toast(`Seek failed: ${err}`); }
     } else {
@@ -872,6 +1073,8 @@ export function usePlayer(): {
     return document.getElementById('av-player') as HTMLVideoElement | null;
   }, []);
 
+  const undoCommercialSkip = useCallback(() => commercialSkipSession.undo(), []);
+
   // No auto-cleanup on unmount — video keeps playing in background.
   // Playback is only stopped by explicit stop() call (back button, Media Session, etc.)
 
@@ -911,8 +1114,13 @@ export function usePlayer(): {
     stop,
     retry,
     togglePlay,
+    beginManualSeek,
     seek,
     getVideoElement,
+    playbackPosition: clockSnapshot.position,
+    playbackDuration: clockSnapshot.duration,
+    commercialSkip,
+    undoCommercialSkip,
     playerState: {
       status: store.status,
       currentChannel: store.currentChannel,

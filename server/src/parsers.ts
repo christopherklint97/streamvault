@@ -1,4 +1,5 @@
 import type { DBChannel, DBProgram } from './db.js';
+import { buildAiringKey, buildContentKey } from './epg-identity.js';
 
 // ---------- M3U Parser ----------
 
@@ -121,7 +122,23 @@ function parseXMLTVDate(dateStr: string): number | null {
 
 function getTagContent(xml: string, tag: string): string {
   const match = xml.match(new RegExp(`<${tag}[^>]*>([^<]*)</${tag}>`, 'i'));
-  return match ? match[1].trim() : '';
+  return match ? decodeXml(match[1].trim()) : '';
+}
+
+function getTagContents(xml: string, tag: string): Array<{ attrs: string; value: string }> {
+  const values: Array<{ attrs: string; value: string }> = [];
+  const regex = new RegExp(`<${tag}([^>]*)>([^<]*)</${tag}>`, 'gi');
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(xml)) !== null) values.push({ attrs: match[1], value: decodeXml(match[2].trim()) });
+  return values;
+}
+
+function decodeXml(value: string): string {
+  return value
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'").replace(/&amp;/g, '&')
+    .replace(/&#(\d+);/g, (_match, code: string) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_match, code: string) => String.fromCodePoint(parseInt(code, 16)));
 }
 
 function getAttr(tag: string, attr: string): string {
@@ -129,10 +146,32 @@ function getAttr(tag: string, attr: string): string {
   return match ? match[1] : '';
 }
 
-export function parseEPG(xmlText: string): DBProgram[] {
+export interface ParseEpgOptions {
+  now?: number;
+  horizonMs?: number;
+}
+
+function xmltvEpisodeIdentity(
+  body: string,
+  episodeNumbers: Array<{ system: string; value: string }>,
+): string | null {
+  const explicitEpisodeId = getTagContent(body, 'episode-id') || getTagContent(body, 'crid');
+  if (explicitEpisodeId) return `id:${explicitEpisodeId}`;
+  for (const episode of episodeNumbers) {
+    const system = episode.system.trim().toLocaleLowerCase();
+    const value = episode.value.trim();
+    if (!value) continue;
+    if (system === 'xmltv_ns' && /^\d+\.\d+(?:\.|$)/.test(value)) return `${system}:${value}`;
+    if (system === 'onscreen' && /\bS\d+\s*E\d+\b/i.test(value)) return `${system}:${value.toLocaleUpperCase()}`;
+    if (system.includes('episode') || (system === 'dd_progid' && /^EP/i.test(value))) return `${system}:${value}`;
+  }
+  return null;
+}
+
+export function parseEPG(xmlText: string, options: ParseEpgOptions = {}): DBProgram[] {
   const programs: DBProgram[] = [];
-  const now = Date.now();
-  const cutoff = now + 24 * 60 * 60 * 1000;
+  const now = options.now ?? Date.now();
+  const cutoff = now + (options.horizonMs ?? 7 * 24 * 60 * 60 * 1000);
 
   // Match each <programme ...>...</programme> block
   const programRegex = /<programme\s+([^>]*)>([\s\S]*?)<\/programme>/gi;
@@ -151,8 +190,20 @@ export function parseEPG(xmlText: string): DBProgram[] {
 
     const stopTime = stopStr ? parseXMLTVDate(stopStr) : null;
     const title = getTagContent(body, 'title') || 'No Title';
+    const subtitle = getTagContent(body, 'sub-title');
     const description = getTagContent(body, 'desc');
-    const category = getTagContent(body, 'category') || 'General';
+    const categories = getTagContents(body, 'category').map(entry => entry.value).filter(Boolean);
+    const category = categories[0] || 'General';
+    const episodeNumbers = getTagContents(body, 'episode-num').map(entry => ({
+      system: getAttr(entry.attrs, 'system') || '',
+      value: entry.value,
+    }));
+    const previouslyShown = body.match(/<previously-shown\b([^>]*)\/?\s*>/i);
+    const providerEventId = getAttr(attrs, 'id') || null;
+    const explicitContentId = xmltvEpisodeIdentity(body, episodeNumbers);
+    const timezone = startStr.match(/([+-]\d{4})/)?.[1] || 'UTC';
+    const rawMetadata = `<programme ${attrs}>${body}</programme>`;
+    const airingKey = buildAiringKey('xmltv', channelId, providerEventId, startTime, stopTime ?? startTime);
 
     programs.push({
       channel_id: channelId,
@@ -161,6 +212,25 @@ export function parseEPG(xmlText: string): DBProgram[] {
       start_time: startTime,
       stop_time: stopTime ?? startTime,
       category,
+      source: 'xmltv',
+      source_channel_id: channelId,
+      provider_event_id: providerEventId,
+      provider_epg_id: null,
+      subtitle,
+      episode_numbers_json: JSON.stringify(episodeNumbers),
+      is_repeat: previouslyShown ? 1 : null,
+      // XMLTV <new/> is not trusted as episode-level first-run metadata.
+      is_new: null,
+      is_live: /<live\b[^>]*\/?\s*>/i.test(body) ? 1 : null,
+      original_air_date: previouslyShown ? (getAttr(previouslyShown[1], 'start') || null) : null,
+      raw_metadata: rawMetadata,
+      airing_key: airingKey,
+      content_key: buildContentKey('xmltv', explicitContentId),
+      categories_json: JSON.stringify(categories),
+      timezone,
+      first_seen: now,
+      last_seen: now,
+      schedule_revision: now,
     });
   }
 
