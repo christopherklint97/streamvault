@@ -42,6 +42,31 @@ describe('player store backend switching', () => {
     expect(usePlayerStore.getState().groupChannels.map(channel => channel.id)).toEqual(['live_new']);
   });
 
+  it('does not replace cached group A when a pending group B finishes after selecting A again', async () => {
+    let release!: (response: Response) => void;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise(resolve => { release = resolve; }));
+    const cached = { id: 'live_a', name: 'A', group: 'A', url: '', logo: '', region: '', contentType: 'livetv' as const };
+    usePlayerStore.setState({ groupChannels: [cached] });
+    const pending = usePlayerStore.getState().fetchGroupChannels('B');
+    usePlayerStore.getState().setChannel(cached);
+    release(new Response(JSON.stringify({ channels: [{ ...cached, id: 'live_b', group: 'B' }] }), { status: 200 }));
+    await pending;
+    expect(usePlayerStore.getState().groupChannels.map(channel => channel.id)).toEqual(['live_a']);
+    expect(usePlayerStore.getState().groupChannelsLoading).toBe(false);
+  });
+
+  it('aborts replaced group reads rather than leaving catalog traffic behind playback', async () => {
+    let signal: AbortSignal | null | undefined;
+    vi.spyOn(globalThis, 'fetch').mockImplementationOnce((_input, options) => {
+      signal = options?.signal;
+      return new Promise((_resolve, reject) => signal?.addEventListener('abort', () => reject(new DOMException('Cancelled', 'AbortError'))));
+    }).mockResolvedValue(new Response(JSON.stringify({ channels: [], nextCursor: null }), { status: 200 }));
+    const old = usePlayerStore.getState().fetchGroupChannels('Old');
+    await usePlayerStore.getState().fetchGroupChannels('New');
+    expect(signal?.aborted).toBe(true);
+    await old;
+  });
+
   it('does not let an old backend failure clear the new backend loading state', async () => {
     let rejectOld!: (reason: unknown) => void;
     const pendingNew = new Promise<Response>(() => undefined);

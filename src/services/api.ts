@@ -29,6 +29,15 @@ export class StaleBackendRequestError extends Error {
   }
 }
 
+export class ApiTimeoutError extends Error {
+  constructor() {
+    super('The StreamVault backend took too long to respond. Retry, or check the server connection in Settings.');
+    this.name = 'ApiTimeoutError';
+  }
+}
+
+export type ApiRequestOptions = RequestInit & { timeoutMs?: number };
+
 let backendRequestGeneration = 0;
 let backendRequestController = typeof AbortController === 'undefined' ? null : new AbortController();
 
@@ -112,15 +121,53 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
+/** Opt-in deadline covers headers and body, even when abort is unsupported. */
+async function withRequestDeadline<T>(
+  options: ApiRequestOptions | undefined,
+  request: (options: RequestInit | undefined) => Promise<T>,
+): Promise<T> {
+  const { timeoutMs, ...init } = options ?? {};
+  if (timeoutMs === undefined) return request(options);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new RangeError('timeoutMs must be positive and finite');
+  const generation = backendRequestGeneration;
+  const controller = typeof AbortController === 'undefined' ? null : new AbortController();
+  const cleanups: (() => void)[] = [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    const fail = (error: unknown) => {
+      reject(generation !== backendRequestGeneration ? new StaleBackendRequestError() : error);
+      controller?.abort();
+    };
+    for (const signal of new Set([init.signal, backendRequestController?.signal])) {
+      if (!signal) continue;
+      const onAbort = () => fail(signal.reason ?? new DOMException('Request cancelled', 'AbortError'));
+      if (signal.aborted) onAbort();
+      else {
+        signal.addEventListener('abort', onAbort, { once: true });
+        cleanups.push(() => signal.removeEventListener('abort', onAbort));
+      }
+    }
+    timer = setTimeout(() => fail(new ApiTimeoutError()), timeoutMs);
+  });
+  try {
+    return await Promise.race([request({ ...init, signal: controller?.signal ?? init.signal }), cancelled]);
+  } finally {
+    clearTimeout(timer);
+    for (const cleanup of cleanups) cleanup();
+  }
+}
+
 /** Probe a user-entered backend without forwarding credentials for another origin. */
 // The status endpoint is intentionally public and returns heterogeneous status fields.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function probeBackend<T = any>(baseUrl: string, signal?: AbortSignal): Promise<T> {
-  const generation = backendRequestGeneration;
-  const response = await fetchBackend(`${baseUrl}/api/status`, { signal, cache: 'no-store' });
-  const data = await parseJsonResponse<T>(response);
-  if (generation !== backendRequestGeneration) throw new StaleBackendRequestError();
-  return data;
+export async function probeBackend<T = any>(baseUrl: string, signal?: AbortSignal, timeoutMs?: number): Promise<T> {
+  return withRequestDeadline({ signal, cache: 'no-store', timeoutMs }, async init => {
+    const generation = backendRequestGeneration;
+    const response = await fetchBackend(`${baseUrl}/api/status`, init);
+    const data = await parseJsonResponse<T>(response);
+    if (generation !== backendRequestGeneration) throw new StaleBackendRequestError();
+    return data;
+  });
 }
 
 /** Fetch JSON from StreamVault with the protected-endpoint token in a header. */
@@ -129,25 +176,27 @@ export async function probeBackend<T = any>(baseUrl: string, signal?: AbortSigna
 export async function apiFetch<T = any>(
   baseUrl: string,
   path: string,
-  options?: RequestInit,
+  options?: ApiRequestOptions,
   tokenOverride?: string | null,
 ): Promise<T> {
-  const generation = backendRequestGeneration;
-  const headers = new Headers(options?.headers);
-  const token = tokenOverride === undefined ? getApiToken() : tokenOverride || '';
-  if (token && !headers.has('x-streamvault-token')) headers.set('x-streamvault-token', token);
+  return withRequestDeadline(options, async init => {
+    const generation = backendRequestGeneration;
+    const headers = new Headers(init?.headers);
+    const token = tokenOverride === undefined ? getApiToken() : tokenOverride || '';
+    if (token && !headers.has('x-streamvault-token')) headers.set('x-streamvault-token', token);
 
-  const response = await fetchBackend(`${baseUrl}${path}`, { ...options, headers });
-  if (generation !== backendRequestGeneration) throw new StaleBackendRequestError();
-  // Auth rejection is terminal on headers: a stalled body must not hide it
-  // behind a caller's timeout or allow a fallback to unauthenticated playback.
-  if (response.status === 401 || response.status === 403) {
-    throw new ApiError(response.status, response.statusText, undefined, response.headers.get('Retry-After'));
-  }
-  const data = await parseJsonResponse<T>(response).catch(error => {
+    const response = await fetchBackend(`${baseUrl}${path}`, { ...init, headers });
     if (generation !== backendRequestGeneration) throw new StaleBackendRequestError();
-    throw error;
+    // Auth rejection is terminal on headers: a stalled body must not hide it
+    // behind a caller's timeout or allow a fallback to unauthenticated playback.
+    if (response.status === 401 || response.status === 403) {
+      throw new ApiError(response.status, response.statusText, undefined, response.headers.get('Retry-After'));
+    }
+    const data = await parseJsonResponse<T>(response).catch(error => {
+      if (generation !== backendRequestGeneration) throw new StaleBackendRequestError();
+      throw error;
+    });
+    if (generation !== backendRequestGeneration) throw new StaleBackendRequestError();
+    return data;
   });
-  if (generation !== backendRequestGeneration) throw new StaleBackendRequestError();
-  return data;
 }

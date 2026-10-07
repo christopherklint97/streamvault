@@ -141,6 +141,49 @@ describe('player channel-list EPG', () => {
     expect(useChannelStore.getState().programsByChannel.get(channel.id)?.[0]?.title).toBe('SportsCenter');
   });
 
+  it('loads only the player viewport guide and does not refetch it as distant group pages arrive', async () => {
+    const groups = Array.from({ length: 819 }, (_, index) => ({ ...channel, id: index === 0 ? channel.id : `live_${index}` }));
+    const batches: string[][] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), window.location.origin);
+      if (url.pathname === '/api/epg/batch') {
+        const ids = url.searchParams.get('ids')!.split(',');
+        batches.push(ids);
+        return new Response(JSON.stringify({ programs: {} }), { status: 200 });
+      }
+      if (url.pathname.startsWith('/api/epg/channel/')) return new Response(JSON.stringify({ programs: [] }), { status: 200 });
+      throw new Error(`Unexpected request: ${url.pathname}`);
+    }));
+    usePlayerStore.setState({ currentChannel: channel, groupChannels: groups.slice(0, 200), channelListVisible: true });
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root.render(<Player />));
+    expect(batches).toHaveLength(1);
+    expect(batches[0].length).toBeLessThanOrEqual(25);
+    expect(batches[0]).toContain(channel.id);
+    await act(async () => usePlayerStore.setState({ groupChannels: groups.slice(0, 400) }));
+    await act(async () => usePlayerStore.setState({ groupChannels: groups }));
+    expect(batches).toHaveLength(1);
+  });
+
+  it('aborts guide work when the live channel pane closes', async () => {
+    let batchSignal: AbortSignal | null | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
+      if (String(input).includes('/api/epg/batch')) {
+        batchSignal = options?.signal;
+        return new Promise<Response>(() => {});
+      }
+      return new Response(JSON.stringify({ programs: [] }), { status: 200 });
+    }));
+    usePlayerStore.setState({ currentChannel: channel, groupChannels: [channel], channelListVisible: true });
+    container = document.createElement('div'); document.body.append(container); root = createRoot(container);
+    await act(async () => root.render(<Player />));
+    expect(batchSignal?.aborted).toBe(false);
+    await act(async () => usePlayerStore.setState({ channelListVisible: false }));
+    expect(batchSignal?.aborted).toBe(true);
+  });
+
   it('fills every ESPN row after an initially empty batch while the player stays open', async () => {
     vi.useFakeTimers();
     const now = Date.now();

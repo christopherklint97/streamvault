@@ -24,6 +24,7 @@ import { getAbsoluteSkipTarget } from '../utils/media-progress';
 import { shouldStartPlayerPlayback } from '../utils/player-lifecycle';
 import { getCommercialMarkers } from '../utils/commercial-markers';
 import { getCommercialPlayerUiState, isCommercialUndoKey } from '../utils/commercial-player-ui';
+import PlaybackLoading from './PlaybackLoading';
 
 const OSD_TIMEOUT = 5000;
 const MOBILE = isMobile();
@@ -111,6 +112,27 @@ function LiveChannelList({ channels, currentId, onSelect }: {
   const listRef = useRef<HTMLDivElement>(null);
   const [epgMap, setEpgMap] = useState<EpgMap>({});
   const cachedPrograms = useChannelStore((s) => s.programsByChannel);
+  const [guideWindow, setGuideWindow] = useState<{ currentId: string; start: number } | null>(null);
+  const currentIndex = Math.max(0, channels.findIndex(ch => ch.id === currentId));
+  const windowStart = guideWindow?.currentId === currentId ? guideWindow.start : Math.max(0, currentIndex - 4);
+  // A first click must not schedule guide work for an entire 800-channel group.
+  // Keep the selected channel plus a small scroll-aware viewport/overscan window.
+  const guideIds = [...new Set([currentId, ...channels.slice(windowStart, windowStart + 24).map(ch => ch.id)])].join(',');
+  const updateGuideWindow = () => {
+    const list = listRef.current;
+    if (!list) return;
+    const viewport = list.getBoundingClientRect();
+    if (viewport.height <= 0) return;
+    const rows = list.querySelectorAll('[data-live-channel-row]');
+    for (let index = 0; index < rows.length; index++) {
+      if (rows[index].getBoundingClientRect().bottom > viewport.top) {
+        const start = Math.max(0, index - 4);
+        setGuideWindow(previous => previous?.currentId === currentId && previous.start === start
+          ? previous : { currentId, start });
+        break;
+      }
+    }
+  };
 
   // Scroll current channel into view on mount
   useEffect(() => {
@@ -121,17 +143,18 @@ function LiveChannelList({ channels, currentId, onSelect }: {
   // Retry briefly when the guide is still being populated, then refresh at
   // programme boundaries without requiring the user to close the player.
   useEffect(() => {
-    if (channels.length === 0) return;
+    if (!guideIds) return;
+    const controller = typeof AbortController === 'undefined' ? null : new AbortController();
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let quickRetries = 0;
-    const ids = channels.map(ch => ch.id);
+    const ids = guideIds.split(',');
     const refresh = async () => {
       let missing = true;
       try {
-        const data = await fetchBatchEpg(ids);
+        const data = await fetchBatchEpg(ids, undefined, undefined, { signal: controller?.signal });
         if (cancelled) return;
-        setEpgMap(data);
+        setEpgMap(previous => ({ ...previous, ...data }));
         missing = ids.some(id => !getCurrentEpg(data[id]).current);
       } catch {
         if (cancelled) return;
@@ -140,13 +163,14 @@ function LiveChannelList({ channels, currentId, onSelect }: {
       timer = setTimeout(() => { void refresh(); }, delay);
     };
     void refresh();
-    return () => { cancelled = true; if (timer) clearTimeout(timer); };
-  }, [channels]);
+    return () => { cancelled = true; controller?.abort(); if (timer) clearTimeout(timer); };
+  }, [guideIds]);
 
   return (
     <div
       ref={listRef}
       data-live-channel-list
+      onScroll={updateGuideWindow}
       className="flex-1 min-h-0 overflow-y-auto bg-[#111] [-webkit-overflow-scrolling:touch]"
     >
       {channels.map((ch) => (
@@ -797,10 +821,7 @@ export default function Player() {
 
         {/* Loading spinner */}
         {playerState.status === 'loading' && (
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center gap-4 text-[#888] text-20 animate-fade-in">
-            <div className="w-12 h-12 border-[3px] border-[#222] border-t-accent rounded-full animate-spin-fast" />
-            <span>Loading...</span>
-          </div>
+          <PlaybackLoading key={currentChannel?.id} live={currentChannel?.contentType === 'livetv'} onRetry={retry} />
         )}
 
         {/* Error display */}
