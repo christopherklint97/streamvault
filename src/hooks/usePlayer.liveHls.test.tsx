@@ -147,6 +147,24 @@ describe('signed live HLS startup and recovery', () => {
     expect(video.play).not.toHaveBeenCalled();
   });
 
+  it('starts native iPhone HLS from its first loaded frame without waiting for paused canplay', async () => {
+    // happy-dom load() synthesizes canplay; real paused WebKit can stop at loadeddata.
+    vi.spyOn(video, 'load').mockImplementation(() => {});
+    let nativeSrc = '';
+    Object.defineProperty(video, 'src', { configurable: true, get: () => nativeSrc, set: (url: string) => { nativeSrc = url; } });
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
+    vi.mocked(video.canPlayType).mockReturnValue('maybe');
+    ranges = [];
+    await act(async () => hookRef.current?.play());
+    await act(async () => video.dispatchEvent(new Event('loadeddata')));
+    expect(video.play).toHaveBeenCalledOnce();
+    expect(mocks.authorize).toHaveBeenCalledOnce();
+    expect(mocks.instances).toHaveLength(0);
+    // WebKit may emit canplay only after playback has been requested.
+    await act(async () => video.dispatchEvent(new Event('canplay')));
+    expect(video.play).toHaveBeenCalledOnce();
+  });
+
   it.each(['iPhone', 'Safari'])(
     'starts native %s HLS normally without twelve seconds of lead', async platform => {
       vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(platform === 'iPhone'

@@ -998,7 +998,11 @@ export function usePlayer(): {
         };
         video.ondurationchange = updateHtml5Clock;
         video.onloadeddata = () => {
+          if (!isCurrentPlayback()) return;
           log.info(`HTML5 event: loadeddata, readyState=${video.readyState}`);
+          // Paused WebKit can load one frame without emitting canplay until
+          // play() is requested. Do not wait for a larger paused preload on iPhone.
+          if (nativeLiveHls && signedLiveHlsStartup) canPlay = true;
           armFiniteHlsStallTimer();
           void completeHtml5Startup();
           if (signedLiveHlsStartup) attemptPlay();

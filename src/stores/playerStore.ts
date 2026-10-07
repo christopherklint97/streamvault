@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { Channel, PlayerState } from '../types';
 import { trackWatch } from '../services/channel-service';
 import { useChannelStore } from './channelStore';
+import { apiFetch } from '../services/api';
 
 interface PlayerStoreState extends PlayerState {
   volume: number;
@@ -24,6 +25,8 @@ interface PlayerStoreActions {
 }
 
 let groupFetchGeneration = 0;
+let pendingGroup: string | null = null;
+let groupRequestController: AbortController | null = null;
 
 export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((set, get) => ({
   status: 'idle',
@@ -50,6 +53,12 @@ export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((s
       const existingGroup = state.groupChannels[0]?.group;
       if (existingGroup !== channel.group) {
         get().fetchGroupChannels(channel.group);
+      } else if (pendingGroup && pendingGroup !== channel.group) {
+        // Returning to cached A must invalidate B, including its finally path.
+        groupFetchGeneration++;
+        groupRequestController?.abort();
+        pendingGroup = null;
+        set({ groupChannelsLoading: false });
       }
     }
   },
@@ -68,6 +77,10 @@ export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((s
 
   fetchGroupChannels: async (group: string) => {
     const fetchGeneration = ++groupFetchGeneration;
+    groupRequestController?.abort();
+    const controller = typeof AbortController === 'undefined' ? null : new AbortController();
+    groupRequestController = controller;
+    pendingGroup = group;
     const { apiBaseUrl: base, backendGeneration } = useChannelStore.getState();
     const isCurrent = () => groupFetchGeneration === fetchGeneration &&
       useChannelStore.getState().backendGeneration === backendGeneration;
@@ -78,9 +91,8 @@ export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((s
       do {
         const params = new URLSearchParams({ type: 'livetv', group, limit: '200' });
         if (after) params.set('after', after);
-        const res = await fetch(`${base}/api/browse?${params}`);
-        if (!res.ok) throw new Error('Failed to fetch group channels');
-        const data = await res.json() as { channels?: Channel[]; nextCursor?: string | null };
+        const data = await apiFetch<{ channels?: Channel[]; nextCursor?: string | null }>(base, `/api/browse?${params}`,
+          { signal: controller?.signal, timeoutMs: 10_000 });
         if (!isCurrent()) return;
         channels.push(...(data.channels || []));
         after = data.nextCursor || null;
@@ -89,6 +101,8 @@ export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((s
     } catch {
       if (!isCurrent()) return;
       set({ groupChannelsLoading: false });
+    } finally {
+      if (isCurrent()) { pendingGroup = null; groupRequestController = null; }
     }
   },
 
@@ -129,6 +143,9 @@ export const usePlayerStore = create<PlayerStoreState & PlayerStoreActions>()((s
 
 export function resetPlayerBackendState(): void {
   groupFetchGeneration++;
+  pendingGroup = null;
+  groupRequestController?.abort();
+  groupRequestController = null;
   usePlayerStore.setState({
     status: 'idle',
     currentChannel: null,

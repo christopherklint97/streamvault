@@ -23,6 +23,12 @@ export default function Home() {
   const programsByChannel = useChannelStore((s) => s.programsByChannel);
   const fetchProgramsForChannel = useChannelStore((s) => s.fetchProgramsForChannel);
   const contentTypeCounts = useChannelStore((s) => s.contentTypeCounts);
+  const hydrated = useChannelStore((s) => s._hydrated);
+  const backendConnection = useChannelStore((s) => s.backendConnection);
+  const startupError = useChannelStore((s) => s.error);
+  const hydrate = useChannelStore((s) => s.hydrate);
+  const isLoading = useChannelStore((s) => s.isLoading);
+  const loadingMessage = useChannelStore((s) => s.loadingMessage);
   const fetchChannelsByIds = useChannelStore((s) => s.fetchChannelsByIds);
   const favoriteIds = useFavoritesStore((s) => s.favoriteIds);
   const lists = useFavoritesStore((s) => s.lists);
@@ -50,6 +56,7 @@ export default function Home() {
 
   // Collect all IDs we need and batch-fetch from server
   useEffect(() => {
+    if (!hydrated || backendConnection !== 'connected') return;
     const allIds = new Set<string>();
     for (const id of favoriteIds) allIds.add(id);
     for (const id of recentIds) allIds.add(id);
@@ -67,11 +74,11 @@ export default function Home() {
       setChannelMap(map);
     });
     return () => { cancelled = true; };
-  }, [favoriteIds, recentIds, lastWatchedId, continueWatchingIds, listChannelIds, fetchChannelsByIds]);
+  }, [hydrated, backendConnection, favoriteIds, recentIds, lastWatchedId, continueWatchingIds, listChannelIds, fetchChannelsByIds]);
 
   useEffect(() => {
-    if (lastWatchedId) void fetchProgramsForChannel(lastWatchedId);
-  }, [fetchProgramsForChannel, lastWatchedId]);
+    if (hydrated && backendConnection === 'connected' && lastWatchedId) void fetchProgramsForChannel(lastWatchedId);
+  }, [hydrated, backendConnection, fetchProgramsForChannel, lastWatchedId]);
 
   const favoriteChannels = useMemo(
     () => Array.from(favoriteIds).map(id => channelMap.get(id)).filter(Boolean) as Channel[],
@@ -184,6 +191,28 @@ export default function Home() {
   }, []);
 
   const hasContent = typeCounts.livetv > 0 || typeCounts.movies > 0 || typeCounts.series > 0 || channelMap.size > 0;
+  if (!hydrated || backendConnection !== 'connected') {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[60dvh] lg:h-full text-center" ref={containerRef} onKeyDown={handleKeyDown} role={hydrated ? 'alert' : 'status'} aria-live="polite">
+        <h1 className="text-22 lg:text-32 mb-3">{hydrated ? 'Unable to connect to StreamVault' : 'Connecting to StreamVault'}</h1>
+        <p className="text-sm lg:text-18 text-[#888]">{hydrated ? startupError || 'Check the StreamVault Server URL in Settings, then retry.' : 'Checking the server and loading your library…'}</p>
+        {hydrated && (
+          <div className="flex gap-4 mt-6">
+            <button className="py-3 px-7 border-2 border-accent rounded-lg text-accent focus:border-white" data-focusable tabIndex={0} onClick={() => { void hydrate(true); }}>Retry</button>
+            <button className="py-3 px-7 border-2 border-accent rounded-lg text-accent focus:border-white" data-focusable tabIndex={0} onClick={() => navigate('settings')}>Open Settings</button>
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (!hasContent && isLoading) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[60dvh] lg:h-full text-center" role="status" aria-live="polite">
+        <h1 className="text-22 lg:text-32 mb-3">Loading your library</h1>
+        <p className="text-sm lg:text-18 text-[#888]">{loadingMessage || 'Synchronizing channels…'}</p>
+      </div>
+    );
+  }
   if (!hasContent) {
     return (
       <div className={cn('flex flex-col gap-5 lg:gap-7 outline-hidden animate-fade-in', 'justify-center items-center min-h-[60dvh] lg:h-full')} ref={containerRef} onKeyDown={handleKeyDown}>

@@ -35,6 +35,7 @@ import { fetchXtreamStreamsByCategory, fetchXtreamShortEpg, fetchAllCategoryStre
 import { createOnDemandEpg } from './on-demand-epg.js';
 import { createEpgReadWorker } from './epg-read-worker.js';
 import { createChannelReadWorker } from './channel-read-worker.js';
+import { createDirectoryStatusCache } from './directory-status-cache.js';
 import { saveCategorySnapshot, closeCategorySnapshotWorker, getCatalogGeneration, rotateCatalogGeneration } from './category-write-service.js';
 import { createEpgWriteWorker } from './epg-write-worker.js';
 import type { XtreamConfig } from './xtream.js';
@@ -368,6 +369,11 @@ app.get('/api/channels', async (req, res, next) => {
 const channelReader = createChannelReadWorker(DB_PATH, message => logger.warn(message));
 // Keep dashboard counts independent of UK browsing when either SQLite read stalls.
 const channelStatusReader = createChannelReadWorker(DB_PATH, message => logger.warn(message));
+const directoryStatusCache = createDirectoryStatusCache(channelStatusReader.status, getCatalogGeneration, {
+  onError: () => logger.warn('Directory status background refresh failed; retaining the last snapshot'),
+});
+// Warm the real directory snapshot before the next client opens the app.
+void directoryStatusCache.get().catch(() => logger.warn('Directory status prewarm failed; next request will retry'));
 app.post('/api/channels/by-ids', async (req, res, next) => {
   const { ids } = req.body;
   if (!Array.isArray(ids) || ids.length === 0) {
@@ -2277,7 +2283,7 @@ app.put('/api/config', requireAuth, (req, res) => {
 // ---------- Sync ----------
 
 app.get('/api/status', async (_req, res, next) => {
-  try { res.json(getStatus(await channelStatusReader.status())); }
+  try { res.json(getStatus(await directoryStatusCache.get())); }
   catch (error) { next(error); }
 });
 

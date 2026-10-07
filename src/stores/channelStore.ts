@@ -21,6 +21,7 @@ export interface XtreamCredentials {
 const PAGE_SIZE = 20;
 const PROGRAM_WINDOW_MS = 30 * 60 * 1000;
 const PROGRAM_REFRESH_MS = 15 * 60 * 1000;
+const BOOTSTRAP_REQUEST_TIMEOUT_MS = 10_000;
 
 interface ChannelState {
   channels: Channel[];
@@ -164,7 +165,7 @@ interface ChannelActions {
   pollStatus: (expectedGeneration?: number) => Promise<void>;
   setSelectedGroup: (group: string) => void;
   setSelectedRegion: (region: string) => void;
-  hydrate: () => Promise<void>;
+  hydrate: (retry?: boolean) => Promise<void>;
 }
 
 
@@ -218,13 +219,13 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     const active = get();
     const switchingOrigins = backendOrigin(active.apiBaseUrl) !== backendOrigin(url);
     try {
-      const status = await probeBackend<BackendStatusPayload>(url);
+      const status = await probeBackend<BackendStatusPayload>(url, undefined, BOOTSTRAP_REQUEST_TIMEOUT_MS);
       const candidateToken = token?.trim();
       const tokenOverride = candidateToken || (switchingOrigins ? null : undefined);
       const config = await apiFetch<Record<string, unknown>>(
         url,
         '/api/config',
-        { cache: 'no-store' },
+        { cache: 'no-store', timeoutMs: BOOTSTRAP_REQUEST_TIMEOUT_MS },
         tokenOverride,
       );
       if (attempt !== connectionAttempt) return false;
@@ -423,10 +424,12 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
       set({ error: msg });
       throw err;
     } finally {
-      if (programRefreshTimer) clearTimeout(programRefreshTimer);
-      programRefreshTimer = setTimeout(() => {
-        void get().fetchPrograms().catch(() => undefined);
-      }, PROGRAM_REFRESH_MS);
+      if (isCurrent()) {
+        if (programRefreshTimer) clearTimeout(programRefreshTimer);
+        programRefreshTimer = setTimeout(() => {
+          if (isCurrent()) void get().fetchPrograms().catch(() => undefined);
+        }, PROGRAM_REFRESH_MS);
+      }
     }
   },
 
@@ -547,7 +550,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     const isCurrent = () => get().backendGeneration === generation;
     if (!hasApi(apiBaseUrl)) return;
     try {
-      const data = await apiFetch<Record<string, unknown>>(apiBaseUrl, '/api/config');
+      const data = await apiFetch<Record<string, unknown>>(apiBaseUrl, '/api/config', { cache: 'no-store', timeoutMs: BOOTSTRAP_REQUEST_TIMEOUT_MS });
       if (!isCurrent()) return;
       set(configPatch(data, get()));
     } catch (err) {
@@ -702,8 +705,9 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
   },
   setSelectedRegion: (region: string) => set({ selectedRegion: region }),
 
-  hydrate: async () => {
-    if (get()._hydrated) return;
+  hydrate: async (retry = false) => {
+    if (get()._hydrated && !retry) return;
+    set({ _hydrated: false, backendConnection: 'unknown', error: null });
     const { apiBaseUrl, backendGeneration } = get();
     if (!SAME_ORIGIN && !apiBaseUrl) {
       set({ backendConnection: 'disconnected', _hydrated: true });
@@ -713,7 +717,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     try {
       // A configured URL is not a connection. Probe the backend before
       // revealing provider credentials or attempting any other API work.
-      const status = await probeBackend(apiBaseUrl);
+      const status = await probeBackend(apiBaseUrl, undefined, BOOTSTRAP_REQUEST_TIMEOUT_MS);
       if (!isCurrentBackend()) return;
 
       // Global EPG payloads grow with the provider catalog and can exceed

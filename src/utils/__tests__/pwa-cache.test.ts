@@ -2,6 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { CACHEABLE_API_PATTERN } from '../pwa-cache';
 
 describe('CACHEABLE_API_PATTERN', () => {
+  it.each([
+    '/api/live-compatible',
+    '/api/live-compatible?probe=1',
+    '/api/live-compatible/live_1/authorize',
+    '/api/live-compatible/live_1/index.m3u8?ticket=synthetic',
+    '/api/live-compatible/live_1/segment/123.ts?ticket=synthetic',
+    'https://streamvault.test/api/LIVE-COMPATIBLE/live_1/index.m3u8?ticket=synthetic',
+  ])('never caches native compatibility delivery: %s', path => {
+    expect(CACHEABLE_API_PATTERN.test(path)).toBe(false);
+  });
+
   it('excludes transient media delivery endpoints from the service-worker cache', () => {
     expect(CACHEABLE_API_PATTERN.test('/api/channels?group=News')).toBe(true);
     for (const path of [
