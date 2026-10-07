@@ -1,0 +1,4 @@
+# Disposable local packaging proof, never used by production Compose.
+FROM python:3.13-slim
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-av ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN /usr/bin/python3 -c 'import av; print("PyAV import OK", av.__version__)' && ffmpeg -hide_banner -version
