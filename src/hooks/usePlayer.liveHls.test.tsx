@@ -227,6 +227,69 @@ describe('signed live HLS startup and recovery', () => {
     expect(usePlayerStore.getState().status).toBe('playing');
   });
 
+  it.each(['native ended', 'HLS fatal error', 'TS EarlyEof'].flatMap(terminal =>
+    ['NotAllowedError', 'success'].map(settlement => [terminal, settlement]),
+  ))('does not revive %s when initial play settles with %s after termination', async (terminal, settlement) => {
+    let resolvePlay!: () => void;
+    let rejectPlay!: (error: unknown) => void;
+    vi.mocked(video.play).mockImplementationOnce(() => new Promise((resolve, reject) => {
+      resolvePlay = resolve;
+      rejectPlay = reject;
+    }));
+    if (terminal === 'native ended') {
+      vi.spyOn(video, 'load').mockImplementation(() => {});
+      vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
+      vi.mocked(video.canPlayType).mockReturnValue('maybe');
+    }
+    if (terminal === 'TS EarlyEof') mocks.hlsSupported.mockReturnValue(false);
+    ranges = [[40, 55]];
+    await ready();
+    expect(video.play).toHaveBeenCalledOnce();
+    expect(usePlayerStore.getState().status).toBe('loading');
+    await act(async () => {
+      if (terminal === 'native ended') video.dispatchEvent(new Event('ended'));
+      if (terminal === 'HLS fatal error') {
+        const hls = mocks.instances[0];
+        const fatal = hls.on.mock.calls.find(([event]) => event === 'error')![1];
+        fatal('error', { fatal: true, details: 'bufferAppendError' });
+        expect(hls.destroy).toHaveBeenCalledOnce();
+      }
+      if (terminal === 'TS EarlyEof') {
+        const onError = mocks.mpegtsPlayer.on.mock.calls.find(([event]) => event === 'error')![1];
+        onError('NetworkError', 'EarlyEof', {});
+      }
+    });
+    // The transport dies before the initial browser play promise settles.
+    await act(async () => {
+      if (settlement === 'NotAllowedError') rejectPlay(new DOMException('User gesture required', 'NotAllowedError'));
+      else resolvePlay();
+    });
+    expect(usePlayerStore.getState().status).toBe('error');
+    expect(usePlayerStore.getState().errorMessage).toBe('Live playback stopped before it could start. Tap to retry.');
+    await act(async () => {
+      for (const event of ['loadeddata', 'canplay', 'progress', 'playing', 'waiting', 'stalled']) {
+        video.dispatchEvent(new Event(event));
+      }
+      await vi.advanceTimersByTimeAsync(65_000);
+    });
+    expect(usePlayerStore.getState().status).toBe('error');
+    expect(mocks.authorize).toHaveBeenCalledOnce();
+    expect(video.play).toHaveBeenCalledOnce();
+    const instances = mocks.instances.length;
+    await act(async () => hookRef.current?.retry());
+    expect(mocks.authorize).toHaveBeenCalledTimes(2);
+    expect(video.play).toHaveBeenCalledOnce();
+    if (terminal === 'HLS fatal error') expect(mocks.instances).toHaveLength(instances + 1);
+    if (terminal === 'TS EarlyEof') expect(mocks.mpegtsPlayer.destroy).toHaveBeenCalledOnce();
+    vi.mocked(video.play).mockResolvedValue();
+    await act(async () => {
+      video.dispatchEvent(new Event('loadeddata'));
+      video.dispatchEvent(new Event('canplay'));
+    });
+    expect(video.play).toHaveBeenCalledTimes(2);
+    expect(usePlayerStore.getState().status).toBe('playing');
+  });
+
   it.each(['awaiting tap', 'pending tap'])(
     'shows an actionable error when HLS is destroyed after denial with %s', async phase => {
       vi.mocked(video.play).mockRejectedValue(new DOMException('User gesture required', 'NotAllowedError'));

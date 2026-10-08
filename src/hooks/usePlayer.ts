@@ -939,8 +939,12 @@ export function usePlayer(): {
           startupReady,
         );
       };
+      let gesturePlayPending = false;
+      let transportInvalidated = false;
       const failEndedGestureTransport = () => {
-        if (!resumeGesturePlayback) return false;
+        // Latch terminal failure even before the initial play promise settles.
+        transportInvalidated = true;
+        if (!resumeGesturePlayback && !gesturePlayPending) return false;
         // A permission tap can only resume an intact prepared transport. A
         // terminal event must not hand loading to the suspended watchdog.
         resumeGesturePlayback = null;
@@ -948,9 +952,8 @@ export function usePlayer(): {
         setError('Live playback stopped before it could start. Tap to retry.');
         return true;
       };
-      let gesturePlayPending = false;
       const requestPreparedPlay = (fromGesture = false) => {
-        if (!isCurrentPlayback() || !isCurrentAuthorization() || gesturePlayPending ||
+        if (transportInvalidated || !isCurrentPlayback() || !isCurrentAuthorization() || gesturePlayPending ||
             usePlayerStore.getState().status === 'error') return;
         gesturePlayPending = true;
         if (fromGesture) {
@@ -960,13 +963,13 @@ export function usePlayer(): {
         }
         // No await here: this call must remain inside the button's gesture.
         void video.play().then(() => {
-          if (!isCurrentPlayback() || !isCurrentAuthorization() || usePlayerStore.getState().status === 'error') return;
+          if (transportInvalidated || !isCurrentPlayback() || !isCurrentAuthorization() || usePlayerStore.getState().status === 'error') return;
           gesturePlayPending = false;
           resumeGesturePlayback = null;
           log.info('HTML5: play() succeeded');
           setStatus('playing');
         }).catch((error: unknown) => {
-          if (!isCurrentPlayback() || !isCurrentAuthorization() || usePlayerStore.getState().status === 'error') return;
+          if (transportInvalidated || !isCurrentPlayback() || !isCurrentAuthorization() || usePlayerStore.getState().status === 'error') return;
           gesturePlayPending = false;
           const name = error && typeof error === 'object' && 'name' in error ? error.name : undefined;
           // A browser policy denial is not a broken stream. Keep the prepared
@@ -978,7 +981,7 @@ export function usePlayer(): {
             if (isLiveTs) liveStreamRecovery.suspend();
             const preparedSrc = video.src;
             resumeGesturePlayback = () => {
-              if (!isCurrentPlayback() || !isCurrentAuthorization() || video.src !== preparedSrc) return false;
+              if (transportInvalidated || !isCurrentPlayback() || !isCurrentAuthorization() || video.src !== preparedSrc) return false;
               requestPreparedPlay(true);
               return true;
             };
