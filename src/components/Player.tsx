@@ -375,6 +375,7 @@ export default function Player() {
       paused: video.paused,
       readyState: video.readyState,
       channelId: video.dataset.channelId,
+      awaitingGesture: usePlayerStore.getState().status === 'awaiting-gesture',
     } : null;
     if (shouldStartPlayerPlayback(previousChannelId, channelId, MOBILE, videoState)) {
       play();
@@ -825,6 +826,17 @@ export default function Player() {
         )}
 
         {/* Error display */}
+        {playerState.status === 'awaiting-gesture' && (
+          <div data-playback-permission className="absolute z-[4] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center text-white px-6 w-full max-w-sm" role="status">
+            <button type="button"
+              className="py-3 px-8 bg-accent border-none rounded-lg text-black text-base font-bold tap-none active:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+              onClick={(event) => { event.stopPropagation(); retry(); }}>
+              Tap to play
+            </button>
+            <p className="text-sm text-[#aaa] mt-3">Your browser needs a tap to start playback.</p>
+          </div>
+        )}
+
         {playerState.status === 'error' && (
           <div className="absolute z-[4] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center text-[#ff4757] animate-fade-in px-6 lg:px-0">
             <div className="text-48 mb-3">{'\u26A0'}</div>
@@ -925,7 +937,7 @@ export default function Player() {
         )}
 
         {/* Click/tap/swipe zone — toggles OSD; mobile also handles channel-switch swipes */}
-        {SHOW_OSD_CONTROLS && playerState.status !== 'error' && (
+        {SHOW_OSD_CONTROLS && playerState.status !== 'error' && playerState.status !== 'awaiting-gesture' && (
           <div
             className="absolute inset-0 z-[2]"
             onClick={handleTapZone}
@@ -936,7 +948,7 @@ export default function Player() {
         )}
 
         {/* Controls OSD — pointer-events only enabled when visible so hidden controls don't eat taps */}
-        {currentChannel && playerState.status !== 'error' && (
+        {currentChannel && playerState.status !== 'error' && playerState.status !== 'awaiting-gesture' && (
           <div className={cn(
             'absolute inset-0 flex flex-col justify-between opacity-0 transition-opacity duration-300 pointer-events-none z-[3]',
             showOSD && 'opacity-100'

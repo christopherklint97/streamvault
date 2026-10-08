@@ -57,7 +57,7 @@ export interface Category {
 }
 
 export interface PlayerState {
-  status: 'idle' | 'loading' | 'playing' | 'paused' | 'error';
+  status: 'idle' | 'loading' | 'playing' | 'paused' | 'awaiting-gesture' | 'error';
   currentChannel: Channel | null;
   errorMessage: string;
 }
