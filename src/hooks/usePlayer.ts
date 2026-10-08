@@ -119,6 +119,8 @@ let recordingVodPoll: ReturnType<typeof setInterval> | null = null;
 let html5PlaybackGeneration = 0;
 let liveAuthorizationGeneration = 0;
 let restartActiveLiveStream: (() => void) | null = null;
+// Persists with the attached media across mobile Player unmount/remount.
+let resumeGesturePlayback: (() => boolean) | null = null;
 let activeBrowserSubtitleController: AbortController | null = null;
 let activeBrowserTextTrack: TextTrack | null = null;
 const browserProgrammaticTextTracks = new WeakSet<TextTrack>();
@@ -361,6 +363,7 @@ function clearMediaSession() {
 /** Fully stop playback — called from hook stop() and Media Session stop handler */
 export function stopActivePlayback() {
   log.info('⏹ stopPlayback()');
+  resumeGesturePlayback = null;
 
   stopBgProgressTracking();
   clearFiniteHlsStallTimer();
@@ -501,6 +504,7 @@ export function usePlayer(): {
     }
 
     const playStartedAt = Date.now();
+    resumeGesturePlayback = null;
     const setStatus = usePlayerStore.getState().setStatus;
     const setError = usePlayerStore.getState().setError;
     const audioOnly = channel.contentType === 'livetv' && usePlayerStore.getState().audioOnly;
@@ -535,6 +539,7 @@ export function usePlayer(): {
     // WebKit needs the bounded compatibility feed from the first request, not
     // after a primary authorization deadline or a failed first-frame watchdog.
     const failCompatibleLiveHls = () => {
+      resumeGesturePlayback = null;
       disableLiveStreamRecovery();
       setError('Compatible Live TV is unavailable. Check the server connection and tap to retry.');
     };
@@ -934,6 +939,50 @@ export function usePlayer(): {
           startupReady,
         );
       };
+      let gesturePlayPending = false;
+      const requestPreparedPlay = (fromGesture = false) => {
+        if (!isCurrentPlayback() || !isCurrentAuthorization() || gesturePlayPending ||
+            usePlayerStore.getState().status === 'error') return;
+        gesturePlayPending = true;
+        if (fromGesture) {
+          setStatus('loading');
+          // Bound even a play() promise that never settles; denial suspends it again.
+          if (isLiveTs) liveStreamRecovery.resume();
+        }
+        // No await here: this call must remain inside the button's gesture.
+        void video.play().then(() => {
+          if (!isCurrentPlayback() || !isCurrentAuthorization() || usePlayerStore.getState().status === 'error') return;
+          gesturePlayPending = false;
+          resumeGesturePlayback = null;
+          log.info('HTML5: play() succeeded');
+          setStatus('playing');
+        }).catch((error: unknown) => {
+          if (!isCurrentPlayback() || !isCurrentAuthorization() || usePlayerStore.getState().status === 'error') return;
+          gesturePlayPending = false;
+          const name = error && typeof error === 'object' && 'name' in error ? error.name : undefined;
+          // A browser policy denial is not a broken stream. Keep the prepared
+          // source and its recovery callback; repeated denials never reauthorize.
+          if (name === 'NotAllowedError') {
+            log.info('HTML5: user gesture required');
+            if (bgBufferTimer) { clearTimeout(bgBufferTimer); bgBufferTimer = null; }
+            clearFiniteHlsStallTimer();
+            if (isLiveTs) liveStreamRecovery.suspend();
+            const preparedSrc = video.src;
+            resumeGesturePlayback = () => {
+              if (!isCurrentPlayback() || !isCurrentAuthorization() || video.src !== preparedSrc) return false;
+              requestPreparedPlay(true);
+              return true;
+            };
+            usePlayerStore.setState({ status: 'awaiting-gesture', errorMessage: '' });
+            return;
+          }
+          resumeGesturePlayback = null;
+          // Never serialize the browser error: it can contain signed media URLs.
+          log.error('HTML5: play() failed');
+          if (isLiveTs) disableLiveStreamRecovery();
+          setError('Playback could not start. Tap to retry.');
+        });
+      };
       const attemptPlay = () => {
         if (!startupReady || !canPlay || playAttempted || !isCurrentPlayback() ||
             usePlayerStore.getState().status === 'error') return;
@@ -954,16 +1003,7 @@ export function usePlayer(): {
         }
         playAttempted = true;
         log.info('HTML5: startup ready — attempting play()');
-        void video.play().then(() => {
-          if (!isCurrentPlayback() || usePlayerStore.getState().status === 'error') return;
-          log.info('HTML5: play() succeeded');
-          setStatus('playing');
-        }).catch((error) => {
-          if (!isCurrentPlayback() || usePlayerStore.getState().status === 'error') return;
-          log.error('HTML5: play() rejected', error);
-          if (isLiveTs && isCurrentPlayback()) disableLiveStreamRecovery();
-          if (isCurrentPlayback()) setError('Playback blocked — tap to retry');
-        });
+        requestPreparedPlay();
       };
       const completeHtml5Startup = async () => {
         if (startupStarted) return;
@@ -1024,7 +1064,7 @@ export function usePlayer(): {
         video.onplay = () => { recoverDrainedLiveStream(); armFiniteHlsStallTimer(); };
         video.onpause = clearFiniteHlsStallTimer;
         video.onwaiting = () => {
-          if (usePlayerStore.getState().status === 'error') return;
+          if (!isCurrentPlayback() || ['error', 'awaiting-gesture'].includes(usePlayerStore.getState().status)) return;
           log.debug('HTML5 event: waiting');
           armFiniteHlsStallTimer();
           // A completed transport can still have playable MSE data. Reconnect
@@ -1037,7 +1077,7 @@ export function usePlayer(): {
           }, 1500);
         };
         video.onplaying = () => {
-          if (!isCurrentPlayback() || usePlayerStore.getState().status === 'error') return;
+          if (!isCurrentPlayback() || ['error', 'awaiting-gesture'].includes(usePlayerStore.getState().status)) return;
           log.info('HTML5 event: playing');
           if (bgBufferTimer) { clearTimeout(bgBufferTimer); bgBufferTimer = null; }
           setStatus('playing');
@@ -1059,7 +1099,7 @@ export function usePlayer(): {
           recoverDrainedLiveStream();
         };
         video.onstalled = () => {
-          if (usePlayerStore.getState().status === 'error') return;
+          if (!isCurrentPlayback() || ['error', 'awaiting-gesture'].includes(usePlayerStore.getState().status)) return;
           log.warn('HTML5 event: stalled');
           armFiniteHlsStallTimer();
           if (isLiveTs) liveStreamRecovery.stalled();
@@ -1067,6 +1107,7 @@ export function usePlayer(): {
         video.onsuspend = () => log.debug('HTML5 event: suspend');
         video.onerror = () => {
           if (!isCurrentPlayback() || usePlayerStore.getState().status === 'error') return;
+          resumeGesturePlayback = null;
           const err = video.error;
           const errMsg = err ? `code=${err.code} message="${err.message}"` : 'unknown';
           log.error(`HTML5 event: error — ${errMsg}`);
@@ -1403,6 +1444,8 @@ export function usePlayer(): {
   }, []);
 
   const retry = useCallback(() => {
+    if (resumeGesturePlayback && ['awaiting-gesture', 'loading'].includes(usePlayerStore.getState().status) &&
+        resumeGesturePlayback()) return;
     log.info('🔄 retry() called');
     const clearError = usePlayerStore.getState().clearError;
     const channel = usePlayerStore.getState().currentChannel;
@@ -1449,6 +1492,8 @@ export function usePlayer(): {
   }, []);
 
   const togglePlay = useCallback(() => {
+    if (resumeGesturePlayback && ['awaiting-gesture', 'loading'].includes(usePlayerStore.getState().status) &&
+        resumeGesturePlayback()) return;
     if (typeof webapis !== 'undefined' && webapis.avplay) {
       try {
         const state = webapis.avplay.getState();
