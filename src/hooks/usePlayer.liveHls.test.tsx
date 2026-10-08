@@ -205,6 +205,151 @@ describe('signed live HLS startup and recovery', () => {
     expect(clientLogger.error).not.toHaveBeenCalled();
   });
 
+  it('shows an actionable error when native HLS ends after autoplay denial', async () => {
+    await blockedNativePlayback();
+    expect(usePlayerStore.getState().status).toBe('awaiting-gesture');
+    await act(async () => video.dispatchEvent(new Event('ended')));
+    expect(usePlayerStore.getState().status).toBe('error');
+    expect(usePlayerStore.getState().errorMessage).toMatch(/retry/i);
+    await act(async () => {
+      video.dispatchEvent(new Event('waiting'));
+      video.dispatchEvent(new Event('ended'));
+      await vi.advanceTimersByTimeAsync(65_000);
+    });
+    expect(usePlayerStore.getState().status).toBe('error');
+    expect(mocks.authorize).toHaveBeenCalledOnce();
+    expect(video.play).toHaveBeenCalledOnce();
+    await act(async () => hookRef.current?.retry());
+    expect(mocks.authorize).toHaveBeenCalledTimes(2);
+    expect(video.play).toHaveBeenCalledOnce();
+    vi.mocked(video.play).mockResolvedValue();
+    await act(async () => video.dispatchEvent(new Event('loadeddata')));
+    expect(usePlayerStore.getState().status).toBe('playing');
+  });
+
+  it.each(['awaiting tap', 'pending tap'])(
+    'shows an actionable error when HLS is destroyed after denial with %s', async phase => {
+      vi.mocked(video.play).mockRejectedValue(new DOMException('User gesture required', 'NotAllowedError'));
+      ranges = [[40, 55]];
+      await ready();
+      expect(usePlayerStore.getState().status).toBe('awaiting-gesture');
+      let resolvePlay!: () => void;
+      if (phase === 'pending tap') {
+        vi.mocked(video.play).mockImplementationOnce(() => new Promise(resolve => { resolvePlay = resolve; }));
+        await act(async () => hookRef.current?.retry());
+        expect(usePlayerStore.getState().status).toBe('loading');
+      }
+      const hls = mocks.instances[0];
+      const fatal = hls.on.mock.calls.find(([event]) => event === 'error')![1];
+      await act(async () => fatal('error', { fatal: true, details: 'bufferAppendError' }));
+      expect(hls.destroy).toHaveBeenCalledOnce();
+      expect(usePlayerStore.getState().status).toBe('error');
+      expect(usePlayerStore.getState().errorMessage).toMatch(/retry/i);
+      await act(async () => {
+        resolvePlay?.();
+        video.dispatchEvent(new Event('waiting'));
+        video.dispatchEvent(new Event('ended'));
+        await vi.advanceTimersByTimeAsync(65_000);
+      });
+      expect(usePlayerStore.getState().status).toBe('error');
+      expect(mocks.authorize).toHaveBeenCalledOnce();
+      const plays = vi.mocked(video.play).mock.calls.length;
+      await act(async () => hookRef.current?.retry());
+      expect(mocks.authorize).toHaveBeenCalledTimes(2);
+      expect(mocks.instances).toHaveLength(2);
+      expect(video.play).toHaveBeenCalledTimes(plays);
+      vi.mocked(video.play).mockResolvedValue();
+      await act(async () => {
+        video.dispatchEvent(new Event('loadeddata'));
+        video.dispatchEvent(new Event('canplay'));
+      });
+      expect(usePlayerStore.getState().status).toBe('playing');
+    },
+  );
+
+  it.each(['transport error', 'media error', 'drained EOF'])(
+    'invalidates a denied legacy TS transport on %s', async terminal => {
+      mocks.hlsSupported.mockReturnValue(false);
+      vi.mocked(video.play).mockRejectedValue(new DOMException('User gesture required', 'NotAllowedError'));
+      await ready();
+      expect(video.src).toBe('blob:legacy-ts-test');
+      expect(usePlayerStore.getState().status).toBe('awaiting-gesture');
+      const onError = mocks.mpegtsPlayer.on.mock.calls.find(([event]) => event === 'error')![1];
+      const onComplete = mocks.mpegtsPlayer.on.mock.calls.find(([event]) => event === 'complete')![1];
+      if (terminal === 'drained EOF') {
+        await act(async () => {
+          onComplete();
+          await vi.advanceTimersByTimeAsync(750);
+        });
+        // Transport completion alone can leave buffered media to resume.
+        expect(usePlayerStore.getState().status).toBe('awaiting-gesture');
+      }
+      await act(async () => {
+        if (terminal === 'transport error') onError('NetworkError', 'EarlyEof', {});
+        else video.dispatchEvent(new Event(terminal === 'media error' ? 'error' : 'ended'));
+      });
+      expect(usePlayerStore.getState().status).toBe('error');
+      expect(usePlayerStore.getState().errorMessage).toMatch(/retry/i);
+      await act(async () => {
+        onError('NetworkError', 'EarlyEof', {});
+        onComplete();
+        video.dispatchEvent(new Event('ended'));
+        await vi.advanceTimersByTimeAsync(65_000);
+      });
+      expect(usePlayerStore.getState().status).toBe('error');
+      expect(mocks.authorize).toHaveBeenCalledOnce();
+      expect(video.play).toHaveBeenCalledOnce();
+      await act(async () => hookRef.current?.retry());
+      expect(mocks.authorize).toHaveBeenCalledTimes(2);
+      expect(video.play).toHaveBeenCalledOnce();
+      vi.mocked(video.play).mockResolvedValue();
+      await act(async () => {
+        video.dispatchEvent(new Event('loadeddata'));
+        video.dispatchEvent(new Event('canplay'));
+      });
+      expect(usePlayerStore.getState().status).toBe('playing');
+    },
+  );
+
+  it.each(['native', 'HLS', 'legacy TS', 'unsigned TS'].flatMap(transport =>
+    ['stop', 'channel', 'backend', 'replacement'].map(invalidation => [transport, invalidation]),
+  ))('ignores obsolete %s terminal callbacks after %s invalidation', async (transport, invalidation) => {
+    if (transport === 'native') await blockedNativePlayback();
+    else {
+      if (transport.endsWith('TS')) mocks.hlsSupported.mockReturnValue(false);
+      if (transport === 'unsigned TS') mocks.authorize.mockResolvedValue(null);
+      vi.mocked(video.play).mockRejectedValue(new DOMException('User gesture required', 'NotAllowedError'));
+      ranges = [[40, 55]];
+      await ready();
+    }
+    expect(usePlayerStore.getState().status).toBe('awaiting-gesture');
+    const ended = video.onended!;
+    const mediaError = video.onerror!;
+    const fatal = mocks.instances[0]?.on.mock.calls.find(([event]) => event === 'error')?.[1];
+    const tsError = mocks.mpegtsPlayer.on.mock.calls.find(([event]) => event === 'error')?.[1];
+    await act(async () => {
+      if (invalidation === 'stop') hookRef.current?.stop();
+      if (invalidation === 'channel') usePlayerStore.setState({ currentChannel: {
+        ...usePlayerStore.getState().currentChannel!, id: 'live_other',
+      } });
+      if (invalidation === 'backend') rotateBackendRequestScope();
+      if (invalidation === 'replacement') hookRef.current?.play();
+    });
+    const state = usePlayerStore.getState().status;
+    const authorizations = mocks.authorize.mock.calls.length;
+    await act(async () => {
+      if (transport === 'native') ended.call(video, new Event('ended'));
+      if (transport === 'HLS') fatal('error', { fatal: true, details: 'bufferAppendError' });
+      if (transport.endsWith('TS')) tsError('NetworkError', 'EarlyEof', {});
+    });
+    expect(usePlayerStore.getState().status).toBe(state);
+    await act(async () => ended.call(video, new Event('ended')));
+    expect(usePlayerStore.getState().status).toBe(state);
+    await act(async () => mediaError.call(video, new Event('error')));
+    expect(usePlayerStore.getState().status).toBe(state);
+    expect(mocks.authorize).toHaveBeenCalledTimes(authorizations);
+  });
+
   it('bounds a permission tap whose play promise never settles', async () => {
     await blockedNativePlayback();
     vi.mocked(video.play).mockImplementationOnce(() => new Promise(() => {}));

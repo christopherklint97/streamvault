@@ -939,6 +939,15 @@ export function usePlayer(): {
           startupReady,
         );
       };
+      const failEndedGestureTransport = () => {
+        if (!resumeGesturePlayback) return false;
+        // A permission tap can only resume an intact prepared transport. A
+        // terminal event must not hand loading to the suspended watchdog.
+        resumeGesturePlayback = null;
+        disableLiveStreamRecovery();
+        setError('Live playback stopped before it could start. Tap to retry.');
+        return true;
+      };
       let gesturePlayPending = false;
       const requestPreparedPlay = (fromGesture = false) => {
         if (!isCurrentPlayback() || !isCurrentAuthorization() || gesturePlayPending ||
@@ -1106,7 +1115,8 @@ export function usePlayer(): {
         };
         video.onsuspend = () => log.debug('HTML5 event: suspend');
         video.onerror = () => {
-          if (!isCurrentPlayback() || usePlayerStore.getState().status === 'error') return;
+          if (!isCurrentPlayback() || !isCurrentAuthorization() || usePlayerStore.getState().status === 'error') return;
+          if (isLiveTs && failEndedGestureTransport()) return;
           resumeGesturePlayback = null;
           const err = video.error;
           const errMsg = err ? `code=${err.code} message="${err.message}"` : 'unknown';
@@ -1126,9 +1136,10 @@ export function usePlayer(): {
         };
         video.onabort = () => log.warn('HTML5 event: abort');
         video.onended = () => {
-          if (!isCurrentPlayback() || usePlayerStore.getState().status === 'error') return;
+          if (!isCurrentPlayback() || !isCurrentAuthorization() || usePlayerStore.getState().status === 'error') return;
           log.info('HTML5 event: ended');
           if (isLiveTs && isCurrentPlayback()) {
+            if (failEndedGestureTransport()) return;
             if (pendingLiveEof) { recoverDrainedLiveStream(true); return; }
             setStatus('loading');
             liveStreamRecovery.transportEnded('media-ended');
@@ -1220,7 +1231,9 @@ export function usePlayer(): {
 
           // Register all event handlers BEFORE attaching/loading
           player.on(mpegts.Events.ERROR, (type: string, detail: string, info: unknown) => {
-            if (!isCurrentPlayback() || activeMpegtsPlayer !== player) return;
+            if (!isCurrentPlayback() || !isCurrentAuthorization() || activeMpegtsPlayer !== player ||
+                usePlayerStore.getState().status === 'error') return;
+            if (isLiveTs && failEndedGestureTransport()) return;
             log.error(`mpegts ERROR: type=${type} detail=${detail}`, info);
             const status = info && typeof info === 'object' && 'code' in info
               ? Number(info.code) : 0;
@@ -1296,7 +1309,8 @@ export function usePlayer(): {
         syncLiveHlsSubtitles();
         video.dataset.streamOffset = '0';
         void attachLiveHls(video, playUrl, () => {
-          if (!isCurrentPlayback()) return;
+          if (!isCurrentPlayback() || usePlayerStore.getState().status === 'error') return;
+          if (failEndedGestureTransport()) return;
           setStatus('loading');
           liveStreamRecovery.transportEnded('hls-error');
         }, isCurrentPlayback, undefined, attemptPlay).then(dispose => {
