@@ -25,8 +25,8 @@ describe('frontend compiler and runtime dependency split', () => {
     expect(parserRequire.resolve('typescript')).toBe(require.resolve('typescript'));
   });
 
-  it('ships Preact 10 and retains React only as development peer/type support', () => {
-    expect(manifest.dependencies.preact).toBe('10.29.8');
+  it('ships Preact 11 and retains React only as development peer/type support', () => {
+    expect(manifest.dependencies.preact).toBe('11.0.1');
     expect(manifest.dependencies).not.toHaveProperty('react');
     expect(manifest.dependencies).not.toHaveProperty('react-dom');
     expect(manifest.devDependencies.react).toBe('19.3.0');
