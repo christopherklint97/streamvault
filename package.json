@@ -22,7 +22,7 @@
   "dependencies": {
     "hls.js": "1.7.3",
     "mpegts.js": "1.8.2",
-    "preact": "10.29.8",
+    "preact": "11.0.0",
     "zustand": "5.0.15"
   },
   "devDependencies": {
