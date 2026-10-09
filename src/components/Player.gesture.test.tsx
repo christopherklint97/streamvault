@@ -1,4 +1,4 @@
-import { act } from 'react';
+import { act } from '../test/act';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Player from './Player';

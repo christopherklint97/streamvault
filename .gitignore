@@ -41,6 +41,10 @@ certs/
 server/src/*.js
 server/tsconfig.tsbuildinfo
 
+# Python test/import caches
+__pycache__/
+*.pyc
+
 # Screenshots
 Screenshot*.png
 .claude/

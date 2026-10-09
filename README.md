@@ -1,6 +1,8 @@
 # StreamVault
 
-IPTV streaming app for Samsung Tizen smart TVs and mobile PWA. Built with React, TypeScript, and Vite, with a Node.js backend server.
+IPTV streaming app for Samsung Tizen smart TVs and mobile PWA. Built with Preact's React-compatible renderer, TypeScript 7, and Vite, with a Node.js backend server.
+
+Toolchain and upgrade notes: [frontend compiler/renderer](docs/frontend-toolchain.md) and [production runtime, compression, and existing-volume migration](docs/dependency-runtime.md).
 
 ## Backend required
 

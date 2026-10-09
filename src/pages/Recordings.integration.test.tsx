@@ -1,4 +1,4 @@
-import { act } from 'react';
+import { act } from '../test/act';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Recording } from '../types';
@@ -439,6 +439,10 @@ describe('Recordings integration', () => {
     await act(async () => {
       const convert = container.querySelector('#edit-rule-edit-convert-legacy') as HTMLInputElement;
       convert.click();
+    });
+    // Separate user interactions let Preact commit the changed draft before
+    // the save handler reads it, just as separate browser event-loop turns do.
+    await act(async () => {
       findButton(container, 'Save changes').click();
       await Promise.resolve();
     });
@@ -464,6 +468,8 @@ describe('Recordings integration', () => {
     });
     await act(async () => {
       setInput('#edit-rule-edit-daily-time', '21:00');
+    });
+    await act(async () => {
       findButton(container, 'Save changes').click();
       await Promise.resolve();
     });

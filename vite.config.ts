@@ -1,4 +1,5 @@
 import { defineConfig, type Plugin } from 'vite'
+import { frontendAliases } from './build/frontend-aliases.ts'
 import { readFileSync, writeFileSync } from 'fs'
 import { resolve } from 'path'
 import { fileURLToPath } from 'url'
@@ -480,11 +481,7 @@ export default defineConfig(({ mode }) => {
       __SERVER_URL__: JSON.stringify(serverUrl),
     },
     resolve: {
-      alias: {
-        'react': 'preact/compat',
-        'react-dom': 'preact/compat',
-        'react/jsx-runtime': 'preact/jsx-runtime',
-      },
+      alias: frontendAliases,
     },
     build: {
       target: tizen5 ? ['chrome63'] : 'es2017',

@@ -1,4 +1,5 @@
 import express from 'express';
+import { servePrecompressedAssets } from './precompressed-assets.js';
 import cors from 'cors';
 import path from 'path';
 import fs from 'node:fs';
@@ -2325,6 +2326,9 @@ app.use('/api', (err: Error, _req: express.Request, res: express.Response, _next
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FRONTEND_DIR = path.resolve(__dirname, '..', 'public');
+
+// Negotiate build-time Brotli/gzip only for fingerprinted JS/CSS.
+app.use('/assets', servePrecompressedAssets(path.join(FRONTEND_DIR, 'assets')));
 
 // Serve static files — fingerprinted assets cached forever, everything else no-cache
 app.use(express.static(FRONTEND_DIR, {
