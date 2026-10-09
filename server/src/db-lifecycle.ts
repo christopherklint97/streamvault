@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fork, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { processEntrypoint } from './process-entry.js';
 
 const REQUIRED_TABLES = ['channels', 'categories', 'programs', 'config'] as const;
 
@@ -229,10 +230,11 @@ export function backupDatabaseInWorker(
 ): Promise<string> {
   if (activeBackupWorker) return Promise.reject(new Error('Database backup already in progress'));
   return new Promise((resolve, reject) => {
-    const workerPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'db-backup-worker.ts');
+    const entry = processEntrypoint('db-backup-worker', import.meta.url);
+    const workerPath = fileURLToPath(entry.url);
     const child = fork(workerPath, [source, backupDir], {
       cwd: path.dirname(workerPath),
-      execArgv: ['--import', 'tsx'], stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+      execArgv: entry.execArgv, stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
     });
     let finishExit!: () => void;
     const exited = new Promise<void>(finish => { finishExit = finish; });

@@ -1,4 +1,5 @@
-import { act, createRef, forwardRef, useImperativeHandle, type RefObject } from 'react';
+import { act } from '../test/act';
+import { createRef, forwardRef, useImperativeHandle, type RefObject } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { seekRecordingPlayback, stopActivePlayback, usePlayer } from './usePlayer';

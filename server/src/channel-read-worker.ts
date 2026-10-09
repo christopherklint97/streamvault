@@ -1,4 +1,5 @@
 import { Worker } from 'node:worker_threads';
+import { processEntrypoint } from './process-entry.js';
 import type { DBChannel } from './db.js';
 
 export interface DirectoryStatusSnapshot {
@@ -17,8 +18,9 @@ type Reply = { id: number; rows?: DBChannel[]; status?: DirectoryStatusSnapshot;
 
 /** Keep channel lookups off the HTTP event loop when SQLite or storage stalls. */
 export function createChannelReadWorker(dbPath: string, warn: (message: string) => void = () => {}) {
-  const worker = new Worker(new URL('./channel-read-thread.ts', import.meta.url), {
-    execArgv: ['--import', 'tsx'], workerData: { dbPath },
+  const entry = processEntrypoint('channel-read-thread', import.meta.url);
+  const worker = new Worker(entry.url, {
+    execArgv: entry.execArgv, workerData: { dbPath },
   });
   const pending = new Map<number, { resolve: (reply: Reply) => void; reject: (error: Error) => void }>();
   let nextId = 0;

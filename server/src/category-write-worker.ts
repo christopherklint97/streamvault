@@ -1,11 +1,13 @@
 import { Worker } from 'node:worker_threads';
+import { processEntrypoint } from './process-entry.js';
 import type { DBChannel } from './db.js';
 
 type Reply = { id: number; error?: string; durationMs?: number };
 
 /** Serial writer keeps snapshot transactions off the request event loop. */
 export function createCategoryWriteWorker(dbPath: string, warn: (message: string) => void = () => {}) {
-  const worker = new Worker(new URL('./category-write-thread.ts', import.meta.url), { execArgv: ['--import', 'tsx'], workerData: { dbPath } });
+  const entry = processEntrypoint('category-write-thread', import.meta.url);
+  const worker = new Worker(entry.url, { execArgv: entry.execArgv, workerData: { dbPath } });
   const pending = new Map<number, { resolve: () => void; reject: (error: Error) => void }>();
   let nextId = 0;
   let closed = false;

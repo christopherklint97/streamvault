@@ -17,7 +17,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 26
+          node-version: 26.11.1
           cache: npm
           cache-dependency-path: |
             package-lock.json
@@ -37,7 +37,7 @@ jobs:
         run: npm ci
 
       - name: Install server dependencies
-        run: cd server && npm ci
+        run: cd server && npm ci --ignore-scripts
 
       - name: Lint
         run: npm run lint
@@ -48,13 +48,17 @@ jobs:
       - name: Typecheck server
         run: cd server && npm run typecheck
 
-      - name: Audit production dependencies
+      - name: Audit all dependencies (including build/test tooling)
         run: |
-          npm audit --omit=dev
-          cd server && npm run audit:prod
+          npm audit
+          cd server && npm audit
 
       - name: Test
-        run: npm run test
+        run: npm run test -- --maxWorkers=1 --no-file-parallelism
+      - name: Packaging helper tests
+        run: |
+          node --test scripts/precompress-assets.test.mjs
+          cd server && node --test scripts/prune-native.test.mjs
       - name: Apps2Samsung workflow contract checks (offline)
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/test_tizen_wgt_workflow.py
 
@@ -62,13 +66,13 @@ jobs:
         run: npm run build
 
       - name: Build Docker image
-        run: docker build -t streamvault-ci:packet .
+        run: docker build --build-arg GIT_REVISION="$(git rev-parse HEAD)" -t streamvault-ci:packet .
+      - name: Clean non-root application boot
+        run: node scripts/smoke-docker-startup.mjs streamvault-ci:packet
       - name: Test server in packaged runtime
         run: |
-          docker run --rm -v "$PWD:/checkout" -w /checkout/server streamvault-ci:packet \
-            npm run test -- --run --no-file-parallelism --maxWorkers=1 --testTimeout=30000
-          docker run --rm -v "$PWD:/checkout" -w /checkout/server/src streamvault-ci:packet \
-            /usr/bin/python3 -m unittest -v test_live_packet_worker test_live_packet_stitch
+          docker run --rm -e STREAMVAULT_ASSERT_PRODUCTION=1 streamvault-ci:packet node scripts/smoke-runtime.mjs
+          bash scripts/test-packaged-source.sh streamvault-ci:packet
 
   arm64-image:
     runs-on: ubuntu-24.04-arm
@@ -76,8 +80,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build ARM64 runtime with PyAV
         run: |
-          docker build -t streamvault-ci:arm64 .
+          docker build --build-arg GIT_REVISION="$(git rev-parse HEAD)" -t streamvault-ci:arm64 .
           docker run --rm streamvault-ci:arm64 /usr/bin/python3 -c 'import av; print(av.__version__)'
+          docker run --rm -e STREAMVAULT_ASSERT_PRODUCTION=1 streamvault-ci:arm64 node scripts/smoke-runtime.mjs
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26.11.1
+      - name: Clean non-root ARM64 application boot
+        run: node scripts/smoke-docker-startup.mjs streamvault-ci:arm64
+      - name: Install native ARM64 server test dependencies
+        run: cd server && npm ci --include=dev --ignore-scripts
+      - name: Test ARM64 server, media and Python sources in packaged runtime
+        run: bash scripts/test-packaged-source.sh streamvault-ci:arm64
       - name: Package verified ARM64 image
         run: docker save streamvault-ci:arm64 | gzip -1 > streamvault-arm64.tar.gz
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

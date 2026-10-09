@@ -1,12 +1,14 @@
 import { Worker } from 'node:worker_threads';
+import { processEntrypoint } from './process-entry.js';
 import type { DBProgram } from './db.js';
 
 type Reply = { id: number; rows?: DBProgram[]; error?: string; durationMs?: number };
 
 /** Run cold SQLite guide reads off the HTTP event loop. */
 export function createEpgReadWorker(dbPath: string, warn: (message: string) => void = () => {}) {
-  const worker = new Worker(new URL('./epg-read-thread.ts', import.meta.url), {
-    execArgv: ['--import', 'tsx'],
+  const entry = processEntrypoint('epg-read-thread', import.meta.url);
+  const worker = new Worker(entry.url, {
+    execArgv: entry.execArgv,
     workerData: { dbPath },
   });
   const pending = new Map<number, { resolve: (rows: DBProgram[]) => void; reject: (error: Error) => void }>();
