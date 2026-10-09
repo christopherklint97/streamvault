@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26.11.1
           cache: npm
@@ -69,8 +69,9 @@ jobs:
         run: docker build --build-arg GIT_REVISION="$(git rev-parse HEAD)" -t streamvault-ci:packet .
       - name: Clean non-root application boot
         run: node scripts/smoke-docker-startup.mjs streamvault-ci:packet
-      - name: Test server in packaged runtime
+      - name: Test server and native media in packaged runtime
         run: |
+          docker run --rm --cpus=1 --memory=768m --pids-limit=256 streamvault-ci:packet /usr/bin/python3 scripts/smoke-native-media.py
           docker run --rm -e STREAMVAULT_ASSERT_PRODUCTION=1 streamvault-ci:packet node scripts/smoke-runtime.mjs
           bash scripts/test-packaged-source.sh streamvault-ci:packet
 
@@ -81,9 +82,9 @@ jobs:
       - name: Build ARM64 runtime with PyAV
         run: |
           docker build --build-arg GIT_REVISION="$(git rev-parse HEAD)" -t streamvault-ci:arm64 .
-          docker run --rm streamvault-ci:arm64 /usr/bin/python3 -c 'import av; print(av.__version__)'
+          docker run --rm --cpus=1 --memory=768m --pids-limit=256 streamvault-ci:arm64 /usr/bin/python3 scripts/smoke-native-media.py
           docker run --rm -e STREAMVAULT_ASSERT_PRODUCTION=1 streamvault-ci:arm64 node scripts/smoke-runtime.mjs
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26.11.1
       - name: Clean non-root ARM64 application boot
@@ -94,7 +95,7 @@ jobs:
         run: bash scripts/test-packaged-source.sh streamvault-ci:arm64
       - name: Package verified ARM64 image
         run: docker save streamvault-ci:arm64 | gzip -1 > streamvault-arm64.tar.gz
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: streamvault-arm64-${{ github.event.pull_request.head.sha || github.sha }}
           path: streamvault-arm64.tar.gz

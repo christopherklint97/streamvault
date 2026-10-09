@@ -205,7 +205,7 @@ export async function prepareLosslessPair(previous: string, next: string,
       .filter(step => step > 0.001 && step < 0.1).sort((a, b) => a - b);
     const fps = 1 / steps[Math.floor(steps.length / 2)];
     const { stderr } = await execMedia('ffmpeg', ['-hide_banner', '-loglevel', 'info', '-debug_ts',
-      '-nostdin', '-threads', '1', '-i', previous, '-map', '0:v:0', '-an', '-vsync', '0', '-f', 'null', '-'],
+      '-nostdin', '-threads', '1', '-i', previous, '-map', '0:v:0', '-an', '-fps_mode:v', 'passthrough', '-f', 'null', '-'],
     { timeout: 45_000, maxBuffer: 4 * 1024 * 1024, signal });
     damaged = localizedTerminalDecoderError(stderr, before.video.at(-1)!.pts - before.video[0].pts, fps);
   }
@@ -304,7 +304,7 @@ export async function prepareEarlyThreeChunkPair(witness: string, middle: string
   for (let attempt = 0; attempt < 3 && terminalProofs < 2; attempt++) {
     const { stderr } = await execMedia('ffmpeg', ['-hide_banner', '-loglevel', 'info', '-debug_ts',
       '-nostdin', '-threads', '1', '-i', `concat:${witness}|${middle}`, '-map', '0:v:0',
-      '-an', '-vsync', '0', '-f', 'null', '-'],
+      '-an', '-fps_mode:v', 'passthrough', '-f', 'null', '-'],
     { timeout: 45_000, maxBuffer: 4 * 1024 * 1024, signal });
     if (localizedTerminalDecoderError(stderr,
       intervening.video.at(-1)!.pts - before.video[0].pts, fps)) terminalProofs++;
@@ -349,7 +349,7 @@ export async function prepareEarlyThreeChunkPair(witness: string, middle: string
 
     const decoded = async (file: string) => {
       const result = await execMedia('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin',
-        '-threads', '1', '-i', file, '-map', '0:v:0', '-an', '-vsync', '0', '-f', 'framemd5', '-'],
+        '-threads', '1', '-i', file, '-map', '0:v:0', '-an', '-fps_mode:v', 'passthrough', '-f', 'framemd5', '-'],
       { timeout: 60_000, maxBuffer: 512 * 1024, signal });
       if (/non-existing PPS|decode_slice_header error|error while decoding/i.test(result.stderr))
         return undefined;

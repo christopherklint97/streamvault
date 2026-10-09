@@ -16,7 +16,7 @@ const hashes = (file: string, stream: number): string[] => {
 };
 const decodedFrames = (file: string): string[] => {
   const result = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin',
-    '-threads', '1', '-i', file, '-map', '0:v:0', '-an', '-vsync', '0', '-f', 'framemd5', '-'],
+    '-threads', '1', '-i', file, '-map', '0:v:0', '-an', '-fps_mode:v', 'passthrough', '-f', 'framemd5', '-'],
   { timeout: 60000, encoding: 'utf8', maxBuffer: 256 * 1024 });
   expect(result.status).toBe(0);
   expect(result.stderr).not.toMatch(/non-existing PPS|decode_slice_header error/i);
