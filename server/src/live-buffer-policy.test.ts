@@ -6,7 +6,9 @@ import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 const mocks = vi.hoisted(() => ({ spawn: vi.fn() }));
-vi.mock('node:child_process', () => ({ spawn: mocks.spawn }));
+vi.mock('node:child_process', async importOriginal => ({
+  ...await importOriginal<typeof import('node:child_process')>(), spawn: mocks.spawn,
+}));
 import { createLiveBuffer, createLiveRouter, LIVE_HLS_MAX_SEGMENT_SECONDS } from './live-buffer.js';
 
 let root: string;

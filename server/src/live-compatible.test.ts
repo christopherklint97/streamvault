@@ -6,7 +6,16 @@ import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 const mocks = vi.hoisted(() => ({ spawn: vi.fn() }));
-vi.mock('node:child_process', () => ({ spawn: mocks.spawn }));
+vi.mock('node:child_process', async importOriginal => ({
+  ...await importOriginal<typeof import('node:child_process')>(), spawn: mocks.spawn,
+  // This routing/isolation test seeds fake TS bytes. Real media inventory and
+  // unsupported-subtitle rejection are exercised by the integration suites.
+  execFile: Object.assign(vi.fn(), {
+    [Symbol.for('nodejs.util.promisify.custom')]: vi.fn(async () => ({
+      stdout: JSON.stringify({ streams: [{ codec_type: 'video' }, { codec_type: 'audio' }] }), stderr: '',
+    })),
+  }),
+}));
 import { createLiveBuffer, createLiveRouter } from './live-buffer.js';
 
 let root: string;
