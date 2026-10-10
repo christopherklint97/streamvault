@@ -1,6 +1,7 @@
 import { Router, type Request } from 'express';
 import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { promisify } from 'node:util';
 import { mkdir, mkdtemp, open, readdir, readFile, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -8,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { isAuthorizedRequest } from './security.js';
 
 interface Segment { id: number; name: string; duration: number; bytes: number; discontinuity: boolean; }
+const probeFile = promisify(execFile);
 export const packetAwareLiveEnabled = (value: string | undefined): boolean => value === '1';
 // Stream-copy HLS cuts at source keyframes, not the requested two-second cadence.
 // Keep the advertised upper bound fixed for the lifetime of every playlist.
@@ -16,7 +18,7 @@ interface Channel {
   id: string; dir: string; epoch: string; segments: Segment[]; bytes: number; sequence: number; discontinuitySequence: number;
   lastAccess: number; lastPublish: number; worker?: ChildProcess; working?: string;
   generation: number; lastStageIndex: number; timer?: ReturnType<typeof setInterval>; terminating: boolean; retirement?: Promise<void>;
-  inspecting?: boolean; publishTask?: Promise<void>;
+  inspecting?: boolean; publishTask?: Promise<void>; stageValidated?: boolean;
 }
 export interface LiveBufferOptions {
   root?: string; maxChannels?: number; maxBytesPerChannel?: number; maxSegmentBytes?: number; maxReaders?: number;
@@ -131,9 +133,8 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       try { await unsafeMarkerStat(path.join(ch.working, 'UNSAFE')); markUnsafe(ch.id, 'worker_unsafe'); await retire(ch); return; }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { await retireUnsafe(ch, 'marker_unreadable'); return; } }
     }
-    // FFmpeg's HLS muxer writes separate WebVTT assets, which this endpoint
-    // cannot expose as selectable renditions. Fall back to legacy TS instead
-    // of silently serving video without the original subtitle track.
+    // Reject sidecars from any worker: this endpoint cannot expose separate
+    // subtitle renditions. Never silently serve video without its captions.
     try {
       if ((await readdir(ch.working)).some(name => name.endsWith('.vtt') || name.endsWith('_vtt.m3u8'))) {
         await retireUnsafe(ch); return;
@@ -161,6 +162,23 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       } catch { await retireUnsafe(ch); return; }
       if (ch.terminating) return;
       if (!data.length || data.length > maxSegmentBytes) { await retireUnsafe(ch); return; }
+      if (!packetAware && !ch.stageValidated) {
+        // MPEG-TS accepts unsupported subtitles (e.g. WebVTT) as anonymous
+        // private data. Validate the first closed segment of each generation
+        // before publishing anything; an unrecognizable track fails closed.
+        // Probe only the bounded local file, never another upstream request.
+        try {
+          const { stdout } = await probeFile('ffprobe', ['-v', 'error', '-show_entries',
+            'stream=codec_type', '-of', 'json', stage], { timeout: 2_000, maxBuffer: 64 * 1024 });
+          const streams = JSON.parse(stdout).streams as { codec_type: string }[];
+          if (!Array.isArray(streams) || !streams.length ||
+            streams.some(stream => !['video', 'audio', 'subtitle'].includes(stream.codec_type))) {
+            await retireUnsafe(ch); return;
+          }
+        } catch { await retireUnsafe(ch); return; }
+        if (ch.terminating) return;
+        ch.stageValidated = true;
+      }
       try {
         const space = await statfs(root);
         if (space.bavail * space.bsize < minFreeBytes + data.length) { void retireUnsafe(ch); return; }
@@ -255,15 +273,20 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     if (ch.terminating || stopped) return;
     const generation = ++ch.generation;
     ch.lastStageIndex = -1;
+    ch.stageValidated = false;
     const working = await mkdtemp(path.join(ch.dir, 'ingest-'));
     if (ch.terminating || stopped) { await rm(working, { recursive: true, force: true }); return; }
     ch.working = working;
     ch.lastPublish = Date.now();
     const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-i', url,
-      '-map', '0:v?', '-map', '0:a?', '-map', '0:s?', '-c', 'copy', '-f', 'hls',
-      '-hls_time', String(segmentSeconds), '-hls_list_size', '16',
-      '-hls_flags', 'delete_segments+omit_endlist+temp_file',
-      '-hls_segment_filename', path.join(working, '%d.ts'), path.join(working, 'index.m3u8')];
+      '-map', '0:v?', '-map', '0:a?', '-map', '0:s?', '-c', 'copy', '-f', 'segment',
+      // HLS's subtitle sidecar muxer only accepts WebVTT; MPEG-TS segments
+      // preserve native DVB subtitles. The list names only closed segments;
+      // publication builds its own bounded live playlist and reclaims files.
+      '-segment_time', String(segmentSeconds), '-segment_list_size', '16',
+      '-segment_list_flags', '+live', '-segment_list_type', 'm3u8',
+      '-segment_list', path.join(working, 'index.m3u8'),
+      '-segment_format', 'mpegts', path.join(working, '%d.ts')];
     // Never log FFmpeg arguments/stderr: upstream URL paths may embed credentials.
     // The packet worker receives only a loopback proxy URL. The token is not
     // passed in argv (or logged); it authenticates the same proxy as capture.
