@@ -2455,12 +2455,18 @@ function scheduleNextBackup(): void {
 const httpServer = app.listen(PORT, '0.0.0.0', () => {
   logger.info(`StreamVault server listening on http://0.0.0.0:${PORT}`);
   startupSync();
+  // Recovery probes rolled-off chunks asynchronously so the API stays responsive;
+  // capture starts only after the index is reconciled.
   archiveRecovering = true;
-  try { archiveCapture.recover(); recoverSegmentedRefs(); }
-  finally { archiveRecovering = false; }
-  archiveCapture.startAll();
-  // The index survives restart; backstop cleanup does not depend on EPG or viewers.
-  for (const archive of archiveStore.archives()) pruneArchive(archiveStore, archiveRoot, archive.channelId);
+  archiveCapture.recover()
+    .then(() => recoverSegmentedRefs())
+    .catch(err => logger.error(`Archive recovery failed: ${err}`))
+    .finally(() => {
+      archiveRecovering = false;
+      archiveCapture.startAll();
+      // The index survives restart; backstop cleanup does not depend on EPG or viewers.
+      for (const archive of archiveStore.archives()) pruneArchive(archiveStore, archiveRoot, archive.channelId);
+    });
   // Prewarm DNS+TLS to the Xtream upstream so first user click hits a warm socket
   const xtreamServer = getConfig('xtream_server');
   if (xtreamServer) prewarmUpstream(xtreamServer);

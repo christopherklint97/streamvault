@@ -587,6 +587,20 @@ describe('recorder lifecycle integration', () => {
     expect(recorder.isRecordingActive('older')).toBe(false);
   });
 
+  it('prunes cancelled rows whose airing ended over a week ago and keeps recent ones', async () => {
+    const day = 24 * 60 * 60_000;
+    state.records.set('old', recording({ id: 'old', status: 'cancelled', end_time: Date.now() - 8 * day }));
+    state.records.set('recent', recording({ id: 'recent', status: 'cancelled', end_time: Date.now() - day }));
+    state.records.set('future', recording({ id: 'future', status: 'cancelled', end_time: Date.now() + day }));
+    const recorder = await import('./recorder.js');
+
+    await recorder.recoverRecordings();
+
+    expect(state.records.has('old')).toBe(false);
+    expect(state.records.has('recent')).toBe(true);
+    expect(state.records.has('future')).toBe(true);
+  });
+
   it('recovers legacy partial capture data and finalizes it after the recording window', async () => {
     const nested = path.join(recordingsDir, '2026', '09', '20');
     fs.mkdirSync(nested, { recursive: true });

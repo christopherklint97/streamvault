@@ -828,19 +828,24 @@ export function getRecordingMasterFilePath(id: string): string | null {
   return fullPath;
 }
 
+const CANCELLED_RETENTION_MS = 7 * 24 * 60 * 60_000;
+
 /** Recover captures and finalization interrupted by a server stop. */
 export async function recoverRecordings(): Promise<void> {
   const interrupted = [
     ...getRecordingsByStatus('recording'),
     ...getRecordingsByStatus('finalizing'),
   ];
+  const now = Date.now();
   const cancelled = getRecordingsByStatus('cancelled');
   for (const rec of cancelled) {
     const vodMaster = vodMasterPathForRecord(rec.id);
     if (vodMaster) await removeRecordingVodHlsCache(vodMaster);
     removeRecordingArtifacts(rec.id);
+    // Cadence history only consults cancelled rows for airings still in the
+    // guide; long-past ones only cost a filesystem walk on every boot.
+    if (rec.end_time < now - CANCELLED_RETENTION_MS) deleteRecording(rec.id);
   }
-  const now = Date.now();
 
   // Restore every still-live capture first so the scheduler can resume it on its
   // immediate startup tick, regardless of how long older media takes to finish.
