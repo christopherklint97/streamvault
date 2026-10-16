@@ -32,6 +32,19 @@ export function normalizeAllowedOrigins(value: string | undefined): string[] {
     .filter(Boolean);
 }
 
+// Browsers attach Origin to cross-site writes. Reject writes from foreign web
+// pages; widgets/native clients send no Origin, "null", or a non-web scheme.
+export function isForeignOriginWrite(
+  method: string, origin: string | undefined, hosts: Array<string | undefined>, allowedOrigins: string[],
+): boolean {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase()) || !origin || origin === 'null') return false;
+  let parsed: URL;
+  try { parsed = new URL(origin); } catch { return true; }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  if (allowedOrigins.includes(parsed.origin)) return false;
+  return !hosts.some(host => host?.split(',')[0].trim().toLowerCase() === parsed.host.toLowerCase());
+}
+
 export function isAuthorizedRequest(authorization: string | undefined, expectedToken: string | undefined, headerToken?: string | string[]): boolean {
   if (!expectedToken) return true;
   const bearer = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : authorization;

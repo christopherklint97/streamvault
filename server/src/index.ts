@@ -119,6 +119,7 @@ import {
   createRecordingPlaybackTicket,
   maskConfigResponse,
   normalizeAllowedOrigins,
+  isForeignOriginWrite,
   requireAuth,
   validateExternalHttpUrl,
   validateSourceHttpUrl,
@@ -211,6 +212,13 @@ const allowedOrigins = normalizeAllowedOrigins(process.env.STREAMVAULT_ALLOWED_O
 app.use(cors({
   origin: allowedOrigins.length > 0 ? allowedOrigins : true,
 }));
+app.use('/api', (req, res, next) => {
+  if (isForeignOriginWrite(req.method, req.headers.origin, [req.headers.host, req.get('x-forwarded-host')], allowedOrigins)) {
+    res.status(403).json({ error: 'Cross-origin write rejected' });
+    return;
+  }
+  next();
+});
 app.use(express.json());
 
 const archiveRoot = process.env.RECORDINGS_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'recordings');
@@ -751,7 +759,7 @@ app.post('/api/client-logs', (req, res) => {
   // Client input: bound volume and strip control characters so entries cannot forge log lines.
   const clean = (value: unknown, max: number) =>
     (typeof value === 'string' ? value : JSON.stringify(value) ?? '')
-      .replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, max);
+      .replace(/\p{Cc}+/gu, ' ').slice(0, max);
   for (const entry of logs.slice(0, 50)) {
     const { level, message, ts } = (entry ?? {}) as Record<string, unknown>;
     const prefix = `${clean(ts, 40) || new Date().toISOString()} [CLIENT:${(clean(level, 10) || 'info').toUpperCase()}]`;
@@ -2297,6 +2305,16 @@ app.put('/api/config', requireAuth, (req, res) => {
         res.status(400).json({ error: `${name}: ${validation.error}` });
         return;
       }
+    }
+  }
+  // The stored password is sent to the configured server; a new origin must
+  // come with its password so a rewritten server URL cannot harvest it.
+  if (xtreamServer && !(typeof xtreamPassword === 'string' && xtreamPassword !== '')) {
+    const origin = (value: string) => { try { return new URL(value).origin; } catch { return value; } };
+    const current = getConfig('xtream_server', '');
+    if (current && origin(xtreamServer) !== origin(current)) {
+      res.status(400).json({ error: 'xtreamPassword is required when changing the Xtream server' });
+      return;
     }
   }
   const sourceChanged = (inputMode !== undefined && inputMode !== getConfig('input_mode', 'manual'))
