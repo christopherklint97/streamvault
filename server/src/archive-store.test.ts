@@ -286,4 +286,30 @@ describe('durable archive index', () => {
         .toThrow('Saved segments are unavailable');
     } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
+  it('selects saved-show chunks without pair validity when a seam is broken', () => {
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('one', 'One', true, 24);
+    const witness = 'old-chunk-000000000.ts', middle = 'old-chunk-000000001.ts';
+    const next = 'new-chunk-000000000.ts', following = 'new-chunk-000000001.ts';
+    try {
+      for (const c of [
+        { id: witness, start: 84_000, end: 103_720, duration: 19.72, path: 'old0.ts', epoch: 1 },
+        { id: middle, start: 103_720, end: 115_560, duration: 11.84, path: 'old1.ts', epoch: 1 },
+        { id: next, start: 108_000, end: 128_000, duration: 20, path: 'new0.ts', epoch: 2 },
+        { id: following, start: 128_000, end: 148_000, duration: 20, path: 'new1.ts', epoch: 2 },
+      ]) store.publish({ channelId: 'one', size: 188, ...c });
+      store.addRecordingRef('show', middle);
+      expect(store.publishPlaybackPair({
+        priorId: witness, middleId: middle, nextId: next,
+        priorRawPath: 'old0.ts', middleRawPath: 'old1.ts', nextRawPath: 'new0.ts',
+        priorPath: 'old0.pair.playback.ts', priorSize: 180, priorCut: 9.6,
+        nextPath: 'new0.pair.playback.ts', nextSize: 170, nextOffset: 0, nextDuration: 20,
+        sessionTimeline: [{ id: next, presentationStart: 93_600 },
+          { id: following, presentationStart: 113_600 }],
+      })).toBe(true);
+      expect(store.reconcileMissing(middle)).toBe('quarantined');
+      expect(store.overlap('one', 84_000, 133_600)).toEqual([]);
+      expect(store.overlap('one', 84_000, 133_600, false, false).map(c => c.id)).toEqual([witness, next, following]);
+    } finally { db.close(); }
+  });
 });

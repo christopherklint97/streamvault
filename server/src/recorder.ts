@@ -55,6 +55,9 @@ interface ActiveRecording {
   resumeAfterStop: boolean;
   exitCode: number | null;
   finishOnce: () => Promise<void>;
+  /** Resolves once ffmpeg has exited and its capture slot is free. */
+  released: Promise<void>;
+  /** Resolves after terminal handling, including any finalization. */
   done: Promise<void>;
 }
 
@@ -234,6 +237,13 @@ function recoveryPaths(id: string): ReturnType<typeof recordingPaths> | null {
     ?? artifacts.find(file => isCaptureSegment(file, id))
     ?? artifacts.find(file => path.basename(file) === `${id}.mp4.part`);
   return preferred ? recordingPaths(root, path.dirname(preferred), id) : null;
+}
+
+/** Recovery paths only when earlier capture attempts left segments on disk. */
+function capturedSegmentPaths(id: string): ReturnType<typeof recordingPaths> | null {
+  const root = getRecordingsDir();
+  const segment = discoverRecordingArtifacts(root, id).find(file => isCaptureSegment(file, id));
+  return segment ? recordingPaths(root, path.dirname(segment), id) : null;
 }
 
 function removeRecordingArtifacts(id: string, verifyRemoval = false): number {
@@ -510,10 +520,17 @@ export async function startRecording(id: string): Promise<void> {
 
   const freeSpace = getFreeDiskSpace(recordingsDir);
   if (freeSpace < 1_073_741_824) {
+    logger.error(`Recording ${id}: insufficient disk space (${(freeSpace / 1e9).toFixed(1)}GB free)`);
+    // A retry after an early ffmpeg exit must not strand earlier attempts:
+    // publish what was already captured instead of failing the row.
+    const captured = capturedSegmentPaths(id);
+    if (captured) {
+      await publishCompletedRecording(id, captured);
+      return;
+    }
     updateRecording(id, { status: 'failed', error: 'Insufficient disk space (< 1GB free)' });
     markCadenceRetry(rec);
     requestRuleReconciliation(rec.rule_id);
-    logger.error(`Recording ${id}: insufficient disk space (${(freeSpace / 1e9).toFixed(1)}GB free)`);
     return;
   }
 
@@ -542,6 +559,14 @@ export async function startRecording(id: string): Promise<void> {
       return;
     }
     const message = error instanceof Error ? error.message : 'Failed to resolve stream URL';
+    if (capturedSegmentPaths(id)) {
+      // Earlier attempts captured media. Stay scheduled so the scheduler keeps
+      // retrying; once the window ends startRecording publishes the segments.
+      updateRecordingIfStatus(id, ['scheduled', 'recording'], { status: 'scheduled', error: message });
+      logger.warn(`Recording ${id}: ${message}; keeping captured segments and retrying until the window ends`);
+      finishStartingRecording(id, starting);
+      return;
+    }
     if (updateRecordingIfStatus(id, ['scheduled', 'recording'], { status: 'failed', error: message })) {
       markCadenceRetry(rec);
       requestRuleReconciliation(rec.rule_id);
@@ -601,6 +626,8 @@ export async function startRecording(id: string): Promise<void> {
 
   let resolveDone!: () => void;
   const done = new Promise<void>(resolve => { resolveDone = resolve; });
+  let resolveReleased!: () => void;
+  const released = new Promise<void>(resolve => { resolveReleased = resolve; });
   Object.assign(active, {
     id,
     process: ffmpeg,
@@ -609,6 +636,7 @@ export async function startRecording(id: string): Promise<void> {
     resumeAfterStop: false,
     exitCode: null,
     finishOnce: finishAttempt,
+    released,
     done,
   });
   activeRecordings.set(id, active);
@@ -636,6 +664,9 @@ export async function startRecording(id: string): Promise<void> {
     void active.finishOnce().catch(error => {
       logger.error(`Recording ${id}: terminal capture handling failed: ${error instanceof Error ? error.message : error}`);
     }).finally(resolveDone);
+    // finishOnce has synchronously released the slot and moved the row out of
+    // `recording`; finalization may continue long after this point.
+    resolveReleased();
   };
   ffmpeg.once('close', code => {
     active.exitCode = code;
@@ -647,13 +678,23 @@ export async function startRecording(id: string): Promise<void> {
   });
 }
 
-export async function stopRecording(id: string, preserveIfFuture = false): Promise<void> {
+export function stopRecording(id: string, preserveIfFuture = false): Promise<void> {
+  return stopCapture(id, preserveIfFuture, false);
+}
+
+/** Stop a capture and resolve once its slot is released; finalization continues in the background. */
+export function stopRecordingCapture(id: string): Promise<void> {
+  return stopCapture(id, false, true);
+}
+
+async function stopCapture(id: string, preserveIfFuture: boolean, untilReleased: boolean): Promise<void> {
   if (getRecording(id)?.capture_format === 'segmented') return stopSegmentedRecording(id, preserveIfFuture);
   const starting = startingRecordings.get(id);
   if (starting) await starting.done;
 
   const active = activeRecordings.get(id);
   if (!active) {
+    if (untilReleased) return;
     const finalizing = finalizingRecordings.get(id);
     if (finalizing) await finalizing.promise;
     return;
@@ -672,7 +713,7 @@ export async function stopRecording(id: string, preserveIfFuture = false): Promi
   }, FORCE_KILL_DELAY_MS);
   forceKillTimer.unref?.();
   try {
-    await active.done;
+    await (untilReleased ? active.released : active.done);
   } finally {
     clearTimeout(forceKillTimer);
   }

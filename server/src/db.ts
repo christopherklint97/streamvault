@@ -780,9 +780,15 @@ export function completeRecordingAndAdvanceCadence(
   return completeRecordingTransaction(id, updates, ruleId, ruleRevision, programStartTime, airingKey);
 }
 
-export function deleteRecording(id: string): void {
+// Removing chunk refs without the row would let archive pruning delete media
+// still listed as a saved recording; keep both changes atomic.
+const deleteRecordingTransaction = db.transaction((id: string) => {
   archiveStore.removeRecordingRefs(id);
   commercialStore.deleteRecordingWithSegments(id);
+});
+
+export function deleteRecording(id: string): void {
+  deleteRecordingTransaction(id);
 }
 
 const recordingSelect = `SELECT recordings.*,

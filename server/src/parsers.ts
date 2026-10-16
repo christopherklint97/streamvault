@@ -115,9 +115,11 @@ function parseXMLTVDate(dateStr: string): number | null {
     const offsetH = parseInt(offsetStr.substring(1, 3), 10);
     const offsetM = parseInt(offsetStr.substring(3, 5), 10);
     const totalOffsetMs = sign * (offsetH * 60 + offsetM) * 60000;
-    return Date.UTC(year, month, day, hour, minute, second) - totalOffsetMs;
+    const time = Date.UTC(year, month, day, hour, minute, second) - totalOffsetMs;
+    return Number.isFinite(time) ? time : null;
   }
-  return Date.UTC(year, month, day, hour, minute, second);
+  const time = Date.UTC(year, month, day, hour, minute, second);
+  return Number.isFinite(time) ? time : null;
 }
 
 function getTagContent(xml: string, tag: string): string {
@@ -188,7 +190,9 @@ export function parseEPG(xmlText: string, options: ParseEpgOptions = {}): DBProg
     const startTime = parseXMLTVDate(startStr);
     if (!startTime || startTime > cutoff) continue;
 
-    const stopTime = stopStr ? parseXMLTVDate(stopStr) : null;
+    // An unparseable or non-positive stop is treated as missing and inferred below.
+    const parsedStop = stopStr ? parseXMLTVDate(stopStr) : null;
+    const stopTime = parsedStop !== null && parsedStop > startTime ? parsedStop : null;
     const title = getTagContent(body, 'title') || 'No Title';
     const subtitle = getTagContent(body, 'sub-title');
     const description = getTagContent(body, 'desc');

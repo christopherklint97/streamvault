@@ -339,6 +339,18 @@ describe('recording artifact cleanup', () => {
     ]);
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it('does not traverse the continuous archive tree', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'streamvault-artifacts-'));
+    const archive = path.join(dir, 'archive', 'c1', 'session');
+    const nested = path.join(dir, '2026', '09', '20');
+    fs.mkdirSync(archive, { recursive: true });
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(archive, 'r1.chunk.ts'), 'chunk');
+    fs.writeFileSync(path.join(nested, 'r1.ts'), 'master');
+    expect(discoverRecordingArtifacts(dir, 'r1').map(file => path.basename(file))).toEqual(['r1.ts']);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 describe('bounded cancellable child processes', () => {

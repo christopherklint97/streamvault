@@ -12,6 +12,12 @@ let capture: Capture | undefined;
 const active = new Map<string, string>();
 const stopping = new Map<string, Promise<void>>();
 
+// Saved shows play raw masters (createRecordingSnapshot ignores playback pairs),
+// so one broken seam must not empty the whole selection.
+function recordingChunks(channelId: string, start: number, end: number) {
+  return archiveStore.overlap(channelId, start, end, false, false);
+}
+
 export function setSegmentedCapture(value: Capture): void { capture = value; }
 export function segmentedActive(id: string): boolean { return active.has(id) || stopping.has(id); }
 export function segmentedCaptureCount(): number { return new Set(active.values()).size; }
@@ -21,7 +27,7 @@ export function onSegmentedChunk(channelId: string): void {
     if (channel !== channelId) continue;
     const rec = getRecording(id);
     if (rec?.status !== 'recording') continue;
-    for (const chunk of archiveStore.overlap(channelId, rec.start_time, rec.end_time)) {
+    for (const chunk of recordingChunks(channelId, rec.start_time, rec.end_time)) {
       archiveStore.addRecordingRef(id, chunk.id);
     }
   }
@@ -30,7 +36,7 @@ export function onSegmentedChunk(channelId: string): void {
 export function recoverSegmentedRefs(): void {
   for (const rec of getRecordings()) {
     if (rec.capture_format !== 'segmented' || !['recording', 'finalizing', 'completed'].includes(rec.status)) continue;
-    for (const chunk of archiveStore.overlap(rec.channel_id, rec.start_time, rec.end_time)) {
+    for (const chunk of recordingChunks(rec.channel_id, rec.start_time, rec.end_time)) {
       archiveStore.addRecordingRef(rec.id, chunk.id);
     }
   }
@@ -78,7 +84,7 @@ export function stopSegmentedRecording(id: string, resume = false): Promise<void
       if (!covered) logger.warn(`Segmented recording ${id}: source stopped before the final complete archive chunk`);
     }
     if (!updateRecordingIfStatus(id, ['recording', 'scheduled', 'finalizing'], { status: 'finalizing', actual_end: Date.now() })) return;
-    const chunks = archiveStore.overlap(rec.channel_id, rec.start_time, Math.min(Date.now(), rec.end_time));
+    const chunks = recordingChunks(rec.channel_id, rec.start_time, Math.min(Date.now(), rec.end_time));
     if (!chunks.length) {
       failSegmented(rec, 'No complete segments were captured');
       return;

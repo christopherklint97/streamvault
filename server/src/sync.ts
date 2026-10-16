@@ -210,48 +210,79 @@ function getManualUrls(): { playlistUrl: string; epgUrl: string } | null {
 }
 
 const CONNECT_TIMEOUT_MS = 60_000;
+/** A slow link may take many minutes for a large EPG; only a stalled body fails. */
+const IDLE_TIMEOUT_MS = 60_000;
+/** Bounds both the download and the decompressed text (V8 strings cap near 512 MiB). */
+const MAX_TEXT_BYTES = 512 * 1024 * 1024;
 
-async function fetchText(url: string, signal: AbortSignal): Promise<string> {
+export async function fetchText(url: string, signal: AbortSignal): Promise<string> {
   logger.debug(`Fetching ${url}`);
-  const connectTimeout = AbortSignal.timeout(CONNECT_TIMEOUT_MS);
-  const connectSignal = AbortSignal.any([signal, connectTimeout]);
-  const response = await fetch(url, { signal: connectSignal });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} ${response.statusText}`);
-  }
-
-  const contentLength = response.headers.get('content-length');
-  const totalBytes = contentLength ? parseInt(contentLength, 10) : null;
-  logger.info(`Response ${response.status}, downloading${totalBytes ? ` (${(totalBytes / 1024 / 1024).toFixed(1)} MB)` : ''}...`);
-
-  const reader = response.body!.getReader();
-  const chunks: Uint8Array[] = [];
-  let received = 0;
-  let lastLog = Date.now();
-
-  for (;;) {
-    if (signal.aborted) throw new Error('Aborted');
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.length;
-    if (Date.now() - lastLog > 10_000) {
-      const mb = (received / 1024 / 1024).toFixed(1);
-      const pct = totalBytes ? ` (${Math.round(received / totalBytes * 100)}%)` : '';
-      logger.debug(`Downloaded ${mb} MB${pct}`);
-      lastLog = Date.now();
+  // The timeout covers response headers, then resets on every body chunk.
+  const timeout = new AbortController();
+  let timedOut = null as 'connect' | 'idle' | null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = (kind: 'connect' | 'idle', ms: number) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => { timedOut = kind; timeout.abort(); }, ms);
+  };
+  arm('connect', CONNECT_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { signal: AbortSignal.any([signal, timeout.signal]) });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} ${response.statusText}`);
     }
-  }
 
-  logger.info(`Download complete: ${(received / 1024 / 1024).toFixed(1)} MB`);
-  const buffer = Buffer.concat(chunks);
+    const contentLength = response.headers.get('content-length');
+    const totalBytes = contentLength ? parseInt(contentLength, 10) : null;
+    if (totalBytes !== null && totalBytes > MAX_TEXT_BYTES) {
+      throw new Error(`Response too large (${(totalBytes / 1024 / 1024).toFixed(1)} MB)`);
+    }
+    logger.info(`Response ${response.status}, downloading${totalBytes ? ` (${(totalBytes / 1024 / 1024).toFixed(1)} MB)` : ''}...`);
 
-  const isGzip = (buffer[0] === 0x1f && buffer[1] === 0x8b) || url.endsWith('.gz');
-  if (isGzip) {
-    logger.debug('Decompressing gzip data');
-    return gunzipSync(buffer).toString('utf-8');
+    const reader = response.body!.getReader();
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    let lastLog = Date.now();
+
+    for (;;) {
+      if (signal.aborted) throw new Error('Aborted');
+      arm('idle', IDLE_TIMEOUT_MS);
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      if (received > MAX_TEXT_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error(`Response too large (> ${MAX_TEXT_BYTES / 1024 / 1024} MB)`);
+      }
+      if (Date.now() - lastLog > 10_000) {
+        const mb = (received / 1024 / 1024).toFixed(1);
+        const pct = totalBytes ? ` (${Math.round(received / totalBytes * 100)}%)` : '';
+        logger.debug(`Downloaded ${mb} MB${pct}`);
+        lastLog = Date.now();
+      }
+    }
+    clearTimeout(timer);
+
+    logger.info(`Download complete: ${(received / 1024 / 1024).toFixed(1)} MB`);
+    const buffer = Buffer.concat(chunks);
+
+    const isGzip = (buffer[0] === 0x1f && buffer[1] === 0x8b) || url.endsWith('.gz');
+    if (isGzip) {
+      logger.debug('Decompressing gzip data');
+      return gunzipSync(buffer, { maxOutputLength: MAX_TEXT_BYTES }).toString('utf-8');
+    }
+    return buffer.toString('utf-8');
+  } catch (error) {
+    if (timedOut && !signal.aborted) {
+      throw new Error(timedOut === 'connect'
+        ? `Timed out waiting for response after ${CONNECT_TIMEOUT_MS / 1000}s`
+        : `Download stalled for ${IDLE_TIMEOUT_MS / 1000}s`, { cause: error });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
-  return buffer.toString('utf-8');
 }
 
 async function syncManual(signal: AbortSignal): Promise<void> {
@@ -328,8 +359,9 @@ export async function sync(): Promise<void> {
     return;
   }
 
-  abortController = new AbortController();
-  const { signal } = abortController;
+  const controller = new AbortController();
+  abortController = controller;
+  const { signal } = controller;
   state.isSyncing = true;
 
   try {
@@ -357,21 +389,22 @@ export async function sync(): Promise<void> {
     state.message = `Sync failed: ${msg}`;
     logger.error(`Sync failed: ${msg}`);
   } finally {
+    if (signal.aborted) {
+      state.phase = 'idle';
+      state.message = 'Sync cancelled';
+    }
     state.isSyncing = false;
-    abortController = null;
+    if (abortController === controller) abortController = null;
     scheduleNext();
   }
 }
 
+/** Request cancellation; `isSyncing` stays true until the running sync unwinds. */
 export function cancelSync(): void {
-  if (abortController) {
-    abortController.abort();
-    abortController = null;
-  }
-  state.isSyncing = false;
-  state.phase = 'idle';
-  state.message = 'Sync cancelled';
-  logger.info('Sync cancelled');
+  if (!abortController || abortController.signal.aborted) return;
+  abortController.abort();
+  state.message = 'Cancelling sync...';
+  logger.info('Sync cancellation requested');
 }
 
 function getIntervalMs(): number | null {
