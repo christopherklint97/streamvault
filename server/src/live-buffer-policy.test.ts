@@ -52,6 +52,16 @@ async function publish(index: number, duration: string) {
   await writeFile(path.join(stage, `${index}.ts`), Buffer.alloc(188));
   await writeFile(path.join(stage, 'index.m3u8'), `#EXTM3U\n#EXTINF:${duration},\n${index}.ts\n`);
 }
+it('keeps at least three target durations of media in the live window', async () => {
+  for (let index = 0; index < 24; index++) {
+    await publish(index, '2');
+    await vi.waitFor(async () => expect(await buffer.playlist('channel-a', source)).toContain(`segment/${index}.ts`));
+  }
+  const manifest = (await buffer.playlist('channel-a', source))!;
+  const durations = [...manifest.matchAll(/#EXTINF:([\d.]+),/g)].map(match => Number(match[1]));
+  expect(durations.reduce((sum, value) => sum + value, 0)).toBeGreaterThanOrEqual(3 * LIVE_HLS_MAX_SEGMENT_SECONDS);
+  expect(manifest).not.toContain('#EXT-X-MEDIA-SEQUENCE:0\n'); // older media is still trimmed
+});
 it('keeps a fixed twelve-second target as short and long GOPs arrive, including the upper bound', async () => {
   expect(LIVE_HLS_MAX_SEGMENT_SECONDS).toBe(12);
   for (const [index, duration] of ['2', '8.334', '8.333', '12'].entries()) {
