@@ -33,7 +33,8 @@ import {
 } from './db.js';
 import type { DBRecording, DBRecordingRule } from './db.js';
 import { getStatus, sync, cancelSync, startupSync, startCrawl, cancelCrawl } from './sync.js';
-import { fetchXtreamStreamsByCategory, fetchXtreamShortEpg, fetchAllCategoryStreams, fetchXtreamSeriesInfo, fetchXtreamVodInfo } from './xtream.js';
+import { fetchXtreamStreamsByCategory, fetchXtreamShortEpg, fetchAllCategoryStreams, fetchXtreamSeriesInfo, fetchXtreamVodInfo, streamUrl as xtreamStreamUrl } from './xtream.js';
+import { channelSourceRef, episodeSourceRef, resolveSourceRef } from './source-ref.js';
 import { createOnDemandEpg } from './on-demand-epg.js';
 import { createEpgReadWorker } from './epg-read-worker.js';
 import { createChannelReadWorker } from './channel-read-worker.js';
@@ -293,8 +294,16 @@ function getXtreamConfig(): XtreamConfig | null {
 }
 
 function validateProxySourceUrl(rawUrl: string) {
+  const resolved = resolveSourceRef(rawUrl, {
+    channelUrl: id => getChannelById(id)?.url,
+    episodeUrl: (id, ext) => {
+      const config = getXtreamConfig();
+      return config ? xtreamStreamUrl(config, id, 'series', ext) : undefined;
+    },
+  });
+  if (!resolved) return { ok: false as const, error: 'Unknown stream source' };
   const xtreamServer = getConfig('xtream_server');
-  return validateSourceHttpUrl(rawUrl, xtreamServer, allowedProxyHostsFromConfig(xtreamServer, process.env.STREAMVAULT_PROXY_ALLOWED_HOSTS));
+  return validateSourceHttpUrl(resolved, xtreamServer, allowedProxyHostsFromConfig(xtreamServer, process.env.STREAMVAULT_PROXY_ALLOWED_HOSTS));
 }
 
 function allowUpstreamRedirect(url: string): boolean {
@@ -362,7 +371,7 @@ app.get('/api/channels', async (req, res, next) => {
   const channels = dbChannels.map(ch => ({
     id: ch.id,
     name: ch.name,
-    url: ch.url,
+    url: channelSourceRef(ch.id, ch.url),
     logo: ch.logo,
     group: ch.grp,
     region: ch.region,
@@ -401,7 +410,7 @@ app.post('/api/channels/by-ids', async (req, res, next) => {
   const channels = dbChannels.map(ch => ({
     id: ch.id,
     name: ch.name,
-    url: ch.url,
+    url: channelSourceRef(ch.id, ch.url),
     logo: ch.logo,
     group: ch.grp,
     region: ch.region,
@@ -450,7 +459,7 @@ app.get('/api/browse', async (req, res, next) => {
   const channels = dbChannels.map(ch => ({
     id: ch.id,
     name: ch.name,
-    url: ch.url,
+    url: channelSourceRef(ch.id, ch.url),
     logo: ch.logo,
     group: ch.grp,
     region: ch.region,
@@ -525,7 +534,7 @@ app.get('/api/search', async (req, res) => {
   const channels = dbChannels.map(ch => ({
     id: ch.id,
     name: ch.name,
-    url: ch.url,
+    url: channelSourceRef(ch.id, ch.url),
     logo: ch.logo,
     group: ch.grp,
     region: ch.region,
@@ -714,7 +723,9 @@ app.get('/api/series/:seriesId', async (req, res) => {
 
   try {
     const info = await fetchXtreamSeriesInfo(config, seriesId);
-    res.json(info);
+    const episodes = Object.fromEntries(Object.entries(info.episodes).map(([season, list]) =>
+      [season, list.map(ep => ({ ...ep, url: episodeSourceRef(ep.id, ep.containerExtension) }))]));
+    res.json({ ...info, episodes });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
     logger.error(`Series info fetch failed for ${seriesId}: ${msg}`);
@@ -1220,16 +1231,17 @@ app.get('/api/ios-hls-authorize/:channelId/index.m3u8', (req, res) => {
   }
   const expiresAt = now + IOS_HLS_TICKET_TTL_MS;
   const nonce = randomUUID();
+  // Client-visible values keep the caller's reference, never the resolved provider URL.
   const ticket = createIosHlsTicket({
     channelId,
-    sourceUrl: validation.url.toString(),
+    sourceUrl: req.query.url,
     contentType,
     startSeconds: startSeconds || 0,
   }, iosHlsTicketSecret, expiresAt, nonce);
   iosHlsTicketNonces.set(nonce, expiresAt);
 
   const params = new URLSearchParams({
-    url: validation.url.toString(),
+    url: req.query.url,
     type: contentType,
     ticket,
   });
@@ -1303,7 +1315,7 @@ app.get('/api/ios-hls/:channelId/index.m3u8', (req, res) => {
   const ticket = typeof req.query.ticket === 'string' ? req.query.ticket : '';
   const ticketResult = verifyIosHlsTicket(ticket, {
     channelId,
-    sourceUrl: requestValidation.url.toString(),
+    sourceUrl: req.query.url,
     contentType,
     startSeconds: startSeconds || 0,
   }, iosHlsTicketSecret);
@@ -1320,7 +1332,7 @@ app.get('/api/ios-hls/:channelId/index.m3u8', (req, res) => {
     const reusable = iosHlsSessions.get(reusableSessionId)!;
     reusable.expiresAt = Date.now() + IOS_HLS_IDLE_TIMEOUT_MS;
     const params = new URLSearchParams({
-      url: requestValidation.url.toString(),
+      url: req.query.url,
       type: contentType,
       session: reusableSessionId,
     });
@@ -1372,7 +1384,7 @@ app.get('/api/ios-hls/:channelId/index.m3u8', (req, res) => {
     }
   });
 
-  const playlistUrl = `/api/ios-hls/${encodeURIComponent(channelId)}/index.m3u8?url=${encodeURIComponent(requestValidation.url.toString())}&type=${contentType}&session=${encodeURIComponent(sessionId)}${startSeconds ? `&start=${startSeconds}` : ''}`;
+  const playlistUrl = `/api/ios-hls/${encodeURIComponent(channelId)}/index.m3u8?url=${encodeURIComponent(req.query.url)}&type=${contentType}&session=${encodeURIComponent(sessionId)}${startSeconds ? `&start=${startSeconds}` : ''}`;
   res.redirect(302, playlistUrl);
 });
 
