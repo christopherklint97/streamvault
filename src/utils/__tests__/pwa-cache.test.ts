@@ -13,8 +13,20 @@ describe('CACHEABLE_API_PATTERN', () => {
     expect(CACHEABLE_API_PATTERN.test(path)).toBe(false);
   });
 
+  it.each([
+    '/api/browse?type=movies&limit=20',
+    '/api/categories?type=livetv',
+    '/api/channels?group=News',
+    '/api/search?q=matrix&type=movies',
+    '/api/vod/123',
+    '/api/series/456',
+    '/api/epg/batch?ids=live_1',
+    '/api/epg/channel/live_1?from=1&to=2',
+  ])('caches catalogue metadata: %s', path => {
+    expect(CACHEABLE_API_PATTERN.test(path)).toBe(true);
+  });
+
   it('excludes transient media delivery endpoints from the service-worker cache', () => {
-    expect(CACHEABLE_API_PATTERN.test('/api/channels?group=News')).toBe(true);
     for (const path of [
       '/api/status',
       '/api/config',
@@ -38,6 +50,15 @@ describe('CACHEABLE_API_PATTERN', () => {
       '/api/ios-hls/vod_1/index.m3u8',
       '/api/ios-hls-authorize/vod_1/index.m3u8',
       '/api/ios-hls-assets/session/init.mp4',
+      '/api/archive/live_1/chunk_0001.ts',
+      '/api/archives',
+      '/api/archives/archive_1',
+      '/api/player?channel=live_1',
+      '/api/player/live_1',
+      '/api/health',
+      '/api/client-logs',
+      '/api/browser',
+      '/api/vodka',
     ]) {
       expect(CACHEABLE_API_PATTERN.test(path), path).toBe(false);
     }

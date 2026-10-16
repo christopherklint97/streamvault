@@ -241,6 +241,10 @@ export default function EpgGuide() {
   const gridRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const fetchIdRef = useRef(0);
+  // EPG already requested for the current window, so appended pages fetch only
+  // their new channels. `replace` is set until the first response for a new
+  // window lands, so data from the previous window is dropped rather than merged.
+  const epgFetchRef = useRef<{ key: string; ids: Set<string>; replace: boolean }>({ key: '', ids: new Set(), replace: true });
 
   useEffect(() => {
     const timer = setInterval(() => setEpgRefreshTick(tick => tick + 1), 61 * 60 * 1000);
@@ -296,7 +300,8 @@ export default function EpgGuide() {
     } catch (err) {
       showToast(`Failed to load more: ${err}`);
     } finally {
-      if (fetchIdRef.current === id) setLoadingMore(false);
+      // Always clear: a category switch mid-load must not leave paging blocked.
+      setLoadingMore(false);
     }
   }, [loadingMore, nextCursor, selectedGroup, showToast]);
 
@@ -320,7 +325,18 @@ export default function EpgGuide() {
   // asynchronous refresh without delaying guide navigation.
   useEffect(() => {
     if (channels.length === 0) return;
+    const key = `${windowStart}:${windowEnd}:${epgRefreshTick}`;
+    const fetched = epgFetchRef.current;
+    if (fetched.key !== key) {
+      fetched.key = key;
+      fetched.ids = new Set();
+      fetched.replace = true;
+    }
+    const missing = channels.map(ch => ch.id).filter(id => !fetched.ids.has(id));
+    if (missing.length === 0) return;
+    missing.forEach(id => fetched.ids.add(id));
     let cancelled = false;
+    let merged = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     const fetchWindow = async (ids: string[], attempt: number) => {
       try {
@@ -330,7 +346,10 @@ export default function EpgGuide() {
         for (const id of ids) {
           map[id] = (results[id] ?? []).map(program => ({ ...program, channelId: id }));
         }
-        setEpgData(prev => attempt === 1 ? map : { ...prev, ...map });
+        const replace = fetched.replace;
+        fetched.replace = false;
+        merged = true;
+        setEpgData(prev => replace ? map : { ...prev, ...map });
         const now = Date.now();
         const includesNow = windowStart <= now && windowEnd > now;
         const unresolved = ids.filter(id => includesNow
@@ -345,8 +364,13 @@ export default function EpgGuide() {
           attempt < 3 ? 15_000 : 5 * 60_000);
       }
     };
-    void fetchWindow(channels.map(ch => ch.id), 1);
-    return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer); };
+    void fetchWindow(missing, 1);
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      // Unmark ids whose response was dropped so the next run refetches them.
+      if (!merged) missing.forEach(id => fetched.ids.delete(id));
+    };
   }, [channels, windowStart, windowEnd, epgRefreshTick]);
 
   const handleTimeShift = useCallback((delta: number) => {
@@ -374,6 +398,7 @@ export default function EpgGuide() {
     setSelectedGroup(groupName);
     setLoading(true);
     setEpgData({});
+    epgFetchRef.current = { key: '', ids: new Set(), replace: true };
     setSelectedProgram(null);
   }, []);
 

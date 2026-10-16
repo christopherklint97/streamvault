@@ -66,6 +66,15 @@ interface RawProgram {
   category: string;
 }
 
+interface ChannelsPayload {
+  channels: Channel[];
+  total?: number;
+  groups: string[];
+  regions: string[];
+  contentTypeCounts?: Record<string, number>;
+  nextCursor?: ChannelState['nextCursor'];
+}
+
 interface BackendStatusPayload {
   phase?: LoadingPhase;
   message?: string;
@@ -121,6 +130,26 @@ function buildProgramIndex(programs: Program[]): Map<string, Program[]> {
     list.sort((a, b) => a.start.getTime() - b.start.getTime());
   }
   return index;
+}
+
+// Per-channel EPG cache bounds: keep at most this many channels (oldest
+// fetched evicted first) and drop programmes that ended before the lookback.
+const MAX_CACHED_EPG_CHANNELS = 50;
+const EPG_CACHE_LOOKBACK_MS = 2 * 60 * 60 * 1000;
+
+/** Prune ended programmes and evict the oldest channels, keeping `keepChannelId` intact. */
+function pruneProgramIndex(index: Map<string, Program[]>, keepChannelId: string, now: number): Map<string, Program[]> {
+  const cutoff = now - EPG_CACHE_LOOKBACK_MS;
+  const pruned = new Map<string, Program[]>();
+  for (const [channelId, list] of index) {
+    const kept = channelId === keepChannelId ? list : list.filter(program => program.stop.getTime() >= cutoff);
+    if (kept.length > 0 || channelId === keepChannelId) pruned.set(channelId, kept);
+  }
+  for (const channelId of pruned.keys()) {
+    if (pruned.size <= MAX_CACHED_EPG_CHANNELS) break;
+    if (channelId !== keepChannelId) pruned.delete(channelId);
+  }
+  return pruned;
 }
 
 declare const __SERVER_URL__: string;
@@ -306,7 +335,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     const { apiBaseUrl, backendGeneration } = get();
     if (!hasApi(apiBaseUrl)) return;
     try {
-      const data = await apiFetch(apiBaseUrl, `/api/categories?type=${encodeURIComponent(contentType)}`);
+      const data = await apiFetch<{ categories?: Category[] }>(apiBaseUrl, `/api/categories?type=${encodeURIComponent(contentType)}`);
       if (get().backendGeneration !== backendGeneration) return;
       const list: Category[] = data.categories || [];
       set((state) => ({
@@ -334,7 +363,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
         params.set('group', group);
       }
       const qs = params.toString();
-      const data = await apiFetch(apiBaseUrl, `/api/channels${qs ? '?' + qs : ''}`, { signal });
+      const data = await apiFetch<ChannelsPayload>(apiBaseUrl, `/api/channels${qs ? '?' + qs : ''}`, { signal });
       if (signal.aborted || get().backendGeneration !== generation) return;
       const channels: Channel[] = data.channels;
       const total: number = data.total ?? channels.length;
@@ -360,13 +389,13 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     const { apiBaseUrl, backendGeneration } = get();
     if (!hasApi(apiBaseUrl) || ids.length === 0) return [];
     try {
-      const data = await apiFetch(apiBaseUrl, '/api/channels/by-ids', {
+      const data = await apiFetch<{ channels?: Channel[] }>(apiBaseUrl, '/api/channels/by-ids', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids }),
       });
       if (get().backendGeneration !== backendGeneration) return [];
-      return (data.channels ?? []) as Channel[];
+      return data.channels ?? [];
     } catch (err) {
       if (get().backendGeneration !== backendGeneration) return [];
       toast(`Failed to fetch channels: ${err}`);
@@ -385,7 +414,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
       });
       if (nextCursor.id) params.set('cursorId', nextCursor.id);
       if (selectedGroup && selectedGroup !== 'All') params.set('group', selectedGroup);
-      const data = await apiFetch(apiBaseUrl, `/api/channels?${params}`);
+      const data = await apiFetch<ChannelsPayload>(apiBaseUrl, `/api/channels?${params}`);
       if (get().backendGeneration !== backendGeneration) return;
       const newChannels: Channel[] = data.channels;
       const merged = [...channels, ...newChannels];
@@ -444,12 +473,17 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
       );
       if (get().backendGeneration !== backendGeneration) return [];
       const programs = parsePrograms(data.programs);
-      const nextIndex = new Map(get().programsByChannel);
-      nextIndex.set(channelId, programs);
-      const nextPrograms = [
-        ...get().programs.filter(program => program.channelId !== channelId),
-        ...programs,
-      ];
+      const merged = new Map(get().programsByChannel);
+      // Re-insert so the most recently fetched channel is evicted last.
+      merged.delete(channelId);
+      merged.set(channelId, programs);
+      const nextIndex = pruneProgramIndex(merged, channelId, now);
+      const nextPrograms = get().programs.filter(program => {
+        if (program.channelId === channelId) return false;
+        const list = nextIndex.get(program.channelId);
+        return !!list && list.includes(program);
+      });
+      nextPrograms.push(...programs);
       set({ programs: nextPrograms, programsByChannel: nextIndex });
       return programs;
     } catch (err) {
@@ -463,9 +497,9 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     const { apiBaseUrl, backendGeneration } = get();
     if (!hasApi(apiBaseUrl)) return [];
     try {
-      const data = await apiFetch(apiBaseUrl, `/api/epg/${streamId}`);
+      const data = await apiFetch<{ programs: RawProgram[] }>(apiBaseUrl, `/api/epg/${streamId}`);
       if (get().backendGeneration !== backendGeneration) return [];
-      const programs: Program[] = data.programs.map((p: { channelId: string; title: string; description: string; start: string; stop: string; category: string }) => ({
+      const programs: Program[] = data.programs.map((p) => ({
         channelId: p.channelId,
         title: p.title,
         description: p.description,
@@ -506,9 +540,9 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
       const params = new URLSearchParams({ q: query });
       if (contentType) params.set('type', contentType);
       if (group) params.set('group', group);
-      const data = await apiFetch(apiBaseUrl, `/api/search?${params}`);
+      const data = await apiFetch<{ channels: Channel[] }>(apiBaseUrl, `/api/search?${params}`);
       if (get().backendGeneration !== backendGeneration) return [];
-      return data.channels as Channel[];
+      return data.channels;
     } catch (err) {
       if (get().backendGeneration !== backendGeneration) return [];
       toast(`Search failed: ${err}`);
@@ -520,9 +554,9 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     const { apiBaseUrl, backendGeneration } = get();
     if (!hasApi(apiBaseUrl)) return null;
     try {
-      const data = await apiFetch(apiBaseUrl, `/api/series/${seriesId}`);
+      const data = await apiFetch<SeriesInfo>(apiBaseUrl, `/api/series/${seriesId}`);
       if (get().backendGeneration !== backendGeneration) return null;
-      return data as SeriesInfo;
+      return data;
     } catch (err) {
       if (get().backendGeneration !== backendGeneration) return null;
       toast(`Failed to load series: ${err}`);
@@ -534,9 +568,9 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     const { apiBaseUrl, backendGeneration } = get();
     if (!hasApi(apiBaseUrl)) return null;
     try {
-      const data = await apiFetch(apiBaseUrl, `/api/vod/${vodId}`);
+      const data = await apiFetch<MovieInfo>(apiBaseUrl, `/api/vod/${vodId}`);
       if (get().backendGeneration !== backendGeneration) return null;
-      return data as MovieInfo;
+      return data;
     } catch (err) {
       if (get().backendGeneration !== backendGeneration) return null;
       toast(`Failed to load movie: ${err}`);
@@ -650,6 +684,21 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     set({ isCrawling: true, crawlProgress: 'Starting crawl...' });
     try {
       await apiFetch(apiBaseUrl, '/api/crawl', { method: 'POST' });
+      if (get().backendGeneration !== backendGeneration) return;
+      // Poll status until the crawl finishes so progress and completion surface.
+      let pollDelay = 2000;
+      const schedulePoll = () => {
+        pollInterval = setTimeout(() => {
+          get().pollStatus(backendGeneration).then(() => {
+            const current = get();
+            if (current.backendGeneration === backendGeneration && current.isCrawling) {
+              pollDelay = Math.min(pollDelay * 1.5, 10000);
+              schedulePoll();
+            }
+          });
+        }, pollDelay);
+      };
+      schedulePoll();
     } catch (err) {
       if (get().backendGeneration !== backendGeneration) return;
       const msg = err instanceof Error ? err.message : 'Failed to start crawl';
@@ -717,7 +766,7 @@ export const useChannelStore = create<ChannelState & ChannelActions>()((set, get
     try {
       // A configured URL is not a connection. Probe the backend before
       // revealing provider credentials or attempting any other API work.
-      const status = await probeBackend(apiBaseUrl, undefined, BOOTSTRAP_REQUEST_TIMEOUT_MS);
+      const status = await probeBackend<BackendStatusPayload>(apiBaseUrl, undefined, BOOTSTRAP_REQUEST_TIMEOUT_MS);
       if (!isCurrentBackend()) return;
 
       // Global EPG payloads grow with the provider catalog and can exceed

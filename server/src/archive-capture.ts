@@ -1,4 +1,4 @@
-import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
+import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -111,6 +111,8 @@ export class ArchiveCapture {
   private seamWorkAbort: AbortController | null = null;
   private seamWorkChannel: string | null = null;
   private readonly seamAbort = new AbortController();
+  // Session directories whose rolled-off chunks are being probed off the event loop.
+  private readonly backfills = new Map<string, Promise<void>>();
   constructor(private readonly store: ArchiveStore, private readonly root: string, private readonly port: number,
     private readonly onPublished: (channelId: string) => void = () => {},
     private readonly spawnWriter: typeof spawn = spawn,
@@ -308,7 +310,11 @@ export class ArchiveCapture {
   private poll(channelId: string): void {
     const writer = this.writers.get(channelId);
     if (!writer) return;
-    this.importSession(channelId, writer.directory, writer);
+    if (!this.backfills.has(writer.directory)) {
+      if (this.backfillNames(writer.directory, false).some(name => !this.isIndexed(writer.directory, name)))
+        this.backfill(channelId, writer);
+      else this.importSession(channelId, writer.directory, writer);
+    }
     const capacityError = this.capacityError();
     if (capacityError) {
       writer.capacityError = capacityError;
@@ -316,7 +322,8 @@ export class ArchiveCapture {
       this.terminateWriter(channelId, writer);
       return;
     }
-    if (!writer.terminationRequested && Date.now() - writer.lastPublishedAt >= WRITER_STALE_MS) {
+    if (!writer.terminationRequested && !this.backfills.has(writer.directory) &&
+        Date.now() - writer.lastPublishedAt >= WRITER_STALE_MS) {
       writer.stale = true;
       this.store.setStatus(channelId, 'retrying', 'No archive segment published for two minutes');
       logger.warn(`Archive ${channelId}: writer stopped publishing; reconnecting`);
@@ -334,9 +341,72 @@ export class ArchiveCapture {
     writer.forceKillTimer.unref();
   }
 
+  private isIndexed(directory: string, name: string): boolean {
+    return Boolean(this.store.getChunk(`${path.basename(directory)}-${name}`));
+  }
+
+  /** Finalized chunks that rolled out of the sliding manifest before indexing. */
+  private backfillNames(directory: string, recovering: boolean): string[] {
+    let manifest: string;
+    try { manifest = fs.readFileSync(path.join(directory, 'current.m3u8'), 'utf8'); } catch { return []; }
+    const entries = parsePublishedSegments(manifest);
+    const firstSequence = entries.length ? Number(entries[0].name.slice(6, 15)) : 0;
+    const cursor = this.store.cursor(path.basename(directory));
+    // This scan is only needed at startup or after a polling delay exceeds the
+    // sliding window. The ordinary two-second poll touches only twelve entries.
+    if (!(firstSequence > 0 && (recovering || !cursor || firstSequence > cursor.sequence + 1))) return [];
+    try {
+      return fs.readdirSync(directory).filter(n => /^chunk-\d{9}\.ts$/.test(n) &&
+        Number(n.slice(6, 15)) < firstSequence).sort();
+    } catch { return []; }
+  }
+
+  /** Duration of a completed TS, or null if it is not independently probeable. */
+  private probeDuration(file: string): Promise<number | null> {
+    return new Promise(resolve => {
+      execFile('ffprobe', ['-v', 'error', '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1', file],
+      { timeout: 15_000, signal: this.seamAbort.signal }, (error, stdout) => {
+        if (error) {
+          if (!this.stopping) logger.warn(`Archive cannot probe ${path.basename(file)}: ${error.message}`);
+          resolve(null); return;
+        }
+        const duration = Number(String(stdout).trim());
+        resolve(Number.isFinite(duration) && duration > 0 ? duration : null);
+      });
+    });
+  }
+
+  /** Probe every unindexed rolled-off chunk, then publish in sequence order. */
+  private async probeBackfill(directory: string, recovering: boolean,
+    probed = new Map<string, number | null>()): Promise<Map<string, number | null>> {
+    for (const name of this.backfillNames(directory, recovering)) {
+      if (this.stopping) break;
+      if (probed.has(name) || this.isIndexed(directory, name)) continue;
+      probed.set(name, await this.probeDuration(path.join(directory, name)));
+    }
+    return probed;
+  }
+
+  private backfill(channelId: string, writer: ArchiveWriter): void {
+    const directory = writer.directory;
+    const job = (async () => {
+      const probed = new Map<string, number | null>();
+      // Re-check after each pass: more chunks can roll off while probing.
+      while (!this.stopping && this.backfillNames(directory, false)
+        .some(name => !probed.has(name) && !this.isIndexed(directory, name))) {
+        await this.probeBackfill(directory, false, probed);
+      }
+      if (this.stopping) return;
+      this.importSession(channelId, directory, writer, false, probed);
+    })().catch(error => logger.warn(`Archive ${channelId} backfill failed: ${error}`))
+      .finally(() => this.backfills.delete(directory));
+    this.backfills.set(directory, job);
+  }
+
   /** Reconcile the durable index first; then recover finalized TS files older than
    * the sliding manifest. Never trust a newest unlisted segment or a .tmp. */
-  recover(): void {
+  async recover(): Promise<void> {
     this.store.clearExpired(Date.now());
     for (const chunk of this.store.indexedChunks()) {
       const validFile = (relative: string): boolean => {
@@ -388,7 +458,8 @@ export class ArchiveCapture {
         if (!session.isDirectory() || !/^[0-9a-f-]{36}$/.test(session.name)) continue;
         const directory = path.join(base, channelDir.name, session.name);
         if (this.writers.get(channelId)?.directory === directory) continue;
-        const admitted = this.importSession(channelId, directory, undefined, true);
+        const probed = await this.probeBackfill(directory, true);
+        const admitted = this.importSession(channelId, directory, undefined, true, probed);
         for (const name of fs.readdirSync(directory)) {
           const playbackMaster = /^chunk-(\d{9})(?:\.[0-9a-f-]{36}\.pair)?\.playback\.ts$/.exec(name);
           // Interrupted pair remuxes use .part.ts rather than the older .part
@@ -413,33 +484,23 @@ export class ArchiveCapture {
     releaseDetached();
   }
 
-  private importSession(channelId: string, directory: string, writer?: ArchiveWriter, recovering = false): Set<string> {
+  private importSession(channelId: string, directory: string, writer?: ArchiveWriter, recovering = false,
+    probed: Map<string, number | null> = new Map()): Set<string> {
     const admitted = new Set<string>();
     let manifest: string;
     try { manifest = fs.readFileSync(path.join(directory, 'current.m3u8'), 'utf8'); } catch { return admitted; }
     const session = path.basename(directory);
     const entries = parsePublishedSegments(manifest);
-    const firstSequence = entries.length ? Number(entries[0].name.slice(6, 15)) : 0;
-    const cursor = this.store.cursor(session);
-    // This scan is only needed at startup or after a polling delay exceeds the
-    // sliding window. The ordinary two-second poll touches only twelve entries.
-    if (firstSequence > 0 && (recovering || !cursor || firstSequence > cursor.sequence + 1)) {
-      for (const name of fs.readdirSync(directory).filter(n => /^chunk-\d{9}\.ts$/.test(n) &&
-        Number(n.slice(6, 15)) < firstSequence).sort()) {
-        const id = `${session}-${name}`;
-        if (this.store.getChunk(id)) { admitted.add(name); continue; }
-        const absolute = path.join(directory, name);
-        try {
-          // A completed TS omitted by rollover must be independently probeable;
-          // its mtime supplies wall time. An unlisted newest file is not committed.
-          const output = execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1', absolute], { timeout: 15_000 }).toString();
-          const duration = Number(output.trim());
-          if (!Number.isFinite(duration) || duration <= 0) continue;
-          this.publishFile(channelId, directory, name, duration, false, writer);
-          admitted.add(name);
-        } catch (error) { logger.warn(`Archive ${channelId}: cannot recover ${name}: ${error}`); }
-      }
+    for (const name of this.backfillNames(directory, recovering)) {
+      if (this.store.getChunk(`${session}-${name}`)) { admitted.add(name); continue; }
+      // A completed TS omitted by rollover must be independently probeable;
+      // its mtime supplies wall time. An unlisted newest file is not committed.
+      const duration = probed.get(name);
+      if (!duration) continue;
+      try {
+        this.publishFile(channelId, directory, name, duration, false, writer);
+        admitted.add(name);
+      } catch (error) { logger.warn(`Archive ${channelId}: cannot recover ${name}: ${error}`); }
     }
     for (const entry of entries) {
       const absolute = path.join(directory, entry.name);
@@ -562,5 +623,6 @@ export class ArchiveCapture {
     // Wait for the abortable child and its staged-file cleanup before the
     // caller closes SQLite. The process-wide shutdown deadline remains armed.
     if (this.seamWork) await this.seamWork;
+    await Promise.all(this.backfills.values());
   }
 }

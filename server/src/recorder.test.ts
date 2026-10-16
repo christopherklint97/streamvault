@@ -587,6 +587,20 @@ describe('recorder lifecycle integration', () => {
     expect(recorder.isRecordingActive('older')).toBe(false);
   });
 
+  it('prunes cancelled rows whose airing ended over a week ago and keeps recent ones', async () => {
+    const day = 24 * 60 * 60_000;
+    state.records.set('old', recording({ id: 'old', status: 'cancelled', end_time: Date.now() - 8 * day }));
+    state.records.set('recent', recording({ id: 'recent', status: 'cancelled', end_time: Date.now() - day }));
+    state.records.set('future', recording({ id: 'future', status: 'cancelled', end_time: Date.now() + day }));
+    const recorder = await import('./recorder.js');
+
+    await recorder.recoverRecordings();
+
+    expect(state.records.has('old')).toBe(false);
+    expect(state.records.has('recent')).toBe(true);
+    expect(state.records.has('future')).toBe(true);
+  });
+
   it('recovers legacy partial capture data and finalizes it after the recording window', async () => {
     const nested = path.join(recordingsDir, '2026', '09', '20');
     fs.mkdirSync(nested, { recursive: true });
@@ -710,5 +724,71 @@ describe('recorder lifecycle integration', () => {
     await Promise.all([starting, stopping]);
     expect(state.records.get('pending')?.status).toBe('scheduled');
     expect(state.records.get('pending')?.error).toBeNull();
+  });
+
+  it('releases the capture slot for the scheduler without waiting for finalization', async () => {
+    vi.resetModules();
+    state.records.set('r1', recording());
+    let releaseFinalization!: () => void;
+    const blocked = new Promise<void>(resolve => { releaseFinalization = resolve; });
+    state.finalize = async paths => {
+      await blocked;
+      fs.writeFileSync(paths.master, 'master');
+      fs.writeFileSync(paths.derivative, 'mp4');
+      return { durationSeconds: 30, masterSize: 6, derivativeSize: 3, derivativeError: null };
+    };
+    const recorder = await import('./recorder.js');
+    await recorder.startRecording('r1');
+    fs.writeFileSync(state.spawned[0].args.at(-1)!, 'captured');
+
+    await recorder.stopRecordingCapture('r1');
+    expect(state.records.get('r1')?.status).toBe('finalizing');
+    expect(recorder.getCaptureCount()).toBe(0);
+
+    const finalized = recorder.stopRecording('r1');
+    releaseFinalization();
+    await finalized;
+    expect(state.records.get('r1')?.status).toBe('completed');
+  });
+
+  it('keeps an early-exit retry scheduled when its preflight fails, then publishes captured segments', async () => {
+    vi.resetModules();
+    const { resolveStreamUrl } = await import('./stream-utils.js');
+    state.records.set('r1', recording());
+    const recorder = await import('./recorder.js');
+    await recorder.startRecording('r1');
+    finishCapture(0, 0);
+    await flush();
+    expect(state.records.get('r1')?.status).toBe('scheduled');
+
+    vi.mocked(resolveStreamUrl).mockRejectedValueOnce(new Error('upstream unavailable'));
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(state.spawned).toHaveLength(1);
+    expect(state.records.get('r1')).toMatchObject({ status: 'scheduled', error: 'upstream unavailable' });
+
+    vi.setSystemTime(120_000);
+    await recorder.startRecording('r1');
+    await recorder.stopRecording('r1');
+    expect(state.records.get('r1')).toMatchObject({ status: 'completed', error: null });
+  });
+
+  it('publishes captured segments when an early-exit retry hits the disk-space guard', async () => {
+    vi.resetModules();
+    state.records.set('r1', recording());
+    const recorder = await import('./recorder.js');
+    await recorder.startRecording('r1');
+    finishCapture(0, 0);
+    await flush();
+    expect(state.records.get('r1')?.status).toBe('scheduled');
+
+    const statfs = vi.spyOn(fs, 'statfsSync').mockReturnValue({ bavail: 1, bsize: 1 } as ReturnType<typeof fs.statfsSync>);
+    try {
+      await vi.advanceTimersByTimeAsync(10_000);
+      await recorder.stopRecording('r1');
+    } finally {
+      statfs.mockRestore();
+    }
+    expect(state.spawned).toHaveLength(1);
+    expect(state.records.get('r1')).toMatchObject({ status: 'completed', error: null });
   });
 });

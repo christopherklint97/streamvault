@@ -3,6 +3,7 @@ import {
   canAccessRecordingStream,
   createRecordingPlaybackTicket,
   isAuthorizedRequest,
+  isForeignOriginWrite,
   maskConfigResponse,
   normalizeAllowedOrigins,
   validateExternalHttpUrl,
@@ -111,5 +112,24 @@ describe('server security helpers', () => {
     expect(validateExternalHttpUrl('https://cdn.example.com/video.ts').ok).toBe(true);
     expect(validateExternalHttpUrl('https://cdn.example.com/video.ts', ['cdn.example.com']).ok).toBe(true);
     expect(validateExternalHttpUrl('https://evil.example/video.ts', ['cdn.example.com']).ok).toBe(false);
+  });
+});
+
+describe('isForeignOriginWrite', () => {
+  const hosts = ['mainframe.example.ts.net', undefined];
+  it('rejects writes from foreign web pages', () => {
+    expect(isForeignOriginWrite('PUT', 'https://evil.example', hosts, [])).toBe(true);
+    expect(isForeignOriginWrite('DELETE', 'http://192.168.1.9:8080', ['192.168.1.5:3002'], [])).toBe(true);
+    expect(isForeignOriginWrite('POST', 'not a url', hosts, [])).toBe(true);
+  });
+  it('allows reads, same-origin, configured, and non-web clients', () => {
+    expect(isForeignOriginWrite('GET', 'https://evil.example', hosts, [])).toBe(false);
+    expect(isForeignOriginWrite('PUT', 'https://mainframe.example.ts.net', hosts, [])).toBe(false);
+    expect(isForeignOriginWrite('PUT', 'http://192.168.1.5:3002', ['192.168.1.5:3002'], [])).toBe(false);
+    expect(isForeignOriginWrite('PUT', 'https://app.example', ['localhost:3002', 'app.example'], [])).toBe(false);
+    expect(isForeignOriginWrite('PUT', 'https://tv.example', hosts, ['https://tv.example'])).toBe(false);
+    expect(isForeignOriginWrite('PUT', undefined, hosts, [])).toBe(false);
+    expect(isForeignOriginWrite('PUT', 'null', hosts, [])).toBe(false);
+    expect(isForeignOriginWrite('POST', 'file://', hosts, [])).toBe(false);
   });
 });

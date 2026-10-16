@@ -13,9 +13,17 @@ import { EventEmitter } from 'node:events';
 
 describe('stream-copy HLS capture', () => {
   // Older seam-worker tests opt into the legacy presentation mode explicitly.
-  beforeEach(() => vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '0'));
-  afterEach(() => vi.unstubAllEnvs());
-  it('recovers every committed entry from an interrupted session and deletes unindexed artifacts', () => {
+  // Report 1 TiB free so capacity checks do not depend on the host's real disk.
+  beforeEach(() => {
+    vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '0');
+    const statfsSync = fs.statfsSync;
+    vi.spyOn(fs, 'statfsSync').mockImplementation(((target: fs.PathLike) => {
+      const stats = statfsSync(target);
+      return { ...stats, bavail: Math.floor(1024 ** 4 / stats.bsize) };
+    }) as typeof fs.statfsSync);
+  });
+  afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+  it('recovers every committed entry from an interrupted session and deletes unindexed artifacts', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-restart-'));
     const db = new Database(':memory:'); ensureArchiveSchema(db);
     const store = createArchiveStore(db); store.configure('c', 'C', true, 24);
@@ -29,12 +37,12 @@ describe('stream-copy HLS capture', () => {
     }
     fs.writeFileSync(path.join(dir, 'current.m3u8'), lines.join('\n'));
     fs.writeFileSync(path.join(dir, 'chunk-000000020.ts'), 'uncommitted');
-    new ArchiveCapture(store, root, 1).recover();
+    await new ArchiveCapture(store, root, 1).recover();
     expect(store.overlap('c', 0, Date.now() + 1000)).toHaveLength(20);
     expect(fs.existsSync(path.join(dir, 'chunk-000000020.ts'))).toBe(false);
     db.close(); fs.rmSync(root, { recursive: true, force: true });
   });
-  it('removes crash-orphaned pair presentations but retains both committed pair files', () => {
+  it('removes crash-orphaned pair presentations but retains both committed pair files', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-pair-restart-'));
     const db = new Database(':memory:'); ensureArchiveSchema(db);
     const store = createArchiveStore(db); store.configure('c', 'C', true, 24);
@@ -75,11 +83,11 @@ describe('stream-copy HLS capture', () => {
       const capture = new ArchiveCapture(store, root, 1);
       const active = (capture as unknown as { writers: Map<string, { directory: string }> }).writers;
       active.set('c', { directory: path.dirname(path.join(root, priorPair)) });
-      capture.recover();
+      await capture.recover();
       expect(fs.existsSync(path.join(root, stages[0]))).toBe(true);
       expect(fs.existsSync(path.join(root, stages.at(-1)!))).toBe(false);
       active.delete('c');
-      capture.recover();
+      await capture.recover();
       expect(fs.existsSync(path.join(root, priorPair))).toBe(true);
       expect(fs.existsSync(path.join(root, nextPair))).toBe(true);
       expect(fs.existsSync(path.join(root, orphan))).toBe(false);
@@ -89,7 +97,7 @@ describe('stream-copy HLS capture', () => {
       const now = Date.now();
       const pinned = store.createSnapshot('c', 100_000, 130_000, now, now + 60_000, true);
       fs.unlinkSync(path.join(root, nextPair));
-      new ArchiveCapture(store, root, 1).recover();
+      await new ArchiveCapture(store, root, 1).recover();
       expect(store.getChunk(priorId)?.pairId).toBeNull();
       expect(store.getChunk(nextId)?.pairId).toBeNull();
       expect(store.snapshot(pinned.id)).toBeUndefined();
@@ -99,12 +107,12 @@ describe('stream-copy HLS capture', () => {
       const rawTicket = store.createSnapshot('c', 100_000, 130_000, now, now + 60_000, true);
       expect(rawTicket.chunks.every(chunk => !chunk.playbackPath)).toBe(true);
       store.clearExpired(now + 60_000);
-      new ArchiveCapture(store, root, 1).recover();
+      await new ArchiveCapture(store, root, 1).recover();
       expect(fs.existsSync(path.join(root, priorPair))).toBe(false);
       expect(store.totalUsageBytes()).toBe(2 * 188);
     } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
-  it('quarantines an unpinned pair with a missing raw master without breaking startup or quota', () => {
+  it('quarantines an unpinned pair with a missing raw master without breaking startup or quota', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-pair-raw-missing-'));
     const db = new Database(':memory:'); ensureArchiveSchema(db);
     const store = createArchiveStore(db); store.configure('c', 'C', true, 24);
@@ -127,14 +135,14 @@ describe('stream-copy HLS capture', () => {
         nextRawPath: raw[1], priorPath: copies[0], priorSize: 188, priorCut: 14,
         nextPath: copies[1], nextSize: 188, nextOffset: 6, nextDuration: 14 })).toBe(true);
       fs.unlinkSync(path.join(root, raw[0]));
-      expect(() => new ArchiveCapture(store, root, 1).recover()).not.toThrow();
+      await expect(new ArchiveCapture(store, root, 1).recover()).resolves.toBeUndefined();
       expect(store.getChunk(ids[0])?.unavailable).toBe(1);
       expect(store.getChunk(ids[0])?.pairId).toBeTruthy();
       expect(store.totalUsageBytes()).toBe(3 * 188);
       expect(store.overlap('c', 100_000, 128_000, true)).toEqual([]);
       expect(store.coverage('c').availableTo).toBeNull();
       fs.writeFileSync(path.join(root, raw[0]), Buffer.alloc(188, 0x47));
-      new ArchiveCapture(store, root, 1).recover();
+      await new ArchiveCapture(store, root, 1).recover();
       expect(store.getChunk(ids[0])?.unavailable).toBe(0);
       expect(store.totalUsageBytes()).toBe(4 * 188);
       expect(store.coverage('c').availableTo).toBe(128_000);
@@ -142,7 +150,7 @@ describe('stream-copy HLS capture', () => {
         .chunks.every(chunk => !!chunk.playbackPath)).toBe(true);
     } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
-  it('restores a broken upstream pair and its dependent downstream pair as one raw chain', () => {
+  it('restores a broken upstream pair and its dependent downstream pair as one raw chain', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-pair-chain-restart-'));
     const db = new Database(':memory:'); ensureArchiveSchema(db);
     const store = createArchiveStore(db); store.configure('c', 'C', true, 24);
@@ -178,7 +186,7 @@ describe('stream-copy HLS capture', () => {
         priorRawPath: raw[2], nextRawPath: raw[3], priorPath: copy[2], priorSize: 188, priorCut: 14,
         nextPath: copy[3], nextSize: 188, nextOffset: 6, nextDuration: 14 })).toBe(true);
       fs.unlinkSync(path.join(root, copy[0]));
-      new ArchiveCapture(store, root, 1).recover();
+      await new ArchiveCapture(store, root, 1).recover();
       expect(ids.map(id => store.getChunk(id)?.pairId)).toEqual([null, null, null, null]);
       expect(ids.map(id => store.getChunk(id)?.path)).toEqual(raw);
       expect(store.detachedPlayback()).toEqual([]);
@@ -253,7 +261,7 @@ describe('stream-copy HLS capture', () => {
     expect(args.join(' ')).not.toContain('delete_segments');
   });
 
-  it('anchors source-stalled segments to observed file wall time, not advancing PDT', () => {
+  it('anchors source-stalled segments to observed file wall time, not advancing PDT', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-stall-'));
     const db = new Database(':memory:'); ensureArchiveSchema(db);
     const store = createArchiveStore(db); store.configure('c', 'C', true, 24);
@@ -268,7 +276,7 @@ describe('stream-copy HLS capture', () => {
         fs.utimesSync(file, end, end);
       }
       fs.writeFileSync(path.join(dir, 'current.m3u8'), `#EXTM3U\n#EXT-X-PROGRAM-DATE-TIME:${new Date(wall).toISOString()}\n#EXTINF:20,\nchunk-000000000.ts\n#EXT-X-PROGRAM-DATE-TIME:${new Date(wall + 20_000).toISOString()}\n#EXTINF:20,\nchunk-000000001.ts\n`);
-      new ArchiveCapture(store, root, 1).recover();
+      await new ArchiveCapture(store, root, 1).recover();
       const rows = store.overlap('c', 0, Date.now() + 1000);
       expect(rows).toHaveLength(2);
       expect(rows[1].start - rows[0].end).toBeGreaterThan(3_000_000);
@@ -276,7 +284,43 @@ describe('stream-copy HLS capture', () => {
     } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 
-  it('recovers a valid committed TS omitted by a rolled-over manifest without reviving an unlisted newest file', () => {
+  it('probes rolled-off chunks off the poll path and publishes them before manifest entries', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-backfill-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db); store.configure('c', 'C', true, 24);
+    const session = '22222222-2222-4222-8222-222222222222';
+    const dir = path.join(root, 'archive', 'c', session); fs.mkdirSync(dir, { recursive: true });
+    try {
+      execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=32x32:rate=5', '-t', '2', '-c:v', 'mpeg2video', '-f', 'mpegts', path.join(dir, 'chunk-000000000.ts')]);
+      fs.copyFileSync(path.join(dir, 'chunk-000000000.ts'), path.join(dir, 'chunk-000000001.ts'));
+      fs.writeFileSync(path.join(dir, 'current.m3u8'), `#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:2,\nchunk-000000001.ts\n`);
+      const capture = new ArchiveCapture(store, root, 1);
+      const writer = { process: { kill: vi.fn(() => true) }, directory: dir, epoch: 0,
+        lastPublishedAt: Date.now(), timer: setInterval(() => {}, 1_000_000) };
+      const internals = capture as unknown as { writers: Map<string, typeof writer>; poll: (id: string) => void;
+        backfills: Map<string, Promise<void>> };
+      internals.writers.set('c', writer);
+      try {
+        internals.poll('c');
+        // ffprobe runs asynchronously: nothing is published synchronously.
+        expect(store.getChunk(`${session}-chunk-000000000.ts`)).toBeUndefined();
+        expect(store.getChunk(`${session}-chunk-000000001.ts`)).toBeUndefined();
+        const job = internals.backfills.get(dir);
+        expect(job).toBeDefined();
+        internals.poll('c'); // a second poll does not start a competing import
+        await job;
+        const first = store.getChunk(`${session}-chunk-000000000.ts`);
+        const second = store.getChunk(`${session}-chunk-000000001.ts`);
+        expect(first).toBeDefined();
+        expect(second).toBeDefined();
+        expect(first!.start).toBeLessThanOrEqual(second!.start);
+        expect(store.cursor(session)?.sequence).toBe(1);
+        expect(internals.backfills.size).toBe(0);
+      } finally { clearInterval(writer.timer); }
+    } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  }, 20_000);
+
+  it('recovers a valid committed TS omitted by a rolled-over manifest without reviving an unlisted newest file', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-rollover-'));
     let db = new Database(path.join(root, 'archive.sqlite')); ensureArchiveSchema(db);
     let store = createArchiveStore(db); store.configure('c', 'C', true, 24);
@@ -286,14 +330,14 @@ describe('stream-copy HLS capture', () => {
       fs.copyFileSync(path.join(dir, 'chunk-000000000.ts'), path.join(dir, 'chunk-000000001.ts'));
       fs.copyFileSync(path.join(dir, 'chunk-000000000.ts'), path.join(dir, 'chunk-000000002.ts'));
       fs.writeFileSync(path.join(dir, 'current.m3u8'), `#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:2,\nchunk-000000001.ts\n`);
-      new ArchiveCapture(store, root, 1).recover();
+      await new ArchiveCapture(store, root, 1).recover();
       expect(store.getChunk('11111111-1111-4111-8111-111111111111-chunk-000000000.ts')).toBeDefined();
       expect(store.getChunk('11111111-1111-4111-8111-111111111111-chunk-000000001.ts')).toBeDefined();
       expect(store.getChunk('11111111-1111-4111-8111-111111111111-chunk-000000002.ts')).toBeUndefined();
       db.close(); db = new Database(path.join(root, 'archive.sqlite')); ensureArchiveSchema(db);
       store = createArchiveStore(db);
       expect(store.cursor('11111111-1111-4111-8111-111111111111')?.sequence).toBe(1);
-      new ArchiveCapture(store, root, 1).recover();
+      await new ArchiveCapture(store, root, 1).recover();
       expect(store.overlap('c', 0, Date.now() + 1000)).toHaveLength(2);
     } finally { db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   }, 20_000);

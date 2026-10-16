@@ -81,7 +81,7 @@ vi.mock('./db.js', () => ({
 
 vi.mock('./recorder.js', () => ({
   startRecording: vi.fn(async (id: string) => { state.lifecycleCalls.push(`start:${id}`); }),
-  stopRecording: vi.fn(async (id: string) => { state.lifecycleCalls.push(`stop:${id}`); }),
+  stopRecordingCapture: vi.fn(async (id: string) => { state.lifecycleCalls.push(`stop:${id}`); }),
   getActiveCount: () => 0,
   getRecordingsDiskUsageAsync: async () => state.usageRoot
     ? (await import('./recording-disk-usage.js')).measureDiskUsage(state.usageRoot) : state.usageBytes,
@@ -182,6 +182,33 @@ describe('recording disk cleanup', () => {
     expect(state.cacheRemoved).toEqual(['other.ts']);
     expect(state.deletedIds).toEqual(['other']);
     expect(state.recordings.some(rec => rec.id === 'watching')).toBe(true);
+  });
+  it('continues cleanup past a recording whose media deletion fails', async () => {
+    state.quotaGb = 1;
+    state.usageBytes = 3 * 1_073_741_824;
+    state.recordings = [
+      recording({ id: 'stuck', actual_end: 1 }),
+      recording({ id: 'next', actual_end: 2 }),
+    ];
+    const recorder = await import('./recorder.js');
+    vi.mocked(recorder.deleteRecordingFile).mockImplementationOnce(async () => { throw new Error('EBUSY'); });
+    const { runCleanup } = await import('./recording-scheduler.js');
+    await runCleanup();
+    expect(state.deletedIds).toEqual(['next']);
+    expect(state.recordings.map(rec => rec.id)).toEqual(['stuck']);
+  });
+
+  it('does not evict segmented recordings to satisfy the show quota', async () => {
+    state.quotaGb = 1;
+    state.usageBytes = 3 * 1_073_741_824;
+    state.recordings = [
+      recording({ id: 'segmented', actual_end: 1, capture_format: 'segmented' }),
+      recording({ id: 'show', actual_end: 2 }),
+    ];
+    const { runCleanup } = await import('./recording-scheduler.js');
+    await runCleanup();
+    expect(state.deletedIds).toEqual(['show']);
+    expect(state.recordings.map(rec => rec.id)).toEqual(['segmented']);
   });
 });
 

@@ -21,7 +21,7 @@ export function updateUrl(
   history.replaceState(history.state, '', search ? `?${search}` : window.location.pathname);
 }
 
-export function parseUrl(): { view: View; searchQuery: string; selectedGroup: string | null; selectedSeriesId: string | null; playChannelId: string | null; playUrl: string | null } {
+export function parseUrl(): { view: View; searchQuery: string; selectedGroup: string | null; selectedSeriesId: string | null; playChannelId: string | null } {
   const params = new URLSearchParams(window.location.search);
   const rawView = params.get('view') || 'home';
   const rawSeriesId = params.get('series');
@@ -38,7 +38,8 @@ export function parseUrl(): { view: View; searchQuery: string; selectedGroup: st
     searchQuery: params.get('q') || '',
     selectedGroup: params.get('group') || null,
     selectedSeriesId,
+    // Only the channel id is honoured; the stream URL always comes from the
+    // backend so a crafted link cannot autoplay an arbitrary URL.
     playChannelId: params.get('play') || null,
-    playUrl: params.get('url') || null,
   };
 }

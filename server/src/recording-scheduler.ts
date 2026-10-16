@@ -7,7 +7,7 @@ import {
 } from './db.js';
 import type { DBProgram, DBRecordingRule } from './db.js';
 import {
-  startRecording, stopRecording, getActiveCount, getRecordingsDiskUsageAsync,
+  startRecording, stopRecordingCapture, getActiveCount, getRecordingsDiskUsageAsync,
   deleteRecordingFile, enforceAllRuleRetentions, getRecordingMasterFilePath,
 } from './recorder.js';
 import { logger } from './logger.js';
@@ -67,11 +67,13 @@ async function tick(): Promise<void> {
   const now = Date.now();
 
   // 1. Stop expired captures and wait for their capture slots to be released.
+  // Finalization (concat/remux) continues in the background so a back-to-back
+  // airing is not delayed behind it.
   const recording = getRecordingsByStatus('recording');
   await Promise.all(recording.map(async rec => {
     if (rec.end_time <= now) {
       logger.info(`Scheduler: stopping recording ${rec.id} "${rec.title}" (end time reached)`);
-      await stopRecording(rec.id).catch(err => {
+      await stopRecordingCapture(rec.id).catch(err => {
         logger.error(`Scheduler: failed to stop recording ${rec.id}: ${err}`);
       });
     }
@@ -484,6 +486,18 @@ export function reconcileRecordingRule(ruleId: string): void {
   reconcileRule(rule, true);
 }
 
+/** Delete one recording's media then its row; a failure is logged so cleanup can move on. */
+async function deleteForCleanup(id: string): Promise<number | null> {
+  try {
+    const deletedBytes = await deleteRecordingFile(id);
+    deleteRecording(id);
+    return deletedBytes;
+  } catch (error) {
+    logger.error(`Cleanup: could not delete recording ${id}; keeping its metadata: ${error instanceof Error ? error.message : error}`);
+    return null;
+  }
+}
+
 /** Clean up old recordings based on retention settings */
 export async function runCleanup(): Promise<void> {
   await enforceAllRuleRetentions();
@@ -501,9 +515,8 @@ export async function runCleanup(): Promise<void> {
     for (const rec of old) {
       if (hasActiveRecordingVodViewer(rec.id)) continue;
       logger.info(`Cleanup: deleting recording ${rec.id} "${rec.title}" (age exceeded ${retentionDays}d retention)`);
-      const deletedBytes = await deleteRecordingFile(rec.id);
-      deleteRecording(rec.id);
-      logger.info(`Cleanup: removed ${deletedBytes} bytes for recording ${rec.id}`);
+      const deletedBytes = await deleteForCleanup(rec.id);
+      if (deletedBytes !== null) logger.info(`Cleanup: removed ${deletedBytes} bytes for recording ${rec.id}`);
     }
   }
 
@@ -512,7 +525,9 @@ export async function runCleanup(): Promise<void> {
     const maxBytes = maxDiskGb * 1_073_741_824;
     let usage = await getRecordingsDiskUsageAsync();
     if (usage > maxBytes) {
-      const completed = getRecordings({ status: 'completed' });
+      // Segmented recordings reference archive chunks, which are excluded from
+      // this quota; deleting them cannot lower the measured usage.
+      const completed = getRecordings({ status: 'completed' }).filter(rec => rec.capture_format !== 'segmented');
       completed.sort((a, b) => (a.actual_end ?? 0) - (b.actual_end ?? 0));
       // Disposable seek packages are reclaimed before permanent masters. Do not
       // evict a package while a native player still holds a session for it.
@@ -531,8 +546,8 @@ export async function runCleanup(): Promise<void> {
         if (usage <= maxBytes) break;
         if (hasActiveRecordingVodViewer(rec.id)) continue;
         logger.info(`Cleanup: deleting recording ${rec.id} "${rec.title}" (disk usage ${(usage / 1e9).toFixed(1)}GB > ${maxDiskGb}GB limit)`);
-        const deletedBytes = await deleteRecordingFile(rec.id);
-        deleteRecording(rec.id);
+        const deletedBytes = await deleteForCleanup(rec.id);
+        if (deletedBytes === null) continue;
         usage = await getRecordingsDiskUsageAsync();
         logger.info(`Cleanup: removed ${deletedBytes} bytes; disk usage is now ${(usage / 1e9).toFixed(1)}GB`);
       }

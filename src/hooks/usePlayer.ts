@@ -4,7 +4,7 @@ import { usePlayerStore } from '../stores/playerStore';
 import { useChannelStore } from '../stores/channelStore';
 import type { PlayerState, Channel } from '../types';
 import type { SubtitleTrack } from '../services/avplay';
-import { TizenPlayer } from '../services/avplay';
+import { installAvPlayVisibilityHandler, TizenPlayer } from '../services/avplay';
 import { saveWatchProgress, getWatchProgress, getSubtitlesEnabled, setSubtitlesEnabled, getSubtitleLanguage, setSubtitleLanguage } from '../services/channel-service';
 import { clientLogger as log } from '../utils/logger';
 import { useAppStore } from '../stores/appStore';
@@ -37,7 +37,7 @@ import { useRecordingStore } from '../stores/recordingStore';
 import { attachFiniteHls } from '../services/finiteHls';
 import { attachLiveHls, prefersNativeLiveHls } from '../services/liveHls';
 import { getAuthorizedLiveHlsUrl } from '../services/livePlayback';
-import { getBackendRequestScope } from '../services/api';
+import { ApiError, getBackendRequestScope } from '../services/api';
 import {
   getAvPlayClockReading,
   getHtml5ClockReading,
@@ -124,7 +124,28 @@ let resumeGesturePlayback: (() => boolean) | null = null;
 let activeBrowserSubtitleController: AbortController | null = null;
 let activeBrowserTextTrack: TextTrack | null = null;
 const browserProgrammaticTextTracks = new WeakSet<TextTrack>();
+// addTextTrack() tracks can never be removed; reuse one per label/language so
+// repeated selections and seeks do not add ghost entries to WebKit's CC menu.
+const browserProgrammaticTrackCache = new WeakMap<HTMLVideoElement, Map<string, TextTrack>>();
 const browserSubtitleSession = new BrowserSubtitleSession();
+// Set by a live recovery restart whose session had decoded media, so a failed
+// reauthorization during a brief outage keeps backing off instead of failing.
+let liveRecoveryRestartFromProgress = false;
+// Initial resume seeks retry for several seconds; a replacement playback must
+// abort them before they can move the next channel's media clock.
+let playbackSeekController: AbortController | null = null;
+
+function abortPlaybackSeeks(): void {
+  playbackSeekController?.abort();
+  playbackSeekController = null;
+}
+
+function beginPlaybackSeekScope(): AbortSignal | undefined {
+  abortPlaybackSeeks();
+  // Tizen 5 (Chromium 63) predates AbortController; generation checks remain.
+  playbackSeekController = typeof AbortController === 'undefined' ? null : new AbortController();
+  return playbackSeekController?.signal;
+}
 
 function clearRecordingVodPoll(): void {
   if (recordingVodPoll) clearInterval(recordingVodPoll);
@@ -135,13 +156,18 @@ function clearRecordingVodPoll(): void {
 function loadFiniteRecordingHls(video: HTMLVideoElement, url: string, positionSeconds: number): void {
   video.dataset.streamOffset = '0';
   const target = Number.isFinite(positionSeconds) ? Math.max(0, positionSeconds) : 0;
+  const generation = html5PlaybackGeneration;
+  const isCurrent = () => generation === html5PlaybackGeneration;
   video.addEventListener('loadedmetadata', () => {
+    if (!isCurrent()) return;
     if (!Number.isFinite(video.duration) || video.duration <= 0) {
       toast('Seekable recording is not ready yet');
       return;
     }
     if (target > 0) {
-      video.addEventListener('seeked', () => { void video.play().catch(() => {}); }, { once: true });
+      video.addEventListener('seeked', () => {
+        if (isCurrent()) void video.play().catch(() => {});
+      }, { once: true });
       video.currentTime = Math.min(target, Math.max(0, video.duration - 1));
     } else void video.play().catch(() => {});
   }, { once: true });
@@ -149,15 +175,39 @@ function loadFiniteRecordingHls(video: HTMLVideoElement, url: string, positionSe
   video.load();
 }
 
+function clearTextTrackCues(track: TextTrack): void {
+  // A disabled track exposes no cue list, so read it before disabling.
+  if (track.mode === 'disabled') track.mode = 'hidden';
+  const cues = track.cues;
+  if (cues) {
+    while (cues.length > 0) track.removeCue(cues[0]);
+  }
+}
+
+function getProgrammaticTextTrack(video: HTMLVideoElement, label: string, language: string): TextTrack {
+  let tracks = browserProgrammaticTrackCache.get(video);
+  if (!tracks) {
+    tracks = new Map();
+    browserProgrammaticTrackCache.set(video, tracks);
+  }
+  const key = `${language}\u0000${label}`;
+  const existing = tracks.get(key);
+  if (existing) {
+    clearTextTrackCues(existing);
+    return existing;
+  }
+  const textTrack = video.addTextTrack('subtitles', label, language);
+  browserProgrammaticTextTracks.add(textTrack);
+  tracks.set(key, textTrack);
+  return textTrack;
+}
+
 function clearBrowserSubtitleTrack(): void {
   activeBrowserSubtitleController?.abort();
   activeBrowserSubtitleController = null;
   if (activeBrowserTextTrack) {
+    clearTextTrackCues(activeBrowserTextTrack);
     activeBrowserTextTrack.mode = 'disabled';
-    const cues = activeBrowserTextTrack.cues;
-    if (cues) {
-      while (cues.length > 0) activeBrowserTextTrack.removeCue(cues[0]);
-    }
   }
   activeBrowserTextTrack = null;
 }
@@ -190,8 +240,7 @@ function startBrowserSubtitleTrack(
 ): void {
   clearBrowserSubtitleTrack();
   const controller = new AbortController();
-  const textTrack = video.addTextTrack('subtitles', track.label, track.language);
-  browserProgrammaticTextTracks.add(textTrack);
+  const textTrack = getProgrammaticTextTrack(video, track.label, track.language);
   const url = `${apiBaseUrl}${subtitleTrackPath(
     channel.id,
     track.index,
@@ -375,6 +424,8 @@ export function stopActivePlayback() {
   clearRecordingVodPoll();
   html5PlaybackGeneration += 1;
   liveAuthorizationGeneration += 1;
+  liveRecoveryRestartFromProgress = false;
+  abortPlaybackSeeks();
   playbackClock.reset();
   resetManualSeekIntent();
   commercialSkipSession.reset();
@@ -426,6 +477,31 @@ export function stopActivePlayback() {
 
   clearMediaSession();
   usePlayerStore.getState().setStatus('idle');
+}
+
+/** Pause/resume the active transport; shared by the Player OSD and mini-player. */
+export function togglePlayback(): void {
+  if (resumeGesturePlayback && ['awaiting-gesture', 'loading'].includes(usePlayerStore.getState().status) &&
+      resumeGesturePlayback()) return;
+  if (typeof webapis !== 'undefined' && webapis.avplay) {
+    try {
+      const state = webapis.avplay.getState();
+      if (state === 'PLAYING') webapis.avplay.pause();
+      else if (state === 'PAUSED') webapis.avplay.play();
+    } catch (err) { toast(`Toggle play failed: ${err}`); }
+  } else {
+    const video = document.getElementById('av-player') as HTMLVideoElement | null;
+    if (video) {
+      const isLive = usePlayerStore.getState().currentChannel?.contentType === 'livetv';
+      if (video.paused) {
+        if (isLive) liveStreamRecovery.resume();
+        video.play().catch((err) => toast(`Play failed: ${err}`));
+      } else {
+        if (isLive) liveStreamRecovery.suspend();
+        video.pause();
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -482,9 +558,11 @@ export function usePlayer(): {
     commercialSkipSession.getSnapshot,
     commercialSkipSession.getSnapshot,
   );
-  const restoredBrowserSubtitles = browserSubtitleSession.forChannel(
+  // Lazy initializers: read the mutable session and localStorage once per mount.
+  const [restoredBrowserSubtitles] = useState(() => browserSubtitleSession.forChannel(
     usePlayerStore.getState().currentChannel?.id,
-  );
+  ));
+  const [initialSubtitlesEnabled] = useState(getSubtitlesEnabled);
   const [subtitleTracks, setSubtitleTracks] = useState<SubtitleTrack[]>(restoredBrowserSubtitles.tracks);
   const [currentSubtitleIndex, setCurrentSubtitleIndex] = useState(restoredBrowserSubtitles.selectedIndex);
   const [subtitleText, setSubtitleText] = useState(restoredBrowserSubtitles.text);
@@ -494,7 +572,7 @@ export function usePlayer(): {
   // Mirrors the persisted global subtitles preference. Defaults to false;
   // browser live playback still carries captions so it can expose only tracks
   // that the media element actually detects, with Off enforced by track mode.
-  const keepSubsRef = useRef(getSubtitlesEnabled());
+  const keepSubsRef = useRef(initialSubtitlesEnabled);
 
   const play = useCallback(function play(finiteRetryPosition?: number) {
     const channel = usePlayerStore.getState().currentChannel;
@@ -505,6 +583,17 @@ export function usePlayer(): {
 
     const playStartedAt = Date.now();
     resumeGesturePlayback = null;
+    const recoveringProgressedLive = liveRecoveryRestartFromProgress;
+    liveRecoveryRestartFromProgress = false;
+    const seekSignal = beginPlaybackSeekScope();
+    const usesAvPlay = typeof webapis !== 'undefined' && !!webapis.avplay;
+    if (!usesAvPlay) {
+      // Live authorization can take up to 50s. Retire the previous HTML5
+      // transport now so its ended/error handlers cannot idle the new session.
+      html5PlaybackGeneration += 1;
+      const previousVideo = document.getElementById('av-player') as HTMLVideoElement | null;
+      try { previousVideo?.pause(); } catch { /* element may be detached */ }
+    }
     const setStatus = usePlayerStore.getState().setStatus;
     const setError = usePlayerStore.getState().setError;
     const audioOnly = channel.contentType === 'livetv' && usePlayerStore.getState().audioOnly;
@@ -542,6 +631,22 @@ export function usePlayer(): {
       resumeGesturePlayback = null;
       disableLiveStreamRecovery();
       setError('Compatible Live TV is unavailable. Check the server connection and tap to retry.');
+    };
+    // A recovery reconnect after proven media keeps the bounded live backoff
+    // running through a brief outage (e.g. Wi-Fi to cellular) instead of
+    // turning one failed reauthorization into a terminal error.
+    const deferLiveReauthorization = () => {
+      if (!recoveringProgressedLive) return false;
+      log.warn('Live stream: reauthorization failed — retrying with backoff');
+      setStatus('loading');
+      restartActiveLiveStream = () => {
+        if (!isCurrentAuthorization()) return;
+        liveRecoveryRestartFromProgress = true;
+        play();
+      };
+      liveStreamRecovery.resume();
+      liveStreamRecovery.transportEnded('hls-error');
+      return true;
     };
     const startPlayback = (authorizedLiveUrl: string | null) => {
       if (authorizationGeneration !== liveAuthorizationGeneration ||
@@ -731,7 +836,10 @@ export function usePlayer(): {
                   preparedDurationMs / 1000,
                 );
                 try {
-                  await retryPlaybackSeek(() => seekAvPlay(avplay, resumeTarget));
+                  await retryPlaybackSeek(
+                    () => seekAvPlay(avplay, resumeTarget, undefined, seekSignal),
+                    { signal: seekSignal },
+                  );
                 } catch (error) {
                   if (!isCurrentSession()) return;
                   log.warn('AVPlay: initial resume failed; starting from zero', error);
@@ -819,6 +927,7 @@ export function usePlayer(): {
             failCompatibleLiveHls();
             return;
           }
+          liveRecoveryRestartFromProgress = hasLiveMediaProgress;
           play();
         };
         liveStreamRecovery.begin(channel.id);
@@ -1025,7 +1134,10 @@ export function usePlayer(): {
               (!appleRecordingHlsPath || channel.recordingVodReady) &&
               (!isFiniteTsRecording || video.duration > 0)) {
             const resumeTarget = getInitialResumeTarget(resumePosition, video.duration);
-            await retryPlaybackSeek(() => seekHtml5(video, resumeTarget));
+            await retryPlaybackSeek(
+              () => seekHtml5(video, resumeTarget, undefined, seekSignal),
+              { signal: seekSignal },
+            );
           }
         } catch (error) {
           if (!isCurrentPlayback()) return;
@@ -1073,8 +1185,25 @@ export function usePlayer(): {
           lastMediaTime = video.currentTime;
           armFiniteHlsStallTimer(true);
         };
-        video.onplay = () => { recoverDrainedLiveStream(); armFiniteHlsStallTimer(); };
-        video.onpause = clearFiniteHlsStallTimer;
+        video.onplay = () => {
+          // Native controls, iOS fullscreen and lock-screen resume bypass
+          // togglePlay; re-arm live recovery that a user pause suspended.
+          if (isLiveTs && isCurrentPlayback() && liveStreamRecovery.isSuspended() &&
+              !transportInvalidated && usePlayerStore.getState().status !== 'error') {
+            liveStreamRecovery.resume();
+          }
+          recoverDrainedLiveStream();
+          armFiniteHlsStallTimer();
+        };
+        video.onpause = () => {
+          clearFiniteHlsStallTimer();
+          // A user pause (native controls, iOS fullscreen) must not let the
+          // watchdog reconnect and autoplay. Ignore the source-reset pause
+          // before startup and the implicit pause that precedes 'ended'.
+          if (isLiveTs && isCurrentPlayback() && playAttempted && !video.ended) {
+            liveStreamRecovery.suspend();
+          }
+        };
         video.onwaiting = () => {
           if (!isCurrentPlayback() || ['error', 'awaiting-gesture'].includes(usePlayerStore.getState().status)) return;
           log.debug('HTML5 event: waiting');
@@ -1130,9 +1259,11 @@ export function usePlayer(): {
             return;
           }
           if (isLiveTs && isCurrentPlayback()) {
-            if (nativeLiveHls) { failCompatibleLiveHls(); return; }
+            // Only a stream that never produced media is a terminal compatible
+            // failure; a mid-stream network change reconnects with backoff.
+            if (nativeLiveHls && !hasLiveMediaProgress) { failCompatibleLiveHls(); return; }
             setStatus('loading');
-            liveStreamRecovery.transportEnded('mpegts-error');
+            liveStreamRecovery.transportEnded(nativeLiveHls ? 'hls-error' : 'mpegts-error');
             return;
           }
           setError(`Playback failed: ${errMsg}`);
@@ -1350,7 +1481,7 @@ export function usePlayer(): {
             log.warn('Finite HLS failed after bounded recovery');
             setError('Archive playback could not recover. Try seeking past the damaged section.');
           }
-        }).then(dispose => {
+        }, isCurrentPlayback).then(dispose => {
           if (!isCurrentPlayback()) { dispose(); return; }
           disposeFiniteHls = dispose;
         }).catch(error => {
@@ -1429,13 +1560,17 @@ export function usePlayer(): {
         .then(url => {
           if (!isCurrentAuthorization()) return;
           if (!url && nativeLiveHls) {
+            if (deferLiveReauthorization()) return;
             failCompatibleLiveHls();
             return;
           }
           startPlayback(url);
         })
-        .catch(() => {
+        .catch((error: unknown) => {
           if (!isCurrentAuthorization()) return;
+          // Explicit 4xx rejections are not transient; keep them terminal.
+          const rejected = error instanceof ApiError && error.status < 500 && error.status !== 429;
+          if (!rejected && deferLiveReauthorization()) return;
           setError('Live playback could not be authorized. Check the server connection.');
         })
         .finally(() => {
@@ -1508,29 +1643,7 @@ export function usePlayer(): {
     }
   }, []);
 
-  const togglePlay = useCallback(() => {
-    if (resumeGesturePlayback && ['awaiting-gesture', 'loading'].includes(usePlayerStore.getState().status) &&
-        resumeGesturePlayback()) return;
-    if (typeof webapis !== 'undefined' && webapis.avplay) {
-      try {
-        const state = webapis.avplay.getState();
-        if (state === 'PLAYING') webapis.avplay.pause();
-        else if (state === 'PAUSED') webapis.avplay.play();
-      } catch (err) { toast(`Toggle play failed: ${err}`); }
-    } else {
-      const video = document.getElementById('av-player') as HTMLVideoElement | null;
-      if (video) {
-        const isLive = usePlayerStore.getState().currentChannel?.contentType === 'livetv';
-        if (video.paused) {
-          if (isLive) liveStreamRecovery.resume();
-          video.play().catch((err) => toast(`Play failed: ${err}`));
-        } else {
-          if (isLive) liveStreamRecovery.suspend();
-          video.pause();
-        }
-      }
-    }
-  }, []);
+  const togglePlay = togglePlayback;
 
   const beginManualSeek = useCallback(() => {
     registerManualSeekIntent(null);
@@ -1636,6 +1749,15 @@ export function usePlayer(): {
     syncBrowserSubtitleSession();
     return unsubscribe;
   }, []);
+
+  // Tizen: release/restore the AVPlay decoder across app hide/show.
+  useEffect(() => {
+    if (typeof webapis === 'undefined' || !webapis.avplay) return;
+    return installAvPlayVisibilityHandler(undefined, document, () => {
+      const { currentChannel, status } = usePlayerStore.getState();
+      if (currentChannel && status !== 'idle') play();
+    });
+  }, [play]);
 
   // Sync media session playback state with video pause/play
   useEffect(() => {

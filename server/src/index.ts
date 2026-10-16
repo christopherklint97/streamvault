@@ -5,6 +5,7 @@ import path from 'path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'url';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { pipeline } from 'node:stream';
 import { spawn } from 'node:child_process';
 import type { Socket } from 'node:net';
 
@@ -32,7 +33,8 @@ import {
 } from './db.js';
 import type { DBRecording, DBRecordingRule } from './db.js';
 import { getStatus, sync, cancelSync, startupSync, startCrawl, cancelCrawl } from './sync.js';
-import { fetchXtreamStreamsByCategory, fetchXtreamShortEpg, fetchAllCategoryStreams, fetchXtreamSeriesInfo, fetchXtreamVodInfo } from './xtream.js';
+import { fetchXtreamStreamsByCategory, fetchXtreamShortEpg, fetchAllCategoryStreams, fetchXtreamSeriesInfo, fetchXtreamVodInfo, streamUrl as xtreamStreamUrl } from './xtream.js';
+import { channelSourceRef, episodeSourceRef, resolveSourceRef } from './source-ref.js';
 import { createOnDemandEpg } from './on-demand-epg.js';
 import { createEpgReadWorker } from './epg-read-worker.js';
 import { createChannelReadWorker } from './channel-read-worker.js';
@@ -118,6 +120,7 @@ import {
   createRecordingPlaybackTicket,
   maskConfigResponse,
   normalizeAllowedOrigins,
+  isForeignOriginWrite,
   requireAuth,
   validateExternalHttpUrl,
   validateSourceHttpUrl,
@@ -141,6 +144,9 @@ const IOS_HLS_MAX_STORAGE_BYTES = 4 * 1024 * 1024 * 1024;
 const IOS_HLS_TICKET_TTL_MS = 30_000;
 const MAX_IOS_HLS_SESSIONS = 2;
 const liveAudioTranscodes = new ConcurrentStreamLimiter(2);
+// Bound per-request VOD FFmpeg children; slack covers a seek whose old child is still exiting.
+const vodRemuxes = new ConcurrentStreamLimiter(3);
+const vodTranscodes = new ConcurrentStreamLimiter(2);
 const iosHlsTicketSecret = randomBytes(32).toString('hex');
 const hlsProxyTicketSecret = randomBytes(32);
 const signedHlsProxyUrl = (url: string) => signHlsProxyUrl(url, hlsProxyTicketSecret);
@@ -207,6 +213,13 @@ const allowedOrigins = normalizeAllowedOrigins(process.env.STREAMVAULT_ALLOWED_O
 app.use(cors({
   origin: allowedOrigins.length > 0 ? allowedOrigins : true,
 }));
+app.use('/api', (req, res, next) => {
+  if (isForeignOriginWrite(req.method, req.headers.origin, [req.headers.host, req.get('x-forwarded-host')], allowedOrigins)) {
+    res.status(403).json({ error: 'Cross-origin write rejected' });
+    return;
+  }
+  next();
+});
 app.use(express.json());
 
 const archiveRoot = process.env.RECORDINGS_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'recordings');
@@ -281,8 +294,16 @@ function getXtreamConfig(): XtreamConfig | null {
 }
 
 function validateProxySourceUrl(rawUrl: string) {
+  const resolved = resolveSourceRef(rawUrl, {
+    channelUrl: id => getChannelById(id)?.url,
+    episodeUrl: (id, ext) => {
+      const config = getXtreamConfig();
+      return config ? xtreamStreamUrl(config, id, 'series', ext) : undefined;
+    },
+  });
+  if (!resolved) return { ok: false as const, error: 'Unknown stream source' };
   const xtreamServer = getConfig('xtream_server');
-  return validateSourceHttpUrl(rawUrl, xtreamServer, allowedProxyHostsFromConfig(xtreamServer, process.env.STREAMVAULT_PROXY_ALLOWED_HOSTS));
+  return validateSourceHttpUrl(resolved, xtreamServer, allowedProxyHostsFromConfig(xtreamServer, process.env.STREAMVAULT_PROXY_ALLOWED_HOSTS));
 }
 
 function allowUpstreamRedirect(url: string): boolean {
@@ -350,7 +371,7 @@ app.get('/api/channels', async (req, res, next) => {
   const channels = dbChannels.map(ch => ({
     id: ch.id,
     name: ch.name,
-    url: ch.url,
+    url: channelSourceRef(ch.id, ch.url),
     logo: ch.logo,
     group: ch.grp,
     region: ch.region,
@@ -389,7 +410,7 @@ app.post('/api/channels/by-ids', async (req, res, next) => {
   const channels = dbChannels.map(ch => ({
     id: ch.id,
     name: ch.name,
-    url: ch.url,
+    url: channelSourceRef(ch.id, ch.url),
     logo: ch.logo,
     group: ch.grp,
     region: ch.region,
@@ -438,7 +459,7 @@ app.get('/api/browse', async (req, res, next) => {
   const channels = dbChannels.map(ch => ({
     id: ch.id,
     name: ch.name,
-    url: ch.url,
+    url: channelSourceRef(ch.id, ch.url),
     logo: ch.logo,
     group: ch.grp,
     region: ch.region,
@@ -513,7 +534,7 @@ app.get('/api/search', async (req, res) => {
   const channels = dbChannels.map(ch => ({
     id: ch.id,
     name: ch.name,
-    url: ch.url,
+    url: channelSourceRef(ch.id, ch.url),
     logo: ch.logo,
     group: ch.grp,
     region: ch.region,
@@ -702,7 +723,9 @@ app.get('/api/series/:seriesId', async (req, res) => {
 
   try {
     const info = await fetchXtreamSeriesInfo(config, seriesId);
-    res.json(info);
+    const episodes = Object.fromEntries(Object.entries(info.episodes).map(([season, list]) =>
+      [season, list.map(ep => ({ ...ep, url: episodeSourceRef(ep.id, ep.containerExtension) }))]));
+    res.json({ ...info, episodes });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error';
     logger.error(`Series info fetch failed for ${seriesId}: ${msg}`);
@@ -744,15 +767,19 @@ app.post('/api/client-logs', (req, res) => {
     res.status(400).json({ error: 'logs array required' });
     return;
   }
-  for (const entry of logs) {
-    const { level, message, ts } = entry;
-    const prefix = `${ts || new Date().toISOString()} [CLIENT:${(level || 'info').toUpperCase()}]`;
+  // Client input: bound volume and strip control characters so entries cannot forge log lines.
+  const clean = (value: unknown, max: number) =>
+    (typeof value === 'string' ? value : JSON.stringify(value) ?? '')
+      .replace(/\p{Cc}+/gu, ' ').slice(0, max);
+  for (const entry of logs.slice(0, 50)) {
+    const { level, message, ts } = (entry ?? {}) as Record<string, unknown>;
+    const prefix = `${clean(ts, 40) || new Date().toISOString()} [CLIENT:${(clean(level, 10) || 'info').toUpperCase()}]`;
     if (level === 'error') {
-      console.error(prefix, message);
+      console.error(prefix, clean(message, 2000));
     } else if (level === 'warn') {
-      console.warn(prefix, message);
+      console.warn(prefix, clean(message, 2000));
     } else {
-      console.log(prefix, message);
+      console.log(prefix, clean(message, 2000));
     }
   }
   res.json({ ok: true });
@@ -1073,9 +1100,16 @@ app.get('/api/remux/:channelId', (req, res) => {
   // StreamVault's CDN-compatible headers and credential handling.
   const sourceUrl = `http://127.0.0.1:${PORT}/api/stream/${encodeURIComponent(sourceChannel.id)}`;
   const isHevc = /\[4K\]\s*$/i.test(sourceChannel.name);
+  const release = vodRemuxes.acquire();
+  if (!release) {
+    res.setHeader('Retry-After', '2');
+    res.status(503).json({ error: 'Too many VOD remux sessions' });
+    return;
+  }
   const ff = spawn('ffmpeg', buildFragmentedMp4Args(sourceUrl, isHevc), {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  ff.on('close', release);
 
   res.status(200);
   res.setHeader('Content-Type', 'video/mp4');
@@ -1088,6 +1122,7 @@ app.get('/api/remux/:channelId', (req, res) => {
     if (message) logger.warn(`VOD remux[${channelId}]: ${sanitizeFfmpegMessage(message)}`);
   });
   ff.on('error', (err) => {
+    release();
     logger.error(`VOD remux spawn failed for ${channelId}: ${err.message}`);
     if (!res.headersSent) res.status(500).json({ error: 'VOD remux failed to start' });
   });
@@ -1132,9 +1167,16 @@ app.get('/api/transcode/:channelId', (req, res) => {
   }
 
   const sourceUrl = `http://127.0.0.1:${PORT}${sourcePath}`;
+  const release = vodTranscodes.acquire();
+  if (!release) {
+    res.setHeader('Retry-After', '2');
+    res.status(503).json({ error: 'Too many VOD transcode sessions' });
+    return;
+  }
   const ff = spawn('ffmpeg', buildBrowserCompatibleVideoArgs(sourceUrl, startSeconds || 0), {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  ff.on('close', release);
 
   res.status(200);
   res.setHeader('Content-Type', 'video/mp4');
@@ -1147,6 +1189,7 @@ app.get('/api/transcode/:channelId', (req, res) => {
     if (message) logger.warn(`VOD transcode[${channelId}]: ${sanitizeFfmpegMessage(message)}`);
   });
   ff.on('error', (err) => {
+    release();
     logger.error(`VOD transcode spawn failed for ${channelId}: ${err.message}`);
     if (!res.headersSent) res.status(500).json({ error: 'VOD transcode failed to start' });
   });
@@ -1188,16 +1231,17 @@ app.get('/api/ios-hls-authorize/:channelId/index.m3u8', (req, res) => {
   }
   const expiresAt = now + IOS_HLS_TICKET_TTL_MS;
   const nonce = randomUUID();
+  // Client-visible values keep the caller's reference, never the resolved provider URL.
   const ticket = createIosHlsTicket({
     channelId,
-    sourceUrl: validation.url.toString(),
+    sourceUrl: req.query.url,
     contentType,
     startSeconds: startSeconds || 0,
   }, iosHlsTicketSecret, expiresAt, nonce);
   iosHlsTicketNonces.set(nonce, expiresAt);
 
   const params = new URLSearchParams({
-    url: validation.url.toString(),
+    url: req.query.url,
     type: contentType,
     ticket,
   });
@@ -1271,7 +1315,7 @@ app.get('/api/ios-hls/:channelId/index.m3u8', (req, res) => {
   const ticket = typeof req.query.ticket === 'string' ? req.query.ticket : '';
   const ticketResult = verifyIosHlsTicket(ticket, {
     channelId,
-    sourceUrl: requestValidation.url.toString(),
+    sourceUrl: req.query.url,
     contentType,
     startSeconds: startSeconds || 0,
   }, iosHlsTicketSecret);
@@ -1288,7 +1332,7 @@ app.get('/api/ios-hls/:channelId/index.m3u8', (req, res) => {
     const reusable = iosHlsSessions.get(reusableSessionId)!;
     reusable.expiresAt = Date.now() + IOS_HLS_IDLE_TIMEOUT_MS;
     const params = new URLSearchParams({
-      url: requestValidation.url.toString(),
+      url: req.query.url,
       type: contentType,
       session: reusableSessionId,
     });
@@ -1340,7 +1384,7 @@ app.get('/api/ios-hls/:channelId/index.m3u8', (req, res) => {
     }
   });
 
-  const playlistUrl = `/api/ios-hls/${encodeURIComponent(channelId)}/index.m3u8?url=${encodeURIComponent(requestValidation.url.toString())}&type=${contentType}&session=${encodeURIComponent(sessionId)}${startSeconds ? `&start=${startSeconds}` : ''}`;
+  const playlistUrl = `/api/ios-hls/${encodeURIComponent(channelId)}/index.m3u8?url=${encodeURIComponent(req.query.url)}&type=${contentType}&session=${encodeURIComponent(sessionId)}${startSeconds ? `&start=${startSeconds}` : ''}`;
   res.redirect(302, playlistUrl);
 });
 
@@ -1487,14 +1531,19 @@ app.get('/api/stream/:channelId', async (req, res) => {
     if (pipeline === 'hls-manifest') {
       // M3U8 is text — read body to string, rewrite URLs, send.
       const chunks: Buffer[] = [];
-      for await (const chunk of upstream.body) chunks.push(chunk as Buffer);
+      let size = 0;
+      for await (const chunk of upstream.body) {
+        size += chunk.length;
+        if (size > 2_000_000) {
+          upstream.body.destroy();
+          clearProxyMediaHeaders(res);
+          res.status(502).json({ error: 'HLS playlist too large to proxy safely' });
+          return;
+        }
+        chunks.push(chunk as Buffer);
+      }
       const body = Buffer.concat(chunks).toString('utf8');
       logger.info(`Stream proxy: HLS playlist received (${body.length} bytes), rewriting URLs`);
-      if (body.length > 2_000_000) {
-        clearProxyMediaHeaders(res);
-        res.status(502).json({ error: 'HLS playlist too large to proxy safely' });
-        return;
-      }
       if (forwardedType === 'other') res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       const rewritten = rewriteHlsManifest(body, upstream.finalUrl || streamUrl, signedHlsProxyUrl);
       res.removeHeader('Content-Length');
@@ -1644,6 +1693,7 @@ app.get('/api/proxy', async (req, res) => {
       for await (const chunk of upstream.body) {
         size += chunk.length;
         if (size > 2_000_000) {
+          upstream.body.destroy();
           res.status(502).json({ error: 'HLS playlist too large to proxy safely' });
           return;
         }
@@ -1655,25 +1705,32 @@ app.get('/api/proxy', async (req, res) => {
       );
       return;
     }
-    if (ct) res.setHeader('Content-Type', ct);
+    if (isUpstreamHtmlResponse(ct)) {
+      upstream.body.on('error', () => {});
+      upstream.body.dump().catch(() => {});
+      res.status(502).json({ error: 'Upstream returned an error page instead of media' });
+      return;
+    }
+    // Unknown upstream types are data, never same-origin executable content.
+    const forwardedType = safeProxyMime(ct);
+    res.setHeader('Content-Type', forwardedType === 'other' ? 'application/octet-stream' : forwardedType);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Access-Control-Allow-Origin', '*');
-    const cl = pickHeader(upstream.headers, 'content-length');
-    if (cl) res.setHeader('Content-Length', cl);
-    const cr = pickHeader(upstream.headers, 'content-range');
+    const cl = safeProxyLength(pickHeader(upstream.headers, 'content-length'));
+    if (cl !== 'unknown') res.setHeader('Content-Length', cl);
+    const cr = safeProxyContentRange(pickHeader(upstream.headers, 'content-range'));
     if (cr) res.setHeader('Content-Range', cr);
-    res.setHeader('Accept-Ranges', pickHeader(upstream.headers, 'accept-ranges') || 'bytes');
+    res.setHeader('Accept-Ranges', safeProxyAcceptRanges(pickHeader(upstream.headers, 'accept-ranges')) || 'bytes');
     res.status(upstream.statusCode);
     setStreamSocketOpts(res);
 
-    upstream.body.on('error', () => {});
-    upstream.body.pipe(res);
-    req.on('close', () => {
-      upstream.body.destroy();
-    });
+    // pipeline ends the response on upstream errors and releases upstream on client abort.
+    pipeline(upstream.body, res, () => {});
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Proxy error';
+    logger.warn(`HLS proxy request failed: ${sanitizeFfmpegMessage(msg)}`);
     if (!res.headersSent) {
-      res.status(502).json({ error: msg });
+      res.status(502).json({ error: 'Upstream request failed' });
     }
   }
 });
@@ -2077,14 +2134,14 @@ app.get('/api/recordings/:id/stream', (req, res) => {
       'Content-Length': parsed.chunkSize,
       'Content-Type': contentType,
     });
-    fs.createReadStream(filePath, { start: parsed.start, end: parsed.end }).pipe(res);
+    pipeline(fs.createReadStream(filePath, { start: parsed.start, end: parsed.end }), res, () => {});
   } else {
     res.writeHead(200, {
       'Content-Length': fileSize,
       'Content-Type': contentType,
       'Accept-Ranges': 'bytes',
     });
-    fs.createReadStream(filePath).pipe(res);
+    pipeline(fs.createReadStream(filePath), res, () => {});
   }
 });
 
@@ -2262,6 +2319,16 @@ app.put('/api/config', requireAuth, (req, res) => {
       }
     }
   }
+  // The stored password is sent to the configured server; a new origin must
+  // come with its password so a rewritten server URL cannot harvest it.
+  if (xtreamServer && !(typeof xtreamPassword === 'string' && xtreamPassword !== '')) {
+    const origin = (value: string) => { try { return new URL(value).origin; } catch { return value; } };
+    const current = getConfig('xtream_server', '');
+    if (current && origin(xtreamServer) !== origin(current)) {
+      res.status(400).json({ error: 'xtreamPassword is required when changing the Xtream server' });
+      return;
+    }
+  }
   const sourceChanged = (inputMode !== undefined && inputMode !== getConfig('input_mode', 'manual'))
     || (xtreamServer !== undefined && xtreamServer !== getConfig('xtream_server', ''))
     || (xtreamUsername !== undefined && xtreamUsername !== getConfig('xtream_username', ''))
@@ -2319,7 +2386,13 @@ app.use('/api', (err: Error, _req: express.Request, res: express.Response, _next
     setImmediate(() => shutdown('database corruption detected'));
     return;
   }
-  res.status(500).json({ error: err.message });
+  // Only client-safe errors (e.g. JSON body parse failures) expose their message.
+  const { status, expose } = err as Error & { status?: number; expose?: boolean };
+  if (expose && typeof status === 'number' && status >= 400 && status < 500) {
+    res.status(status).json({ error: err.message });
+    return;
+  }
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 // ---------- Serve frontend (PWA) ----------
@@ -2382,12 +2455,18 @@ function scheduleNextBackup(): void {
 const httpServer = app.listen(PORT, '0.0.0.0', () => {
   logger.info(`StreamVault server listening on http://0.0.0.0:${PORT}`);
   startupSync();
+  // Recovery probes rolled-off chunks asynchronously so the API stays responsive;
+  // capture starts only after the index is reconciled.
   archiveRecovering = true;
-  try { archiveCapture.recover(); recoverSegmentedRefs(); }
-  finally { archiveRecovering = false; }
-  archiveCapture.startAll();
-  // The index survives restart; backstop cleanup does not depend on EPG or viewers.
-  for (const archive of archiveStore.archives()) pruneArchive(archiveStore, archiveRoot, archive.channelId);
+  archiveCapture.recover()
+    .then(() => recoverSegmentedRefs())
+    .catch(err => logger.error(`Archive recovery failed: ${err}`))
+    .finally(() => {
+      archiveRecovering = false;
+      archiveCapture.startAll();
+      // The index survives restart; backstop cleanup does not depend on EPG or viewers.
+      for (const archive of archiveStore.archives()) pruneArchive(archiveStore, archiveRoot, archive.channelId);
+    });
   // Prewarm DNS+TLS to the Xtream upstream so first user click hits a warm socket
   const xtreamServer = getConfig('xtream_server');
   if (xtreamServer) prewarmUpstream(xtreamServer);

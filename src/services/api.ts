@@ -158,9 +158,8 @@ async function withRequestDeadline<T>(
 }
 
 /** Probe a user-entered backend without forwarding credentials for another origin. */
-// The status endpoint is intentionally public and returns heterogeneous status fields.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function probeBackend<T = any>(baseUrl: string, signal?: AbortSignal, timeoutMs?: number): Promise<T> {
+// The status endpoint is intentionally public; callers supply the payload type.
+export async function probeBackend<T = unknown>(baseUrl: string, signal?: AbortSignal, timeoutMs?: number): Promise<T> {
   return withRequestDeadline({ signal, cache: 'no-store', timeoutMs }, async init => {
     const generation = backendRequestGeneration;
     const response = await fetchBackend(`${baseUrl}/api/status`, init);
@@ -171,9 +170,8 @@ export async function probeBackend<T = any>(baseUrl: string, signal?: AbortSigna
 }
 
 /** Fetch JSON from StreamVault with the protected-endpoint token in a header. */
-// Existing endpoints return heterogeneous JSON; callers may opt into a precise T.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function apiFetch<T = any>(
+// Endpoints return heterogeneous JSON; callers that read the body supply T.
+export async function apiFetch<T = unknown>(
   baseUrl: string,
   path: string,
   options?: ApiRequestOptions,

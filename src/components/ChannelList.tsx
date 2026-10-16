@@ -302,7 +302,9 @@ export default function ChannelList({ contentType }: ChannelListProps) {
   const [searchQuery, setSearchQuery] = useState(savedBrowse?.searchQuery ?? '');
   const [debouncedQuery, setDebouncedQuery] = useState(savedBrowse?.searchQuery ?? '');
   const [selectedGroup, setSelectedGroup] = useState<string | null>(savedBrowse?.selectedGroup ?? 'All');
-  const [isSearching, setIsSearching] = useState(false);
+  // Query whose results are currently shown; lets "searching" be derived
+  // instead of toggled, so it cannot stick when the debounced query is unchanged.
+  const [searchResultsQuery, setSearchResultsQuery] = useState<string | null>(null);
   const [focusZone, setFocusZone] = useState<FocusZone>('search');
   const [focusIndex, setFocusIndex] = useState(0);
   const [scrollOffset, setScrollOffset] = useState(0);
@@ -329,6 +331,9 @@ export default function ChannelList({ contentType }: ChannelListProps) {
   }, [contentType]);
 
   const categories = useChannelStore((s) => s.categoriesByType[contentType] ?? EMPTY_CATEGORIES);
+  // Changes when a sync completes; browse/categories re-fetch so the view
+  // reflects the new catalogue without remounting.
+  const catalogueVersion = useChannelStore((s) => s.lastSyncTime);
   const fetchCategories = useChannelStore((s) => s.fetchCategories);
   const searchChannelsFn = useChannelStore((s) => s.searchChannels);
   const setChannel = usePlayerStore((s) => s.setChannel);
@@ -344,23 +349,36 @@ export default function ChannelList({ contentType }: ChannelListProps) {
   const fetchIdRef = useRef(0); // to discard stale responses
   const loadingMoreRef = useRef(false);
 
-  // Fetch categories on mount
+  const hasActiveQuery = debouncedQuery.trim().length > 0;
+
+  // Fetch categories on mount and after each completed sync
   useEffect(() => {
     fetchCategories(contentType);
-  }, [contentType, fetchCategories]);
+  }, [contentType, fetchCategories, catalogueVersion]);
 
-  // Load the first page of channels for the current category
+  // Load the first page of channels for the current category. Skipped while a
+  // search is active; re-runs when the search is cleared.
   useEffect(() => {
+    if (hasActiveQuery) return;
     const id = ++fetchIdRef.current;
     let cancelled = false;
+    const isStale = () => cancelled || fetchIdRef.current !== id;
     const group = selectedGroup && selectedGroup !== 'All' ? selectedGroup : undefined;
 
-    apiBrowse(contentType, group, PAGE_SIZE).then(data => {
-      if (cancelled || fetchIdRef.current !== id) return;
+    apiBrowse(contentType, group, PAGE_SIZE).then(async data => {
+      if (isStale()) return;
       // If "All" returned 0 results but we have categories, auto-select the first one
-      if (data.total === 0 && !group && categories.length > 0) {
-        setSelectedGroup(categories[0].name);
-        return;
+      if (data.total === 0 && !group) {
+        let cats = useChannelStore.getState().categoriesByType[contentType];
+        if (!cats) {
+          await fetchCategories(contentType);
+          if (isStale()) return;
+          cats = useChannelStore.getState().categoriesByType[contentType];
+        }
+        if (cats && cats.length > 0) {
+          setSelectedGroup(cats[0].name);
+          return;
+        }
       }
       setChannels(data.channels);
       setTotalCount(data.total);
@@ -369,13 +387,13 @@ export default function ChannelList({ contentType }: ChannelListProps) {
       setFocusIndex(0);
       if (gridRef.current) gridRef.current.scrollTop = 0;
     }).catch((err) => {
-      if (cancelled || fetchIdRef.current !== id) return;
+      if (isStale()) return;
       showToast(`Failed to load channels: ${err}`);
       setInitialLoading(false);
     });
 
     return () => { cancelled = true; };
-  }, [contentType, selectedGroup, categories, showToast]);
+  }, [contentType, selectedGroup, hasActiveQuery, catalogueVersion, fetchCategories, showToast]);
 
   // Load the next page (triggered by scroll proximity)
   const loadNextPage = useCallback(async () => {
@@ -444,7 +462,8 @@ export default function ChannelList({ contentType }: ChannelListProps) {
         setChannels(results);
         setTotalCount(results.length);
         setNextCursor(null);
-        setIsSearching(false);
+        setSearchResultsQuery(debouncedQuery);
+        setInitialLoading(false);
         setFocusIndex(0);
         setScrollOffset(0);
       });
@@ -457,13 +476,16 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     if (contentType !== 'livetv' || channels.length === 0) return;
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
-    const missing = channels.map(ch => ch.id).filter(id => !fetchedEpgIdsRef.current.has(id));
+    const fetchedIds = fetchedEpgIdsRef.current;
+    const missing = channels.map(ch => ch.id).filter(id => !fetchedIds.has(id));
     if (missing.length === 0) return;
-    missing.forEach(id => fetchedEpgIdsRef.current.add(id));
+    missing.forEach(id => fetchedIds.add(id));
+    let merged = false;
     const refresh = async (ids: string[], attempt: number) => {
       try {
         const data = await fetchBatchEpg(ids);
         if (cancelled) return;
+        merged = true;
         setEpgMap(prev => ({ ...prev, ...data }));
         const unresolved = ids.filter(id => !getCurrentEpg(data[id]).current);
         if (unresolved.length > 0) {
@@ -476,7 +498,12 @@ export default function ChannelList({ contentType }: ChannelListProps) {
       }
     };
     void refresh(missing, 1);
-    return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer); };
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      // Unmark ids whose first response was dropped so the next run refetches them.
+      if (!merged) missing.forEach(id => fetchedIds.delete(id));
+    };
   }, [contentType, channels, epgRefreshTick]);
 
   const totalRows = Math.ceil(channels.length / COLUMN_COUNT);
@@ -542,8 +569,6 @@ export default function ChannelList({ contentType }: ChannelListProps) {
 
   const handleSearchChange = useCallback((value: string) => {
     setSearchQuery(value);
-    if (value.trim()) setIsSearching(true);
-    else setIsSearching(false);
     setFocusIndex(0);
     if (gridRef.current) gridRef.current.scrollTop = 0;
     setFocusZone('search');
@@ -647,7 +672,9 @@ export default function ChannelList({ contentType }: ChannelListProps) {
 
   const label = contentType === 'livetv' ? 'Live TV' : contentType === 'movies' ? 'Movies' : 'Series';
 
-  const showingSearch = !!debouncedQuery.trim();
+  const showingSearch = hasActiveQuery;
+  const isSearching = !!searchQuery.trim()
+    && (searchQuery !== debouncedQuery || searchResultsQuery !== debouncedQuery);
   const countText = initialLoading
     ? 'Loading...'
     : showingSearch

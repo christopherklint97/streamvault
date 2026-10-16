@@ -31,3 +31,13 @@ describe('series detail URL state', () => {
     });
   });
 });
+
+describe('play deep link', () => {
+  it('exposes only the channel id and ignores a url override', () => {
+    history.replaceState({}, '', '/?play=live_1&url=https%3A%2F%2Fevil.example%2Fx.m3u8');
+
+    const parsed = parseUrl();
+    expect(parsed.playChannelId).toBe('live_1');
+    expect(parsed).not.toHaveProperty('playUrl');
+  });
+});

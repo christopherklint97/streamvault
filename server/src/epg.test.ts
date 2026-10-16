@@ -72,6 +72,21 @@ describe('EPG enrichment', () => {
     expect(programs[1].content_key).toEqual(expect.any(String));
   });
 
+  it('treats an unparseable or non-positive XMLTV stop as missing and infers it', () => {
+    const xml = `<tv>
+      <programme channel="espn" start="20260920230000 +0000" stop="2026092XYZ0000 +0000"><title>A</title></programme>
+      <programme channel="espn" start="20260921000000 +0000" stop="20260920235900 +0000"><title>B</title></programme>
+      <programme channel="espn" start="20260921010000 +0000" stop="20260921020000 +0000"><title>C</title></programme>
+    </tv>`;
+    const programs = parseEPG(xml, { now: Date.parse('2026-09-20T00:00:00Z'), horizonMs: 7 * 86400_000 });
+    expect(programs.map(program => [program.title, program.stop_time])).toEqual([
+      ['A', Date.parse('2026-09-21T00:00:00Z')],
+      ['B', Date.parse('2026-09-21T01:00:00Z')],
+      ['C', Date.parse('2026-09-21T02:00:00Z')],
+    ]);
+    expect(programs.every(program => Number.isFinite(program.stop_time))).toBe(true);
+  });
+
   it('uses stable provider ids for moved airings and time for distinct id-less blocks', () => {
     const stable = buildAiringKey('xtream', 'live_1', 'evt', 1000, 2000);
     expect(buildAiringKey('xtream', 'live_1', 'evt', 3000, 4000)).toBe(stable);

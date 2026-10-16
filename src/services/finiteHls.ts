@@ -5,13 +5,17 @@ export async function attachFiniteHls(
   video: HTMLVideoElement,
   url: string,
   onFatal: (detail: string) => void,
+  isCurrent: () => boolean = () => true,
 ): Promise<() => void> {
+  if (!isCurrent()) throw new Error('Finite playback superseded');
   if (video.canPlayType('application/vnd.apple.mpegurl')) {
     video.src = url;
     video.load();
     return () => { video.removeAttribute('src'); video.load(); };
   }
   const { default: HlsPlayer } = await import('hls.js');
+  // A replacement playback may own the element after the dynamic import.
+  if (!isCurrent()) throw new Error('Finite playback superseded');
   if (!HlsPlayer.isSupported()) throw new Error('Seekable HLS playback is not supported on this device');
   const hls: Hls = new HlsPlayer({ enableWorker: true, backBufferLength: 60 });
   let disposed = false;

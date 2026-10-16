@@ -2,6 +2,11 @@ services:
   server:
     container_name: streamvault-server
     init: true
+    # The app runs as the unprivileged node user and needs no Linux capabilities.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     build:
       context: .
       dockerfile: Dockerfile

@@ -46,4 +46,16 @@ describe('finite HLS playback', () => {
     handler?.('hlsError', { fatal: true, details: 'networkError' });
     expect(onFatal).toHaveBeenCalledWith('networkError');
   });
+  it('does not attach HLS.js to an element a newer playback owns after the import', async () => {
+    const video = document.createElement('video');
+    let current = true;
+    const attaching = attachFiniteHls(video, '/vod/index.m3u8', vi.fn(), () => {
+      const result = current;
+      current = false; // superseded while hls.js is being imported
+      return result;
+    });
+    await expect(attaching).rejects.toThrow(/superseded/i);
+    expect(instance.attachMedia).not.toHaveBeenCalled();
+    expect(instance.loadSource).not.toHaveBeenCalled();
+  });
 });

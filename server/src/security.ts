@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import net from 'node:net';
 
 export interface ConfigResponse {
@@ -32,11 +32,31 @@ export function normalizeAllowedOrigins(value: string | undefined): string[] {
     .filter(Boolean);
 }
 
+// Browsers attach Origin to cross-site writes. Reject writes from foreign web
+// pages; widgets/native clients send no Origin, "null", or a non-web scheme.
+export function isForeignOriginWrite(
+  method: string, origin: string | undefined, hosts: Array<string | undefined>, allowedOrigins: string[],
+): boolean {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase()) || !origin || origin === 'null') return false;
+  let parsed: URL;
+  try { parsed = new URL(origin); } catch { return true; }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  if (allowedOrigins.includes(parsed.origin)) return false;
+  return !hosts.some(host => host?.split(',')[0].trim().toLowerCase() === parsed.host.toLowerCase());
+}
+
 export function isAuthorizedRequest(authorization: string | undefined, expectedToken: string | undefined, headerToken?: string | string[]): boolean {
   if (!expectedToken) return true;
   const bearer = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : authorization;
   const candidateHeader = Array.isArray(headerToken) ? headerToken[0] : headerToken;
-  return bearer === expectedToken || candidateHeader === expectedToken;
+  return tokenMatches(bearer, expectedToken) || tokenMatches(candidateHeader, expectedToken);
+}
+
+// Hash first so the comparison is constant-time regardless of supplied length.
+function tokenMatches(candidate: string | undefined, expected: string): boolean {
+  if (candidate === undefined) return false;
+  const digest = (value: string) => createHash('sha256').update(value).digest();
+  return timingSafeEqual(digest(candidate), digest(expected));
 }
 
 function playbackSignature(recordingId: string, expiresAt: number, secret: string): string {

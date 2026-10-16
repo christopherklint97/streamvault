@@ -46,7 +46,74 @@ vi.mock('./xtream.js', () => ({
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
+});
+
+/** A fetch whose body emits `parts` after `delays`, erroring when the request signal aborts. */
+function stubSlowFetch(parts: string[], delayMs: number): void {
+  vi.stubGlobal('fetch', vi.fn(async (_url: string, init: { signal: AbortSignal }) => {
+    let index = 0;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        init.signal.addEventListener('abort', () => controller.error(new Error('aborted')), { once: true });
+      },
+      pull(controller) {
+        return new Promise<void>(resolve => {
+          setTimeout(() => {
+            if (index < parts.length) controller.enqueue(new TextEncoder().encode(parts[index++]));
+            else controller.close();
+            resolve();
+          }, index < parts.length ? delayMs : 0);
+        });
+      },
+    });
+    return new Response(body);
+  }));
+}
+
+describe('manual source download', () => {
+  it('lets a slow but progressing body run past the connect timeout', async () => {
+    vi.useFakeTimers();
+    stubSlowFetch(['<tv>', '<x/>', '</tv>'], 45_000);
+    const { fetchText } = await import('./sync.js');
+    const text = fetchText('https://epg.invalid/guide.xml', new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(150_000);
+    await expect(text).resolves.toBe('<tv><x/></tv>');
+  });
+
+  it('fails a body that stalls longer than the idle timeout', async () => {
+    vi.useFakeTimers();
+    stubSlowFetch(['<tv>'], 90_000);
+    const { fetchText } = await import('./sync.js');
+    const text = fetchText('https://epg.invalid/guide.xml', new AbortController().signal);
+    const failure = expect(text).rejects.toThrow('Download stalled for 60s');
+    await vi.advanceTimersByTimeAsync(61_000);
+    await failure;
+  });
+});
+
+describe('manual sync cancellation', () => {
+  it('reports syncing until the cancelled run unwinds, then allows a new sync', async () => {
+    vi.useFakeTimers();
+    const xtream = await import('./xtream.js');
+    vi.mocked(xtream.fetchXtreamCategories).mockImplementationOnce(async (_config, signal) => {
+      await new Promise<void>(resolve => signal!.addEventListener('abort', () => resolve(), { once: true }));
+      throw new Error('aborted');
+    });
+    const { cancelSync, getStatus, sync } = await import('./sync.js');
+
+    const running = sync();
+    await vi.waitFor(() => expect(xtream.fetchXtreamCategories).toHaveBeenCalledOnce());
+    cancelSync();
+    expect(getStatus()).toMatchObject({ isSyncing: true, message: 'Cancelling sync...' });
+    await running;
+    expect(getStatus()).toMatchObject({ isSyncing: false, phase: 'idle', message: 'Sync cancelled' });
+
+    await sync();
+    expect(xtream.fetchXtreamCategories).toHaveBeenCalledTimes(2);
+    expect(getStatus()).toMatchObject({ isSyncing: false, phase: 'done' });
+  });
 });
 
 describe('catalog crawl', () => {

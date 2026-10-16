@@ -187,7 +187,7 @@ function apiUrl(config: XtreamConfig, action?: string): string {
   return action ? `${url}&action=${action}` : url;
 }
 
-function streamUrl(config: XtreamConfig, streamId: number, type: 'live' | 'movie' | 'series', extension?: string): string {
+export function streamUrl(config: XtreamConfig, streamId: number, type: 'live' | 'movie' | 'series', extension?: string): string {
   let base = config.server.trim();
   if (base.endsWith('/')) base = base.slice(0, -1);
   const u = encodeURIComponent(config.username);

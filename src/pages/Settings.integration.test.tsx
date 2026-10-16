@@ -133,6 +133,22 @@ describe('Settings commercial auto-skip integration', () => {
     expect(triggerSync).not.toHaveBeenCalled();
   });
 
+  it('keeps typed provider credentials across a backend connection blip', async () => {
+    const passwordInput = container.querySelector<HTMLInputElement>('input[placeholder="Your password"]');
+    if (!passwordInput) throw new Error('Missing password field');
+    expect(passwordInput.type).toBe('password');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(passwordInput, 'typed-password');
+      passwordInput.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    await act(async () => useChannelStore.setState({ backendConnection: 'disconnected' }));
+    await act(async () => useChannelStore.setState({ backendConnection: 'connected' }));
+
+    expect(container.querySelector<HTMLInputElement>('input[placeholder="Your password"]')?.value)
+      .toBe('typed-password');
+  });
+
   it('reinitializes provider drafts after connecting a different backend', async () => {
     await act(async () => useChannelStore.setState({
       apiBaseUrl: 'https://second-backend.example.test',

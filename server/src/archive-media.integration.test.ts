@@ -1,4 +1,4 @@
-import { it, expect } from 'vitest';
+import { it, expect, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -25,6 +25,12 @@ it('captures a real TS stream into indexed independently decodable VOD chunks an
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('No address');
   const db = new Database(':memory:'); ensureArchiveSchema(db);
   const store = createArchiveStore(db); store.configure('one', 'One', true, 24);
+  // Report 1 TiB free so capacity checks do not depend on the host's real disk.
+  const statfsSync = fs.statfsSync;
+  const statfs = vi.spyOn(fs, 'statfsSync').mockImplementation(((target: fs.PathLike) => {
+    const stats = statfsSync(target);
+    return { ...stats, bavail: Math.floor(1024 ** 4 / stats.bsize) };
+  }) as typeof fs.statfsSync);
   const capture = new ArchiveCapture(store, root, address.port);
   try {
     capture.start('one');
@@ -46,6 +52,7 @@ it('captures a real TS stream into indexed independently decodable VOD chunks an
     if (previousToken === undefined) delete process.env.STREAMVAULT_AUTH_TOKEN;
     else process.env.STREAMVAULT_AUTH_TOKEN = previousToken;
     await new Promise<void>(resolve => server.close(() => resolve()));
+    statfs.mockRestore();
     db.close(); fs.rmSync(root, { recursive: true, force: true });
   }
 }, 60_000);

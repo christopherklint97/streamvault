@@ -180,6 +180,9 @@ export function discoverRecordingArtifacts(root: string, recordingId: string): s
       if (entry.isDirectory()) {
         // Prepared VOD segments are managed by the async cache cleanup path.
         // Traversing thousands of them synchronously would stall every scan.
+        // Continuous archive chunks live under root/archive and are never
+        // recording artifacts (file captures use root/YYYY/MM/DD).
+        if (directory === root && entry.name === 'archive') continue;
         if (!/\.hls(?:\.part-[a-f0-9-]+)?$/.test(entry.name)) walk(fullPath);
       } else if (entry.isFile() && entry.name.startsWith(exactPrefix)) {
         matches.push(fullPath);

@@ -40,13 +40,35 @@ fi
 
 # Step 0: Ensure profiles.xml has inline passwords (Tizen Studio 2025 broke .pwd file support)
 echo "Configuring signing profile..."
+xml_escape() {
+  local s="$1"
+  # Quoted replacements: bash 5.2 otherwise expands an unquoted & to the match.
+  s="${s//&/"&amp;"}"
+  s="${s//</"&lt;"}"
+  s="${s//>/"&gt;"}"
+  s="${s//\"/"&quot;"}"
+  s="${s//\'/"&apos;"}"
+  printf '%s' "$s"
+}
+AUTHOR_CERT_XML="$(xml_escape "$AUTHOR_CERT")"
+AUTHOR_PASSWORD_XML="$(xml_escape "$AUTHOR_PASSWORD")"
+DIST_CERT_XML="$(xml_escape "$DIST_CERT")"
+DIST_CA_XML="$(xml_escape "$DIST_CA")"
+DIST_PASSWORD_XML="$(xml_escape "$DIST_PASSWORD")"
 mkdir -p "$(dirname "$PROFILES_XML")"
+# This replaces the whole profiles file; keep a private copy of any existing one.
+if [ -f "$PROFILES_XML" ]; then
+  (umask 077 && cp -p "$PROFILES_XML" "$PROFILES_XML.bak.$(date +%Y%m%d%H%M%S)")
+fi
+# The file holds signing passwords: create it owner-only.
+(umask 077 && : > "$PROFILES_XML")
+chmod 600 "$PROFILES_XML"
 cat > "$PROFILES_XML" << XMLEOF
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <profiles active="StreamVault" version="3.1">
     <profile name="StreamVault">
-        <profileitem ca="" distributor="0" key="$AUTHOR_CERT" password="$AUTHOR_PASSWORD" rootca=""/>
-        <profileitem ca="$DIST_CA" distributor="1" key="$DIST_CERT" password="$DIST_PASSWORD" rootca=""/>
+        <profileitem ca="" distributor="0" key="$AUTHOR_CERT_XML" password="$AUTHOR_PASSWORD_XML" rootca=""/>
+        <profileitem ca="$DIST_CA_XML" distributor="1" key="$DIST_CERT_XML" password="$DIST_PASSWORD_XML" rootca=""/>
         <profileitem ca="" distributor="2" key="" password="" rootca=""/>
     </profile>
 </profiles>

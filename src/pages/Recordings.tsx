@@ -493,9 +493,18 @@ function ScheduleForm({ onCreated }: { onCreated: () => void }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchGeneration = useRef(0);
+
+  useEffect(() => () => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchGeneration.current += 1;
+  }, []);
 
   const handleSearch = useCallback((q: string) => {
     setQuery(q);
+    setSelectedChannel(null);
+    searchGeneration.current += 1;
+    const generation = searchGeneration.current;
     if (searchTimer.current) clearTimeout(searchTimer.current);
     if (q.trim().length < 2) {
       setResults([]);
@@ -505,11 +514,11 @@ function ScheduleForm({ onCreated }: { onCreated: () => void }) {
       try {
         const base = SAME_ORIGIN ? '' : apiBaseUrl;
         const resp = await fetch(`${base}/api/search?q=${encodeURIComponent(q)}&type=livetv`);
-        if (!resp.ok) return;
-        const data = await resp.json();
-        setResults((data.channels || []).slice(0, 20));
+        if (!resp.ok || generation !== searchGeneration.current) return;
+        const data = await resp.json() as { channels?: Channel[] };
+        if (generation === searchGeneration.current) setResults((data.channels ?? []).slice(0, 20));
       } catch (err) {
-        showToast(`Search failed: ${err}`);
+        if (generation === searchGeneration.current) showToast(`Search failed: ${err}`);
       }
     }, 300);
   }, [apiBaseUrl, showToast]);
@@ -555,7 +564,7 @@ function ScheduleForm({ onCreated }: { onCreated: () => void }) {
             className="w-full min-w-0 max-w-full py-2 px-3 rounded bg-[#1a1a2e] border border-[#333] text-white text-base outline-none focus:border-[#3b82f6]"
             placeholder="Search live TV channels..."
             value={query}
-            onChange={(e) => { handleSearch(e.target.value); if (selectedChannel) setSelectedChannel(null); }}
+            onChange={(e) => handleSearch(e.target.value)}
           />
           {results.length > 0 && (
             <div className="absolute z-10 top-full left-0 right-0 mt-1 max-h-48 overflow-y-auto bg-[#1a1a2e] border border-[#333] rounded shadow-lg">

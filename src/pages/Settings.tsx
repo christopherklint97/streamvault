@@ -34,8 +34,9 @@ function isValidUrl(url: string): boolean {
 
 export default function Settings() {
   const apiBaseUrl = useChannelStore((s) => s.apiBaseUrl);
-  const backendConnection = useChannelStore((s) => s.backendConnection);
-  return <SettingsContent key={`${apiBaseUrl}:${backendConnection}`} />;
+  // Keyed on the backend URL only: a connection blip must not remount the form
+  // and wipe values the user is typing.
+  return <SettingsContent key={apiBaseUrl} />;
 }
 
 function SettingsContent() {
@@ -67,11 +68,17 @@ function SettingsContent() {
   const [subtitlesOn, setSubtitlesOn] = useState(getSubtitlesEnabled());
   const [localApiUrl, setLocalApiUrl] = useState(apiBaseUrl);
   const [localApiToken, setLocalApiToken] = useState('');
-  const [localServerUrl, setLocalServerUrl] = useState(xtreamCredentials.serverUrl);
-  const [localUsername, setLocalUsername] = useState(xtreamCredentials.username);
-  const [localPassword, setLocalPassword] = useState(xtreamCredentials.password);
-  const [localPlaylistUrl, setLocalPlaylistUrl] = useState(playlistUrl);
-  const [localEpgUrl, setLocalEpgUrl] = useState(epgUrl);
+  // Provider drafts are null until edited, so config loaded after mount still shows.
+  const [draftServerUrl, setLocalServerUrl] = useState<string | null>(null);
+  const [draftUsername, setLocalUsername] = useState<string | null>(null);
+  const [draftPassword, setLocalPassword] = useState<string | null>(null);
+  const [draftPlaylistUrl, setLocalPlaylistUrl] = useState<string | null>(null);
+  const [draftEpgUrl, setLocalEpgUrl] = useState<string | null>(null);
+  const localServerUrl = draftServerUrl ?? xtreamCredentials.serverUrl;
+  const localUsername = draftUsername ?? xtreamCredentials.username;
+  const localPassword = draftPassword ?? xtreamCredentials.password;
+  const localPlaylistUrl = draftPlaylistUrl ?? playlistUrl;
+  const localEpgUrl = draftEpgUrl ?? epgUrl;
   const [fieldError, setFieldError] = useState('');
   const [commercialAutoSkipSaving, setCommercialAutoSkipSaving] = useState(false);
 
@@ -325,7 +332,8 @@ function SettingsContent() {
                 <label className="text-sm lg:text-base text-[#666] font-semibold">Password</label>
                 <input
                   className="py-2.5 px-3.5 lg:py-3 lg:px-4 text-base lg:text-20 bg-surface border-2 border-surface-border rounded-lg text-[#e8eaed] transition-colors duration-200 focus:border-accent"
-                  type="text"
+                  type="password"
+                  autoComplete="off"
                   data-focusable
                   tabIndex={0}
                   value={localPassword}
