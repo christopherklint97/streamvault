@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import net from 'node:net';
 
 export interface ConfigResponse {
@@ -36,7 +36,14 @@ export function isAuthorizedRequest(authorization: string | undefined, expectedT
   if (!expectedToken) return true;
   const bearer = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : authorization;
   const candidateHeader = Array.isArray(headerToken) ? headerToken[0] : headerToken;
-  return bearer === expectedToken || candidateHeader === expectedToken;
+  return tokenMatches(bearer, expectedToken) || tokenMatches(candidateHeader, expectedToken);
+}
+
+// Hash first so the comparison is constant-time regardless of supplied length.
+function tokenMatches(candidate: string | undefined, expected: string): boolean {
+  if (candidate === undefined) return false;
+  const digest = (value: string) => createHash('sha256').update(value).digest();
+  return timingSafeEqual(digest(candidate), digest(expected));
 }
 
 function playbackSignature(recordingId: string, expiresAt: number, secret: string): string {

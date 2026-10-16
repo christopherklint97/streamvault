@@ -5,6 +5,7 @@ import path from 'path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'url';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { pipeline } from 'node:stream';
 import { spawn } from 'node:child_process';
 import type { Socket } from 'node:net';
 
@@ -141,6 +142,9 @@ const IOS_HLS_MAX_STORAGE_BYTES = 4 * 1024 * 1024 * 1024;
 const IOS_HLS_TICKET_TTL_MS = 30_000;
 const MAX_IOS_HLS_SESSIONS = 2;
 const liveAudioTranscodes = new ConcurrentStreamLimiter(2);
+// Bound per-request VOD FFmpeg children; slack covers a seek whose old child is still exiting.
+const vodRemuxes = new ConcurrentStreamLimiter(3);
+const vodTranscodes = new ConcurrentStreamLimiter(2);
 const iosHlsTicketSecret = randomBytes(32).toString('hex');
 const hlsProxyTicketSecret = randomBytes(32);
 const signedHlsProxyUrl = (url: string) => signHlsProxyUrl(url, hlsProxyTicketSecret);
@@ -744,15 +748,19 @@ app.post('/api/client-logs', (req, res) => {
     res.status(400).json({ error: 'logs array required' });
     return;
   }
-  for (const entry of logs) {
-    const { level, message, ts } = entry;
-    const prefix = `${ts || new Date().toISOString()} [CLIENT:${(level || 'info').toUpperCase()}]`;
+  // Client input: bound volume and strip control characters so entries cannot forge log lines.
+  const clean = (value: unknown, max: number) =>
+    (typeof value === 'string' ? value : JSON.stringify(value) ?? '')
+      .replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, max);
+  for (const entry of logs.slice(0, 50)) {
+    const { level, message, ts } = (entry ?? {}) as Record<string, unknown>;
+    const prefix = `${clean(ts, 40) || new Date().toISOString()} [CLIENT:${(clean(level, 10) || 'info').toUpperCase()}]`;
     if (level === 'error') {
-      console.error(prefix, message);
+      console.error(prefix, clean(message, 2000));
     } else if (level === 'warn') {
-      console.warn(prefix, message);
+      console.warn(prefix, clean(message, 2000));
     } else {
-      console.log(prefix, message);
+      console.log(prefix, clean(message, 2000));
     }
   }
   res.json({ ok: true });
@@ -1073,9 +1081,16 @@ app.get('/api/remux/:channelId', (req, res) => {
   // StreamVault's CDN-compatible headers and credential handling.
   const sourceUrl = `http://127.0.0.1:${PORT}/api/stream/${encodeURIComponent(sourceChannel.id)}`;
   const isHevc = /\[4K\]\s*$/i.test(sourceChannel.name);
+  const release = vodRemuxes.acquire();
+  if (!release) {
+    res.setHeader('Retry-After', '2');
+    res.status(503).json({ error: 'Too many VOD remux sessions' });
+    return;
+  }
   const ff = spawn('ffmpeg', buildFragmentedMp4Args(sourceUrl, isHevc), {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  ff.on('close', release);
 
   res.status(200);
   res.setHeader('Content-Type', 'video/mp4');
@@ -1088,6 +1103,7 @@ app.get('/api/remux/:channelId', (req, res) => {
     if (message) logger.warn(`VOD remux[${channelId}]: ${sanitizeFfmpegMessage(message)}`);
   });
   ff.on('error', (err) => {
+    release();
     logger.error(`VOD remux spawn failed for ${channelId}: ${err.message}`);
     if (!res.headersSent) res.status(500).json({ error: 'VOD remux failed to start' });
   });
@@ -1132,9 +1148,16 @@ app.get('/api/transcode/:channelId', (req, res) => {
   }
 
   const sourceUrl = `http://127.0.0.1:${PORT}${sourcePath}`;
+  const release = vodTranscodes.acquire();
+  if (!release) {
+    res.setHeader('Retry-After', '2');
+    res.status(503).json({ error: 'Too many VOD transcode sessions' });
+    return;
+  }
   const ff = spawn('ffmpeg', buildBrowserCompatibleVideoArgs(sourceUrl, startSeconds || 0), {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  ff.on('close', release);
 
   res.status(200);
   res.setHeader('Content-Type', 'video/mp4');
@@ -1147,6 +1170,7 @@ app.get('/api/transcode/:channelId', (req, res) => {
     if (message) logger.warn(`VOD transcode[${channelId}]: ${sanitizeFfmpegMessage(message)}`);
   });
   ff.on('error', (err) => {
+    release();
     logger.error(`VOD transcode spawn failed for ${channelId}: ${err.message}`);
     if (!res.headersSent) res.status(500).json({ error: 'VOD transcode failed to start' });
   });
@@ -1487,14 +1511,19 @@ app.get('/api/stream/:channelId', async (req, res) => {
     if (pipeline === 'hls-manifest') {
       // M3U8 is text — read body to string, rewrite URLs, send.
       const chunks: Buffer[] = [];
-      for await (const chunk of upstream.body) chunks.push(chunk as Buffer);
+      let size = 0;
+      for await (const chunk of upstream.body) {
+        size += chunk.length;
+        if (size > 2_000_000) {
+          upstream.body.destroy();
+          clearProxyMediaHeaders(res);
+          res.status(502).json({ error: 'HLS playlist too large to proxy safely' });
+          return;
+        }
+        chunks.push(chunk as Buffer);
+      }
       const body = Buffer.concat(chunks).toString('utf8');
       logger.info(`Stream proxy: HLS playlist received (${body.length} bytes), rewriting URLs`);
-      if (body.length > 2_000_000) {
-        clearProxyMediaHeaders(res);
-        res.status(502).json({ error: 'HLS playlist too large to proxy safely' });
-        return;
-      }
       if (forwardedType === 'other') res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
       const rewritten = rewriteHlsManifest(body, upstream.finalUrl || streamUrl, signedHlsProxyUrl);
       res.removeHeader('Content-Length');
@@ -1644,6 +1673,7 @@ app.get('/api/proxy', async (req, res) => {
       for await (const chunk of upstream.body) {
         size += chunk.length;
         if (size > 2_000_000) {
+          upstream.body.destroy();
           res.status(502).json({ error: 'HLS playlist too large to proxy safely' });
           return;
         }
@@ -1655,25 +1685,32 @@ app.get('/api/proxy', async (req, res) => {
       );
       return;
     }
-    if (ct) res.setHeader('Content-Type', ct);
+    if (isUpstreamHtmlResponse(ct)) {
+      upstream.body.on('error', () => {});
+      upstream.body.dump().catch(() => {});
+      res.status(502).json({ error: 'Upstream returned an error page instead of media' });
+      return;
+    }
+    // Unknown upstream types are data, never same-origin executable content.
+    const forwardedType = safeProxyMime(ct);
+    res.setHeader('Content-Type', forwardedType === 'other' ? 'application/octet-stream' : forwardedType);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Access-Control-Allow-Origin', '*');
-    const cl = pickHeader(upstream.headers, 'content-length');
-    if (cl) res.setHeader('Content-Length', cl);
-    const cr = pickHeader(upstream.headers, 'content-range');
+    const cl = safeProxyLength(pickHeader(upstream.headers, 'content-length'));
+    if (cl !== 'unknown') res.setHeader('Content-Length', cl);
+    const cr = safeProxyContentRange(pickHeader(upstream.headers, 'content-range'));
     if (cr) res.setHeader('Content-Range', cr);
-    res.setHeader('Accept-Ranges', pickHeader(upstream.headers, 'accept-ranges') || 'bytes');
+    res.setHeader('Accept-Ranges', safeProxyAcceptRanges(pickHeader(upstream.headers, 'accept-ranges')) || 'bytes');
     res.status(upstream.statusCode);
     setStreamSocketOpts(res);
 
-    upstream.body.on('error', () => {});
-    upstream.body.pipe(res);
-    req.on('close', () => {
-      upstream.body.destroy();
-    });
+    // pipeline ends the response on upstream errors and releases upstream on client abort.
+    pipeline(upstream.body, res, () => {});
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Proxy error';
+    logger.warn(`HLS proxy request failed: ${sanitizeFfmpegMessage(msg)}`);
     if (!res.headersSent) {
-      res.status(502).json({ error: msg });
+      res.status(502).json({ error: 'Upstream request failed' });
     }
   }
 });
@@ -2077,14 +2114,14 @@ app.get('/api/recordings/:id/stream', (req, res) => {
       'Content-Length': parsed.chunkSize,
       'Content-Type': contentType,
     });
-    fs.createReadStream(filePath, { start: parsed.start, end: parsed.end }).pipe(res);
+    pipeline(fs.createReadStream(filePath, { start: parsed.start, end: parsed.end }), res, () => {});
   } else {
     res.writeHead(200, {
       'Content-Length': fileSize,
       'Content-Type': contentType,
       'Accept-Ranges': 'bytes',
     });
-    fs.createReadStream(filePath).pipe(res);
+    pipeline(fs.createReadStream(filePath), res, () => {});
   }
 });
 
@@ -2319,7 +2356,13 @@ app.use('/api', (err: Error, _req: express.Request, res: express.Response, _next
     setImmediate(() => shutdown('database corruption detected'));
     return;
   }
-  res.status(500).json({ error: err.message });
+  // Only client-safe errors (e.g. JSON body parse failures) expose their message.
+  const { status, expose } = err as Error & { status?: number; expose?: boolean };
+  if (expose && typeof status === 'number' && status >= 400 && status < 500) {
+    res.status(status).json({ error: err.message });
+    return;
+  }
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 // ---------- Serve frontend (PWA) ----------
