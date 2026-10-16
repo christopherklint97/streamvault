@@ -535,6 +535,77 @@ describe('commercial auto-skip config', () => {
     });
   });
 
+  it('polls status after starting a crawl until the crawl finishes', async () => {
+    vi.useFakeTimers();
+    try {
+      const statuses = [
+        { phase: 'idle', isSyncing: false, isCrawling: true, crawlProgress: 'Crawling 1/2' },
+        { phase: 'idle', isSyncing: false, isCrawling: false, crawlProgress: 'Crawl complete' },
+      ];
+      const requested: string[] = [];
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+        requested.push(new URL(String(input)).pathname);
+        if (String(input).endsWith('/api/crawl')) return new Response(null, { status: 202 });
+        return new Response(JSON.stringify(statuses.shift()), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      useChannelStore.setState({
+        apiBaseUrl: 'http://backend.test:3002', backendGeneration: 0, isCrawling: false, crawlProgress: '',
+      });
+
+      await useChannelStore.getState().triggerCrawl();
+      expect(useChannelStore.getState().crawlProgress).toBe('Starting crawl...');
+
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(useChannelStore.getState()).toMatchObject({ isCrawling: true, crawlProgress: 'Crawling 1/2' });
+
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(useChannelStore.getState()).toMatchObject({ isCrawling: false, crawlProgress: 'Crawl complete' });
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(requested.filter(path => path === '/api/status')).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds the per-channel EPG cache and prunes programmes that have ended', async () => {
+    const now = Date.now();
+    const program = (channelId: string, startOffset: number, stopOffset: number) => ({
+      channelId, title: `${channelId} show`, description: '', category: '',
+      start: new Date(now + startOffset), stop: new Date(now + stopOffset),
+    });
+    const ended = program('ended', -6 * 3_600_000, -5 * 3_600_000);
+    const index = new Map([['ended', [ended]]]);
+    const cached = [ended];
+    for (let i = 0; i < 60; i++) {
+      const airing = program(`ch${i}`, -60_000, 3_600_000);
+      index.set(`ch${i}`, [airing]);
+      cached.push(airing);
+    }
+    useChannelStore.setState({
+      apiBaseUrl: 'http://backend.test:3002', backendGeneration: 0,
+      programs: cached, programsByChannel: index,
+    });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      programs: [{
+        channelId: 'fresh', title: 'Fresh show', description: '',
+        start: new Date(now).toISOString(), stop: new Date(now + 3_600_000).toISOString(), category: '',
+      }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    await useChannelStore.getState().fetchProgramsForChannel('fresh');
+
+    const state = useChannelStore.getState();
+    expect(state.programsByChannel.size).toBe(50);
+    expect(state.programsByChannel.has('ended')).toBe(false);
+    expect(state.programsByChannel.has('ch0')).toBe(false);
+    expect(state.programsByChannel.has('ch59')).toBe(true);
+    expect(state.programsByChannel.get('fresh')?.[0].title).toBe('Fresh show');
+    expect(state.programs).toHaveLength(50);
+  });
+
   it('ignores status polling results from the previous backend generation', async () => {
     let resolveOldPoll!: (response: Response) => void;
     vi.spyOn(globalThis, 'fetch').mockReturnValue(new Promise<Response>((resolve) => {

@@ -1,2 +1,6 @@
-/** API responses that are safe for the PWA runtime cache. */
-export const CACHEABLE_API_PATTERN = /\/api\/(?!(?:status|config|programs|stream|live|live-compatible|proxy|remux|transcode|subtitles|recordings|recording-rules|recording-status|ios-hls|ios-hls-authorize|ios-hls-assets)(?:\/|\?|$))/i;
+/**
+ * API responses that are safe for the PWA runtime cache: an allowlist of the
+ * catalogue/metadata GET routes. Everything else (media delivery, archives,
+ * player pages, health/status, config, DVR) must always hit the network.
+ */
+export const CACHEABLE_API_PATTERN = /\/api\/(?:browse|categories|channels|search|vod|series|epg)(?:\/|\?|$)/i;

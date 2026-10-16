@@ -45,8 +45,10 @@ function loadP12(p12Path, password) {
   const keyPath = path.join(tmpDir, 'key.pem');
   const certPath = path.join(tmpDir, 'certs.pem');
   try {
-    execFileSync('openssl', ['pkcs12', '-in', p12Path, '-passin', `pass:${password}`, '-nocerts', '-nodes', '-out', keyPath], { stdio: ['ignore', 'ignore', 'pipe'] });
-    execFileSync('openssl', ['pkcs12', '-in', p12Path, '-passin', `pass:${password}`, '-nokeys', '-out', certPath], { stdio: ['ignore', 'ignore', 'pipe'] });
+    // Pass the password via the environment, not argv (visible in ps).
+    const opensslOptions = { stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, STREAMVAULT_P12_PASS: password } };
+    execFileSync('openssl', ['pkcs12', '-in', p12Path, '-passin', 'env:STREAMVAULT_P12_PASS', '-nocerts', '-nodes', '-out', keyPath], opensslOptions);
+    execFileSync('openssl', ['pkcs12', '-in', p12Path, '-passin', 'env:STREAMVAULT_P12_PASS', '-nokeys', '-out', certPath], opensslOptions);
     const privateKeyPem = fs.readFileSync(keyPath, 'utf8');
     const certPem = fs.readFileSync(certPath, 'utf8');
     const certs = certPem.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) || [];

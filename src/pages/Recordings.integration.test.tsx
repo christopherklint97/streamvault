@@ -265,6 +265,33 @@ describe('Recordings integration', () => {
     }
   });
 
+  it('ignores stale schedule-form channel search results after the query changes', async () => {
+    vi.useFakeTimers();
+    const pending: Array<(response: Response) => void> = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>((resolve) => { pending.push(resolve); }));
+    const channelsResponse = (id: string, name: string) => new Response(JSON.stringify({
+      channels: [{ id, name, url: '/stream', logo: '', group: 'Sports', region: '', contentType: 'livetv' }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    await act(async () => findButton(container, 'Schedule Recording').click());
+    const input = container.querySelector('#schedule-channel') as HTMLInputElement;
+    const type = async (value: string) => act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    await type('espn');
+    await act(async () => { vi.advanceTimersByTime(300); });
+    await type('bbc');
+    await act(async () => { vi.advanceTimersByTime(300); });
+    expect(pending).toHaveLength(2);
+
+    await act(async () => { pending[1](channelsResponse('bbc', 'BBC One')); });
+    await act(async () => { pending[0](channelsResponse('espn', 'ESPN')); });
+
+    expect(container.textContent).toContain('BBC One');
+    expect(container.textContent).not.toContain('ESPN');
+  });
+
   it('uses iPhone-safe font sizing on recurring-rule inputs and selects', async () => {
     await act(async () => findButton(container, 'Rules (0)').click());
     const form = container.querySelector('#recurring-rule-form');

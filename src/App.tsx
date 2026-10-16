@@ -159,7 +159,7 @@ function AppContent() {
   const deepLinkHandled = useRef(false);
   useEffect(() => {
     if (deepLinkHandled.current) return;
-    const { playChannelId, playUrl } = parseUrl();
+    const { playChannelId } = parseUrl();
     if (!playChannelId) return;
     deepLinkHandled.current = true;
 
@@ -171,10 +171,7 @@ function AppContent() {
     const { fetchChannelsByIds } = useChannelStore.getState();
     fetchChannelsByIds([playChannelId]).then(channels => {
       if (channels.length > 0) {
-        const channel = playUrl
-          ? { ...channels[0], url: playUrl }
-          : channels[0];
-        usePlayerStore.getState().setChannel(channel);
+        usePlayerStore.getState().setChannel(channels[0]);
         useAppStore.getState().navigate('player');
       }
     });
