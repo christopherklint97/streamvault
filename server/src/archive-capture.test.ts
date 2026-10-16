@@ -13,8 +13,16 @@ import { EventEmitter } from 'node:events';
 
 describe('stream-copy HLS capture', () => {
   // Older seam-worker tests opt into the legacy presentation mode explicitly.
-  beforeEach(() => vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '0'));
-  afterEach(() => vi.unstubAllEnvs());
+  // Report 1 TiB free so capacity checks do not depend on the host's real disk.
+  beforeEach(() => {
+    vi.stubEnv('STREAMVAULT_ARCHIVE_RAW_PLAYBACK', '0');
+    const statfsSync = fs.statfsSync;
+    vi.spyOn(fs, 'statfsSync').mockImplementation(((target: fs.PathLike) => {
+      const stats = statfsSync(target);
+      return { ...stats, bavail: Math.floor(1024 ** 4 / stats.bsize) };
+    }) as typeof fs.statfsSync);
+  });
+  afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
   it('recovers every committed entry from an interrupted session and deletes unindexed artifacts', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-restart-'));
     const db = new Database(':memory:'); ensureArchiveSchema(db);
