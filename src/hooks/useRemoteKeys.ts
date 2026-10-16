@@ -14,6 +14,9 @@ export function useRemoteKeys(): { showInfo: boolean; channelNumber: string } {
 
       switch (e.keyCode) {
         case KEY_CODES.BACK:
+          // React's root listener runs before this window listener; a local
+          // overlay (e.g. the Player subtitle menu) that consumed BACK wins.
+          if (e.defaultPrevented) return;
           e.preventDefault();
           goBack();
           break;

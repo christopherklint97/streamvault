@@ -701,6 +701,58 @@ describe('signed live HLS startup and recovery', () => {
     expect(mocks.instances).toHaveLength(0);
   });
 
+  async function progressedNativePlayback() {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
+    vi.mocked(video.canPlayType).mockReturnValue('maybe');
+    mocks.authorize.mockResolvedValue('/api/live-compatible/live_test/index.m3u8?ticket=compatible-test');
+    await ready();
+    await act(async () => video.dispatchEvent(new Event('timeupdate')));
+    expect(usePlayerStore.getState().status).toBe('playing');
+  }
+
+  it('reconnects a compatible native media error after proven media progress', async () => {
+    await progressedNativePlayback();
+    await act(async () => video.dispatchEvent(new Event('error')));
+    expect(usePlayerStore.getState().status).toBe('loading');
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    expect(mocks.authorize).toHaveBeenCalledTimes(2);
+    expect(mocks.authorize.mock.calls.every(call => call[3]?.delivery === 'compatible')).toBe(true);
+    expect(usePlayerStore.getState().errorMessage).toBe('');
+  });
+
+  it('keeps a native pause (e.g. iOS fullscreen) from reconnecting until native play resumes', async () => {
+    await progressedNativePlayback();
+    await act(async () => video.dispatchEvent(new Event('pause')));
+    await act(async () => vi.advanceTimersByTimeAsync(65_000));
+    expect(mocks.authorize).toHaveBeenCalledOnce();
+    expect(video.play).toHaveBeenCalledOnce();
+    await act(async () => video.dispatchEvent(new Event('play')));
+    await act(async () => vi.advanceTimersByTimeAsync(12_250));
+    expect(mocks.authorize).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps backing off when a recovery reauthorization fails after media progress', async () => {
+    await progressedNativePlayback();
+    mocks.authorize.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    await act(async () => vi.advanceTimersByTimeAsync(12_250));
+    expect(mocks.authorize).toHaveBeenCalledTimes(2);
+    expect(usePlayerStore.getState().status).toBe('loading');
+    expect(usePlayerStore.getState().errorMessage).toBe('');
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    expect(mocks.authorize).toHaveBeenCalledTimes(3);
+    expect(new URL(video.src).pathname).toBe('/api/live-compatible/live_test/index.m3u8');
+    expect(usePlayerStore.getState().status).not.toBe('error');
+  });
+
+  it('keeps an explicit recovery reauthorization rejection terminal', async () => {
+    await progressedNativePlayback();
+    mocks.authorize.mockRejectedValueOnce(new ApiError(403, 'Synthetic rejection'));
+    await act(async () => vi.advanceTimersByTimeAsync(12_250));
+    expect(usePlayerStore.getState().status).toBe('error');
+    await act(async () => vi.advanceTimersByTimeAsync(65_000));
+    expect(mocks.authorize).toHaveBeenCalledTimes(2);
+  });
+
   it('retains playing status when a compatible recovery watchdog fires after backend invalidation', async () => {
     vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('iPhone AppleWebKit/605.1.15 Safari/604.1');
     vi.mocked(video.canPlayType).mockReturnValue('maybe');

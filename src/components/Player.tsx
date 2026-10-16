@@ -357,11 +357,21 @@ export default function Player() {
     return () => clearInterval(interval);
   }, [programStartMs, programStopMs]);
 
+  const osdRef = useRef<HTMLDivElement | null>(null);
+  // The hidden OSD is inert; move keyboard focus to the player first so keys
+  // still reach handleKeyDown (which re-shows the controls).
+  const hideOSD = useCallback(() => {
+    if (osdRef.current?.contains(document.activeElement)) {
+      containerRef.current?.focus({ preventScroll: true });
+    }
+    setShowOSD(false);
+  }, []);
+
   const resetOSDTimer = useCallback(() => {
     setShowOSD(true);
     if (osdTimerRef.current) clearTimeout(osdTimerRef.current);
-    osdTimerRef.current = setTimeout(() => setShowOSD(false), OSD_TIMEOUT);
-  }, []);
+    osdTimerRef.current = setTimeout(hideOSD, OSD_TIMEOUT);
+  }, [hideOSD]);
 
   // Start playback when the channel changes, but preserve the persistent mobile
   // video and subtitle session when Player is remounted for the same channel.
@@ -389,11 +399,11 @@ export default function Player() {
 
   // Show OSD initially, auto-hide after timeout
   useEffect(() => {
-    osdTimerRef.current = setTimeout(() => setShowOSD(false), OSD_TIMEOUT);
+    osdTimerRef.current = setTimeout(hideOSD, OSD_TIMEOUT);
     return () => {
       if (osdTimerRef.current) clearTimeout(osdTimerRef.current);
     };
-  }, []);
+  }, [hideOSD]);
 
   // Tizen AVPlay is a hardware overlay behind the webview — body must be
   // transparent here for the video to show through.
@@ -433,6 +443,18 @@ export default function Player() {
   }, []);
 
   const handleBack = useCallback(() => {
+    // Leaving the player must not strand the app in fullscreen/landscape.
+    const doc = document as Document & {
+      webkitFullscreenElement?: Element | null;
+      webkitExitFullscreen?: () => Promise<void>;
+    };
+    if (doc.fullscreenElement || doc.webkitFullscreenElement) {
+      const exit = doc.exitFullscreen ? doc.exitFullscreen() : doc.webkitExitFullscreen?.();
+      exit?.catch(() => { /* already exiting */ });
+    }
+    if (MOBILE) {
+      try { screen.orientation.unlock(); } catch { /* no orientation API */ }
+    }
     stop();
     goBack();
   }, [stop, goBack]);
@@ -547,10 +569,15 @@ export default function Player() {
         webkitExitFullscreen?: () => void;
       };
       if (!video) return;
-      if ((video as HTMLVideoElement & { webkitDisplayingFullscreen?: boolean }).webkitDisplayingFullscreen) {
-        video.webkitExitFullscreen?.();
-      } else {
-        video.webkitEnterFullscreen?.();
+      try {
+        if ((video as HTMLVideoElement & { webkitDisplayingFullscreen?: boolean }).webkitDisplayingFullscreen) {
+          video.webkitExitFullscreen?.();
+        } else {
+          video.webkitEnterFullscreen?.();
+        }
+      } catch {
+        // WebKit throws InvalidStateError until metadata has loaded.
+        showToast('Fullscreen is available once playback starts');
       }
       return;
     }
@@ -591,14 +618,20 @@ export default function Player() {
 
   useEffect(() => {
     const video = getVideoElement();
+    // Browsers may pause video as fullscreen exits — resume only that pause,
+    // never one the viewer made earlier while in fullscreen.
+    let lastPauseAt = 0;
+    const onPause = () => { lastPauseAt = Date.now(); };
+    const resumeExitPause = () => {
+      if (!video || !video.paused || Date.now() - lastPauseAt > 1_000) return;
+      video.play().catch((err) => showToast(`Resume failed: ${err}`));
+    };
+    video?.addEventListener('pause', onPause);
     const onFsChange = () => {
       const doc = document as Document & { webkitFullscreenElement?: Element | null };
       const isFs = !!(doc.fullscreenElement || doc.webkitFullscreenElement);
       setIsFullscreen(isFs);
-      // Browsers may pause video when exiting fullscreen — resume it
-      if (!isFs && video && video.paused) {
-        video.play().catch((err) => showToast(`Resume failed: ${err}`));
-      }
+      if (!isFs) resumeExitPause();
     };
     document.addEventListener('fullscreenchange', onFsChange);
     document.addEventListener('webkitfullscreenchange', onFsChange);
@@ -607,7 +640,7 @@ export default function Player() {
     const onWebkitBegin = () => setIsFullscreen(true);
     const onWebkitEnd = () => {
       setIsFullscreen(false);
-      if (video && video.paused) video.play().catch((err) => showToast(`Resume failed: ${err}`));
+      resumeExitPause();
     };
     video?.addEventListener('webkitbeginfullscreen', onWebkitBegin);
     video?.addEventListener('webkitendfullscreen', onWebkitEnd);
@@ -617,6 +650,7 @@ export default function Player() {
       document.removeEventListener('webkitfullscreenchange', onFsChange);
       video?.removeEventListener('webkitbeginfullscreen', onWebkitBegin);
       video?.removeEventListener('webkitendfullscreen', onWebkitEnd);
+      video?.removeEventListener('pause', onPause);
     };
   }, [getVideoElement, showToast]);
 
@@ -650,12 +684,12 @@ export default function Player() {
   // Tap empty area to toggle OSD (dedicated layer behind controls)
   const handleTapZone = useCallback(() => {
     if (showOSD) {
-      setShowOSD(false);
+      hideOSD();
       if (osdTimerRef.current) clearTimeout(osdTimerRef.current);
     } else {
       resetOSDTimer();
     }
-  }, [showOSD, resetOSDTimer]);
+  }, [hideOSD, showOSD, resetOSDTimer]);
 
   const openSubtitleMenu = useCallback(() => {
     if (subtitleTracks.length === 0) {
@@ -748,6 +782,12 @@ export default function Player() {
           if (showSubtitleMenu) setShowSubtitleMenu(false);
           else openSubtitleMenu();
           break;
+        case KEY_CODES.CH_UP:
+        case KEY_CODES.CH_DOWN:
+          if (!isLive) break;
+          e.preventDefault();
+          switchByOffset(e.keyCode === KEY_CODES.CH_UP ? 1 : -1);
+          break;
         case KEY_CODES.YELLOW:
           if (isCommercialUndoKey(e.keyCode, commercialUi.canUndo)) {
             e.preventDefault();
@@ -756,7 +796,7 @@ export default function Player() {
           break;
       }
     },
-    [chooseSubtitle, commercialUi.canUndo, handleSkip, handleUndoCommercialSkip, openSubtitleMenu, playerState.status, resetOSDTimer, retry, showSubtitleMenu, showToast, stop, subtitleMenuCursor, subtitleOptions, togglePlay]
+    [chooseSubtitle, commercialUi.canUndo, handleSkip, handleUndoCommercialSkip, isLive, openSubtitleMenu, playerState.status, resetOSDTimer, retry, showSubtitleMenu, showToast, stop, subtitleMenuCursor, subtitleOptions, switchByOffset, togglePlay]
   );
 
   const handleChannelSelect = useCallback((ch: Channel) => {
@@ -949,16 +989,22 @@ export default function Player() {
 
         {/* Controls OSD — pointer-events only enabled when visible so hidden controls don't eat taps */}
         {currentChannel && playerState.status !== 'error' && playerState.status !== 'awaiting-gesture' && (
-          <div className={cn(
-            'absolute inset-0 flex flex-col justify-between opacity-0 transition-opacity duration-300 pointer-events-none z-[3]',
-            showOSD && 'opacity-100'
-          )}>
+          <div
+            ref={osdRef}
+            // Hidden controls must not be tabbable; a keypress re-shows the OSD
+            // before focus moves. TV focus stays on the Player container.
+            inert={!showOSD}
+            className={cn(
+              'absolute inset-0 flex flex-col justify-between opacity-0 transition-opacity duration-300 pointer-events-none z-[3]',
+              showOSD && 'opacity-100'
+            )}>
             {/* Top bar */}
             <div className={cn('flex items-center gap-3 pt-[calc(12px+env(safe-area-inset-top,0px))] pb-8 px-[calc(16px+env(safe-area-inset-left,0px))] pr-[calc(16px+env(safe-area-inset-right,0px))] bg-gradient-to-b from-black/[0.85] to-transparent lg:gap-3 lg:pt-6 lg:px-10 lg:pb-10', showOSD && 'pointer-events-auto')}>
               {SHOW_OSD_CONTROLS && (
                 <button
                   className="flex items-center justify-center w-10 h-10 bg-transparent border-none text-white shrink-0 tap-none active:opacity-60"
                   onClick={(e) => { e.stopPropagation(); handleBack(); }}
+                  aria-label="Close player"
                 >
                   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M18 6L6 18M6 6l12 12" />
@@ -999,6 +1045,7 @@ export default function Player() {
                     )}
                     onClick={handleRecord}
                     title={isRecording ? 'Recording...' : 'Record'}
+                    aria-label={isRecording ? 'Recording' : 'Record'}
                   >
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <circle cx="12" cy="12" r="9" />
@@ -1014,6 +1061,7 @@ export default function Player() {
                     )}
                     onClick={handleCast}
                     title={castActive ? 'Casting' : 'Cast'}
+                    aria-label={castActive ? 'Casting' : 'Cast'}
                   >
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M2 16.1A5 5 0 0 1 5.9 20" />
@@ -1028,6 +1076,7 @@ export default function Player() {
                     className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-transparent text-white shrink-0 tap-none cursor-pointer active:opacity-60"
                     onClick={handleAirPlay}
                     title="AirPlay"
+                    aria-label="AirPlay"
                   >
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M5 17H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-1" />
@@ -1056,6 +1105,7 @@ export default function Player() {
                     className="flex items-center justify-center w-10 h-10 rounded-lg border-none bg-transparent text-white shrink-0 tap-none cursor-pointer active:opacity-60"
                     onClick={handleFullscreen}
                     title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+                    aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
                   >
                     {isFullscreen ? (
                       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1085,6 +1135,7 @@ export default function Player() {
                     className="flex items-center justify-center w-12 h-12 rounded-full border-none bg-transparent text-white tap-none cursor-pointer active:opacity-60"
                     onClick={(e) => { e.stopPropagation(); handleSkip(-10); }}
                     title="Back 10s"
+                    aria-label="Back 10 seconds"
                   >
                     <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
                       <path d="M12.5 3C7.26 3 3.03 7.03 3 12.13L1 10.1 0 11.18l3.5 3.5 3.5-3.5-1-1.07L4 12.13C4.03 7.59 7.59 4 12.5 4c4.14 0 7.5 3.36 7.5 7.5S16.64 19 12.5 19c-2.95 0-5.5-1.71-6.71-4.19l-.91.39C6.17 17.89 9.09 20 12.5 20c4.69 0 8.5-3.81 8.5-8.5S17.19 3 12.5 3z" />
@@ -1095,6 +1146,7 @@ export default function Player() {
                 <button
                   className="flex items-center justify-center w-16 h-16 rounded-full border-2 border-white/30 bg-black/30 text-white tap-none cursor-pointer active:opacity-60"
                   onClick={handleTogglePlay}
+                  aria-label={isPaused ? 'Play' : 'Pause'}
                 >
                   {isPaused ? (
                     <svg width="36" height="36" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
@@ -1107,6 +1159,7 @@ export default function Player() {
                     className="flex items-center justify-center w-12 h-12 rounded-full border-none bg-transparent text-white tap-none cursor-pointer active:opacity-60"
                     onClick={(e) => { e.stopPropagation(); handleSkip(10); }}
                     title="Forward 10s"
+                    aria-label="Forward 10 seconds"
                   >
                     <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
                       <path d="M11.5 3C16.74 3 20.97 7.03 21 12.13L23 10.1l1 1.07-3.5 3.5-3.5-3.5 1-1.07 2 2.02C19.97 7.59 16.41 4 11.5 4 7.36 4 4 7.36 4 11.5S7.36 19 11.5 19c2.95 0 5.5-1.71 6.71-4.19l.91.39C17.83 17.89 14.91 20 11.5 20 6.81 20 3 16.19 3 11.5S6.81 3 11.5 3z" />
@@ -1195,6 +1248,8 @@ export default function Player() {
           <button
             className="absolute bottom-2 right-2 z-[4] flex items-center justify-center w-9 h-9 rounded-full bg-black/60 border border-white/20 text-white tap-none cursor-pointer active:opacity-60"
             onClick={(e) => { e.stopPropagation(); toggleChannelList(); }}
+            aria-label={channelListVisible ? 'Hide channel list' : 'Show channel list'}
+            aria-expanded={channelListVisible}
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               {channelListVisible ? (

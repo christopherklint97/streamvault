@@ -5,6 +5,7 @@
  */
 import { useAppStore } from '../stores/appStore';
 import { normalizeSubtitleLanguage } from '../utils/subtitles';
+import { clientLogger as log } from '../utils/logger';
 
 const toast = (msg: string) => useAppStore.getState().showToastMessage(msg);
 
@@ -386,4 +387,47 @@ export function createPlayer(): PlayerBackend {
     return new TizenPlayer();
   }
   return new HTML5Player();
+}
+
+type SuspendableAvPlay = Pick<AVPlayManager, 'getState'> & {
+  suspend?: () => void;
+  restore?: () => void;
+};
+
+/**
+ * Samsung requires AVPlay to release its decoder while the app is hidden
+ * (multitasking/Home) and to restore it on return. Returns a cleanup function.
+ */
+export function installAvPlayVisibilityHandler(
+  getManager: () => SuspendableAvPlay | undefined = () =>
+    (typeof webapis !== 'undefined' ? webapis.avplay : undefined) as SuspendableAvPlay | undefined,
+  doc: Document = document,
+  onRestoreFailed?: () => void,
+): () => void {
+  let suspended = false;
+  const onVisibilityChange = () => {
+    const manager = getManager();
+    if (!manager) return;
+    if (doc.hidden) {
+      try {
+        const state = manager.getState();
+        if (state !== 'PLAYING' && state !== 'PAUSED' && state !== 'READY') return;
+        manager.suspend?.();
+        suspended = Boolean(manager.suspend);
+      } catch (error) {
+        log.warn('AVPlay suspend failed', error);
+      }
+      return;
+    }
+    if (!suspended) return;
+    suspended = false;
+    try {
+      manager.restore?.();
+    } catch (error) {
+      log.warn('AVPlay restore failed; reopening playback', error);
+      onRestoreFailed?.();
+    }
+  };
+  doc.addEventListener('visibilitychange', onVisibilityChange);
+  return () => doc.removeEventListener('visibilitychange', onVisibilityChange);
 }
