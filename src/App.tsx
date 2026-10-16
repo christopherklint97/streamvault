@@ -14,6 +14,7 @@ import { parseUrl } from './utils/url-state';
 import ErrorBoundary from './components/ErrorBoundary';
 import Sidebar from './components/Sidebar';
 import Toast from './components/Toast';
+import MiniPlayer from './components/MiniPlayer';
 import ExitDialog from './components/ExitDialog';
 import Player from './components/Player';
 import ChannelList from './components/ChannelList';
@@ -83,6 +84,8 @@ function AvPlayerVideo({ currentView }: { currentView: string }) {
 
 function AppContent() {
   const currentView = useAppStore((s) => s.currentView);
+  const miniPlayerVisible = usePlayerStore((s) => Boolean(s.currentChannel) && s.status !== 'idle')
+    && currentView !== 'player';
   const selectedSeries = useAppStore((s) => s.selectedSeries);
   const selectedMovie = useAppStore((s) => s.selectedMovie);
   const selectedRecordingId = useAppStore((s) => s.selectedRecordingId);
@@ -255,6 +258,8 @@ function AppContent() {
         {...(currentView === 'player' ? { 'data-fullscreen': '' } : {})}
         className={cn(
           'flex-1 overflow-y-auto overflow-x-hidden p-4 pt-[calc(8px+env(safe-area-inset-top,0px))] pb-[56px] min-h-0 lg:p-8 lg:px-10 lg:pb-8',
+          // Keep the last row clear of the mobile mini-player.
+          miniPlayerVisible && 'pb-[128px]',
           currentView === 'player' && '!p-0 !pb-0 w-full h-dvh'
         )}
         onKeyDown={currentView !== 'player' ? handleMainKeyDown : undefined}
@@ -275,6 +280,7 @@ function AppContent() {
       {!(typeof webapis !== 'undefined' && webapis.avplay) && (
         <AvPlayerVideo key={backendGeneration} currentView={currentView} />
       )}
+      <MiniPlayer />
       <Toast />
       <ExitDialog />
     </div>
