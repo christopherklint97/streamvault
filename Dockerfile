@@ -94,7 +94,10 @@ COPY server/package.json ./
 COPY server/config/ config/
 COPY server/config/comskip/espn.ini /etc/comskip/espn.ini
 COPY --from=frontend-build /app/dist public/
-RUN mkdir -p /app/data/recordings /app/tmp \
+# Build-context file modes follow the host umask (0600 under umask 077);
+# the node user must still be able to read everything copied in.
+RUN chmod -R a+rX /app/scripts /app/config /app/package.json /app/public /etc/comskip \
+ && mkdir -p /app/data/recordings /app/tmp \
  && chown node:node /app/data /app/data/recordings /app/tmp \
  && dpkg-query -W > /opt/media/evidence/runtime-packages.tsv
 USER node
