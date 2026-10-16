@@ -14,12 +14,14 @@ export const packetAwareLiveEnabled = (value: string | undefined): boolean => va
 // Stream-copy HLS cuts at source keyframes, not the requested two-second cadence.
 // Keep the advertised upper bound fixed for the lifetime of every playlist.
 export const LIVE_HLS_MAX_SEGMENT_SECONDS = 12;
+export const LIVE_RECONNECT_ACCESS_MS = 20_000;
+export const LIVE_SWITCH_IDLE_MS = 15_000;
 export const LIVE_HLS_MIN_WINDOW_SECONDS = 3 * LIVE_HLS_MAX_SEGMENT_SECONDS;
 // Bounds the manifest when a source emits tiny segments.
 export const LIVE_HLS_MAX_WINDOW_SEGMENTS = 24;
 interface Channel {
   id: string; dir: string; epoch: string; segments: Segment[]; bytes: number; sequence: number; discontinuitySequence: number;
-  lastAccess: number; lastPublish: number; worker?: ChildProcess; working?: string;
+  lastAccess: number; lastPublish: number; supersededAt?: number; worker?: ChildProcess; working?: string;
   generation: number; lastStageIndex: number; timer?: ReturnType<typeof setInterval>; terminating: boolean; retirement?: Promise<void>;
   inspecting?: boolean; publishTask?: Promise<void>; stageValidated?: boolean;
 }
@@ -320,7 +322,12 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
         ch.working = undefined;
         ch.worker = undefined;
         await rm(working, { recursive: true, force: true }).catch(() => {});
-        if (ch.terminating || stopped || Date.now() - ch.lastAccess >= idleMs) { await retire(ch); return; }
+        // Reconnecting an unwatched channel would take the provider connection
+        // (often limited to one) from the channel actually being watched.
+        if (ch.terminating || stopped || Date.now() - ch.lastAccess >= Math.min(idleMs, LIVE_RECONNECT_ACCESS_MS) ||
+            (ch.supersededAt !== undefined && ch.lastAccess <= ch.supersededAt)) {
+          await retire(ch); return;
+        }
         setTimeout(() => { if (!ch.terminating && !stopped && ch.generation === generation) void launch(ch, url).catch(() => void retire(ch)); }, retryMs).unref();
       })();
     });
@@ -335,7 +342,15 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       if (ch.terminating) return null;
       ch.lastAccess = Date.now(); return ch;
     }
-    if (stopped || channels.size >= maxChannels) return null;
+    if (stopped) return null;
+    // A new channel means the viewer switched: release channels no longer
+    // being polled so their upstream connections cannot evict this one.
+    for (const other of [...channels.values()]) {
+      if (!other.terminating && Date.now() - other.lastAccess > LIVE_SWITCH_IDLE_MS) void retire(other);
+    }
+    if (channels.size >= maxChannels) return null;
+    // One still played elsewhere may reconnect once it is accessed again.
+    for (const other of channels.values()) other.supersededAt = Date.now();
     ch = { id, dir: '', epoch: randomBytes(8).toString('hex'), segments: [], bytes: 0,
       sequence: sequenceByChannel.get(id) ?? 0, discontinuitySequence: 0,
       generation: 0, lastStageIndex: -1, lastAccess: Date.now(), lastPublish: Date.now(), terminating: false };
