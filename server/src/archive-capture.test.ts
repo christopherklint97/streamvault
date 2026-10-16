@@ -409,6 +409,50 @@ describe('stream-copy HLS capture', () => {
     expect(archiveRetryDelay({ ...eligible, storageLow: true })).toBe(60_000);
   });
 
+  it('yields the provider connection to playback and resumes after the last viewer leaves', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-lease-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db);
+    store.configure('a', 'A', true, 24); store.configure('show', 'Show', true, 24);
+    vi.useFakeTimers();
+    const child = () => {
+      const proc = Object.assign(new EventEmitter(), { stderr: new EventEmitter(),
+        kill: vi.fn((signal: string) => { if (signal === 'SIGINT') queueMicrotask(() => proc.emit('close', 0, signal)); return true; }) });
+      return proc;
+    };
+    const spawned: ReturnType<typeof child>[] = [];
+    const spawnWriter = vi.fn(() => { const proc = child(); spawned.push(proc); return proc as unknown as ChildProcess; });
+    try {
+      const capture = new ArchiveCapture(store, root, 3001, undefined,
+        spawnWriter as unknown as typeof import('node:child_process').spawn);
+      const writers = (capture as unknown as { writers: Map<string, unknown> }).writers;
+      capture.start('a');
+      capture.start('show', true);
+      expect(spawnWriter).toHaveBeenCalledTimes(2);
+
+      const releaseFirst = await capture.acquirePlaybackLease();
+      expect(spawned[0].kill).toHaveBeenCalledWith('SIGINT');
+      expect(writers.has('a')).toBe(false);
+      expect(writers.has('show')).toBe(true); // scheduled-show capture keeps running
+      expect(store.getArchive('a')).toMatchObject({ status: 'stopped', error: 'Paused while a stream is playing' });
+
+      capture.start('a'); // retry timers and startAll cannot reclaim the connection
+      expect(writers.has('a')).toBe(false);
+
+      const releaseSecond = await capture.acquirePlaybackLease(); // zap: overlapping viewers
+      releaseFirst();
+      vi.advanceTimersByTime(60_000);
+      expect(writers.has('a')).toBe(false);
+      releaseSecond();
+      releaseSecond(); // idempotent
+      vi.advanceTimersByTime(29_999);
+      expect(writers.has('a')).toBe(false);
+      vi.advanceTimersByTime(1);
+      expect(writers.has('a')).toBe(true);
+      await capture.stopAll();
+    } finally { vi.useRealTimers(); db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('retries a published archive EOF promptly while preserving a new repairable session', async () => {
     const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? os.tmpdir(), 'archive-eof-'));
     const db = new Database(':memory:'); ensureArchiveSchema(db);

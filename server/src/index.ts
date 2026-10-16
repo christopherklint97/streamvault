@@ -1437,6 +1437,12 @@ app.get('/api/stream/:channelId', async (req, res) => {
   logger.info(`Stream proxy: ${safeId} type=${contentType === 'livetv' ? 'livetv' : 'other'} → upstream`);
 
   const isLive = contentType === 'livetv';
+  // Viewer playback and recordings take the provider connection from archive capture.
+  if (!isLoopbackCaptureSession(req.socket.remoteAddress, req.get('x-streamvault-capture-session'))) {
+    const release = await archiveCapture.acquirePlaybackLease();
+    if (res.destroyed) { release(); return; }
+    res.once('close', release);
+  }
 
   try {
     const upstreamHeaders: Record<string, string> = { ...VLC_HEADERS };

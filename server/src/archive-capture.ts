@@ -42,6 +42,7 @@ export function hasArchiveRepairHeadroom(freeBytes: number, usedBytes: number,
     freeBytes > reserveBytes + Math.min(5 * GIB, reserveBytes / 4) &&
     usedBytes < maxBytes - Math.min(10 * GIB, maxBytes / 20);
 }
+const PLAYBACK_RESUME_DELAY_MS = 30_000;
 function gigabytes(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= 10_000 ? parsed : fallback;
@@ -243,8 +244,51 @@ export class ArchiveCapture {
   }
 
   private showChannels = new Set<string>();
+  // Providers often allow one upstream connection. Viewer playback and file
+  // recordings hold a lease; background archive capture yields until it ends.
+  private playbackLeases = 0;
+  private playbackResumeTimer: NodeJS.Timeout | null = null;
+  private playbackPause: Promise<void> = Promise.resolve();
+
+  /** Pause background capture until the returned release runs; resolves once paused. */
+  async acquirePlaybackLease(): Promise<() => void> {
+    this.playbackLeases += 1;
+    if (this.playbackResumeTimer) { clearTimeout(this.playbackResumeTimer); this.playbackResumeTimer = null; }
+    if (this.playbackLeases === 1) this.playbackPause = this.pauseForPlayback();
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      this.playbackLeases -= 1;
+      if (this.playbackLeases > 0 || this.stopping) return;
+      // Zapping briefly closes one stream before opening the next.
+      this.playbackResumeTimer = setTimeout(() => {
+        this.playbackResumeTimer = null;
+        if (this.playbackLeases > 0 || this.stopping) return;
+        logger.info('Archive capture resuming after playback');
+        for (const archive of this.store.archives()) if (archive.enabled) this.start(archive.channelId);
+      }, PLAYBACK_RESUME_DELAY_MS);
+      this.playbackResumeTimer.unref();
+    };
+    // Bound the wait so a hung writer cannot block playback indefinitely.
+    await Promise.race([this.playbackPause, new Promise(resolve => setTimeout(resolve, 6_000).unref())]);
+    return release;
+  }
+
+  private async pauseForPlayback(): Promise<void> {
+    const channels = [...new Set([...this.writers.keys(), ...this.retry.keys()])]
+      .filter(id => !this.showChannels.has(id));
+    if (!channels.length) return;
+    logger.info(`Archive capture pausing ${channels.length} channel(s) for playback`);
+    await Promise.all(channels.map(async id => {
+      await this.stop(id);
+      if (this.playbackLeases > 0) this.store.setStatus(id, 'stopped', 'Paused while a stream is playing');
+    }));
+  }
+
   start(channelId: string, forShow = false): void {
     if (forShow) this.showChannels.add(channelId);
+    if (this.playbackLeases > 0 && !this.showChannels.has(channelId)) return;
     if (this.stopping || this.writers.has(channelId) || this.retry.has(channelId) ||
       (!this.store.getArchive(channelId)?.enabled && !this.showChannels.has(channelId))) return;
     fs.mkdirSync(this.root, { recursive: true });
@@ -610,6 +654,7 @@ export class ArchiveCapture {
   }
   async stopAll(): Promise<void> {
     this.stopping = true;
+    if (this.playbackResumeTimer) clearTimeout(this.playbackResumeTimer);
     this.seamAbort.abort();
     this.seamWorkAbort?.abort();
     if (this.seamTimer) clearTimeout(this.seamTimer);
