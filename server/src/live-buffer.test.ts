@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { createLiveBuffer, createLiveRouter, newStageIndices } from './live-buffer.js';
+import { createLiveBuffer, createLiveRouter, newStageIndices, LIVE_HLS_MAX_WINDOW_SEGMENTS } from './live-buffer.js';
 
 it('rejects missing FFmpeg stage segments and ignores already-published windows', () => {
   expect(newStageIndices([0, 1, 2], -1)).toEqual([0, 1, 2]);
@@ -214,12 +214,12 @@ describe('shared live rolling HLS HTTP', () => {
     while (Date.now() < until) {
       const manifest = await buffer.playlist('channel-a', source.url);
       if (manifest && initialSequence === undefined) initialSequence = Number(manifest.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/)?.[1]);
-      if (manifest && initialSequence !== undefined && Number(manifest.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/)?.[1]) > initialSequence + 16) break;
+      if (manifest && initialSequence !== undefined && Number(manifest.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/)?.[1]) > initialSequence + 4) break;
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     const manifest = await buffer.playlist('channel-a', source.url);
-    expect(Number(manifest?.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/)?.[1])).toBeGreaterThan(initialSequence! + 16);
-    expect((manifest?.match(/^segment\//gm) ?? []).length).toBeLessThanOrEqual(12);
+    expect(Number(manifest?.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/)?.[1])).toBeGreaterThan(initialSequence! + 4);
+    expect((manifest?.match(/^segment\//gm) ?? []).length).toBeLessThanOrEqual(LIVE_HLS_MAX_WINDOW_SEGMENTS);
   }, 16000);
 
   it('does not silently strip real subtitle streams when buffering cannot serve their rendition', async () => {

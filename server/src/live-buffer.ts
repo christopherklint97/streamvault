@@ -14,6 +14,9 @@ export const packetAwareLiveEnabled = (value: string | undefined): boolean => va
 // Stream-copy HLS cuts at source keyframes, not the requested two-second cadence.
 // Keep the advertised upper bound fixed for the lifetime of every playlist.
 export const LIVE_HLS_MAX_SEGMENT_SECONDS = 12;
+export const LIVE_HLS_MIN_WINDOW_SECONDS = 3 * LIVE_HLS_MAX_SEGMENT_SECONDS;
+// Bounds the manifest when a source emits tiny segments.
+export const LIVE_HLS_MAX_WINDOW_SEGMENTS = 24;
 interface Channel {
   id: string; dir: string; epoch: string; segments: Segment[]; bytes: number; sequence: number; discontinuitySequence: number;
   lastAccess: number; lastPublish: number; worker?: ChildProcess; working?: string;
@@ -197,7 +200,11 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       // Reclaim published stage bytes so a longer manifest can absorb bursts
       // without retaining an unbounded second copy of the media.
       await rm(stage, { force: true }).catch(() => {});
-      while ((ch.bytes > maxBytes || ch.segments.length > 12) && ch.segments.length > 1) {
+      // RFC 8216 6.2.2: a live playlist must stay at least three target
+      // durations long; iOS AVPlayer misbehaves on a shorter window.
+      const windowSeconds = () => ch!.segments.reduce((sum, seg) => sum + seg.duration, 0);
+      while (ch.segments.length > 1 && (ch.bytes > maxBytes || ch.segments.length > LIVE_HLS_MAX_WINDOW_SEGMENTS ||
+        windowSeconds() - ch.segments[0].duration >= LIVE_HLS_MIN_WINDOW_SECONDS)) {
         const old = ch.segments.shift()!;
         ch.bytes -= old.bytes;
         if (old.discontinuity) ch.discontinuitySequence++;
