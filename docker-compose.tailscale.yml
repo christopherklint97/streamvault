@@ -1,0 +1,25 @@
+# Optional: give StreamVault its own tailnet HTTPS name, e.g.
+# https://streamvault.<tailnet>.ts.net, via a Tailscale sidecar.
+# Enable with COMPOSE_FILE=docker-compose.yml:docker-compose.tailscale.yml
+# and TS_AUTHKEY in .env (only needed for the first login; state persists).
+services:
+  tailscale:
+    image: tailscale/tailscale:${TAILSCALE_IMAGE_TAG:-stable}
+    container_name: streamvault-tailscale
+    hostname: ${TS_HOSTNAME:-streamvault}
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY:-}
+      - TS_HOSTNAME=${TS_HOSTNAME:-streamvault}
+      - TS_STATE_DIR=/var/lib/tailscale
+      # Userspace networking: no /dev/net/tun or NET_ADMIN needed.
+      - TS_USERSPACE=true
+      - TS_SERVE_CONFIG=/config/serve.json
+    volumes:
+      - streamvault_tailscale_state:/var/lib/tailscale
+      - ./deploy/tailscale/serve.json:/config/serve.json:ro
+    depends_on:
+      - server
+    restart: unless-stopped
+
+volumes:
+  streamvault_tailscale_state:
