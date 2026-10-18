@@ -38,7 +38,8 @@ it('serves native-compatible signed HLS with independent tickets, cache epochs a
   });
   root = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), 'sv-compatible-'));
   const primary = createLiveBuffer({ root: path.join(root, 'primary'), packetAware: true, pollMs: 10 });
-  const compatible = createLiveBuffer({ root: path.join(root, 'compatible'), packetAware: false, maxChannels: 4, pollMs: 10 });
+  const compatible = createLiveBuffer({ root: path.join(root, 'compatible'), packetAware: false, maxChannels: 4, pollMs: 10,
+    nativeStartOffset: true });
   buffers.push(primary, compatible);
   async function seed(buffer: typeof primary, dir: string) {
     await buffer.playlist('channel-a', source);
@@ -79,6 +80,9 @@ it('serves native-compatible signed HLS with independent tickets, cache epochs a
   expect(response.status).toBe(200);
   expect(response.headers.get('content-type')).toMatch(/application\/vnd.apple.mpegurl/);
   const manifest = await response.text();
+  // Native players must start at the holdback, not a few segments from the edge.
+  expect(manifest).toContain('#EXT-X-START:TIME-OFFSET=-36\n');
+  expect(primaryManifest).not.toContain('#EXT-X-START');
   const segmentOf = (text: string, url: URL) => new URL(text.split('\n').find(line => line.startsWith('segment/'))!, url);
   const primarySegment = segmentOf(primaryManifest, primaryUrl);
   const compatibleSegment = segmentOf(manifest, compatibleUrl);

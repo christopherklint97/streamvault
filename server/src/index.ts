@@ -243,7 +243,7 @@ const liveBuffer = createLiveBuffer({ root: liveBufferRoot,
 // presentation or make its old tickets/segment epochs valid in compatibility mode.
 const compatibleLiveBuffer = createLiveBuffer({
   root: `${liveBufferRoot}-compatible`,
-  packetAware: false, maxChannels: 4,
+  packetAware: false, maxChannels: 4, nativeStartOffset: true,
 });
 const liveSource = (id: string) => {
   if (!/^[-A-Za-z0-9_]+$/.test(id)) return null;

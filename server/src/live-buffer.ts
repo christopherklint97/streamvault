@@ -20,6 +20,10 @@ export const LIVE_SWITCH_IDLE_MS = 15_000;
 // behind that start point so a rebuffer does not push the player off the
 // trailing edge onto segments that were already deleted.
 export const LIVE_HLS_MIN_WINDOW_SECONDS = 5 * LIVE_HLS_MAX_SEGMENT_SECONDS;
+// Older native players (iOS 12) start a few segments from the live edge yet
+// reload only once per target duration, draining their buffer every cycle.
+// EXT-X-START pins their start to the RFC 8216 three-target-duration holdback.
+export const LIVE_HLS_NATIVE_START_OFFSET_SECONDS = 3 * LIVE_HLS_MAX_SEGMENT_SECONDS;
 // Bounds the manifest when a source emits tiny segments.
 export const LIVE_HLS_MAX_WINDOW_SEGMENTS = 40;
 interface Channel {
@@ -35,6 +39,7 @@ export interface LiveBufferOptions {
   unsafeMarkerStat?: (file: string) => Promise<void>;
   onUnsafe?: (reason: string, id?: string) => void; // fixed, non-URL diagnostic categories
   packetAware?: boolean;
+  nativeStartOffset?: boolean; // advertise EXT-X-START for native players
 }
 
 export function newStageIndices(indices: number[], last: number): number[] | null {
@@ -67,6 +72,7 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
   const removeChannelDir = options.removeChannelDir ?? (dir => rm(dir, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 }));
   const unsafeMarkerStat = options.unsafeMarkerStat ?? (async (file: string) => { await stat(file); });
   const packetAware = options.packetAware ?? false;
+  const nativeStartOffset = options.nativeStartOffset ?? false;
   if (![maxChannels, maxBytes, maxSegmentBytes, maxReaders, stallMs, maxUnpublishedMs, idleMs, retryMs, pollMs, segmentSeconds, minFreeBytes]
     .every(n => Number.isFinite(n) && n > 0) || maxBytes < maxSegmentBytes * 2 || !Number.isInteger(maxReaders)) throw Error('Invalid live buffer limits');
   const channels = new Map<string, Channel>();
@@ -387,6 +393,7 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       if (!ch || !ch.segments.length) return null;
       const rows = ['#EXTM3U', '#EXT-X-VERSION:3', `#EXT-X-TARGETDURATION:${LIVE_HLS_MAX_SEGMENT_SECONDS}`,
         `#EXT-X-MEDIA-SEQUENCE:${ch.segments[0].id}`, `#EXT-X-DISCONTINUITY-SEQUENCE:${ch.discontinuitySequence}`];
+      if (nativeStartOffset) rows.push(`#EXT-X-START:TIME-OFFSET=-${LIVE_HLS_NATIVE_START_OFFSET_SECONDS}`);
       for (const seg of ch.segments) {
         if (seg.discontinuity) rows.push('#EXT-X-DISCONTINUITY');
         rows.push(`#EXTINF:${seg.duration.toFixed(3)},`, `segment/${seg.id}.ts?epoch=${ch.epoch}${ticket ? `&ticket=${encodeURIComponent(ticket)}` : ''}`);
