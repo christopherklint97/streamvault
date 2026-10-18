@@ -244,6 +244,9 @@ const liveBuffer = createLiveBuffer({ root: liveBufferRoot,
 const compatibleLiveBuffer = createLiveBuffer({
   root: `${liveBufferRoot}-compatible`,
   packetAware: false, maxChannels: 4, nativeStartOffset: true,
+  // Native players hold ~36 s of buffer: ride out provider pauses instead of
+  // reconnecting, which replays old media behind a discontinuity.
+  stallMs: 30_000,
 });
 const liveSource = (id: string) => {
   if (!/^[-A-Za-z0-9_]+$/.test(id)) return null;

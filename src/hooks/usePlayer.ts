@@ -37,6 +37,7 @@ import { useRecordingStore } from '../stores/recordingStore';
 import { attachFiniteHls } from '../services/finiteHls';
 import { attachLiveHls, prefersNativeLiveHls } from '../services/liveHls';
 import { getAuthorizedLiveHlsUrl } from '../services/livePlayback';
+import { describeBuffered, liveGapJumpTarget } from '../utils/live-gap';
 import { ApiError, getBackendRequestScope } from '../services/api';
 import {
   getAvPlayClockReading,
@@ -1211,6 +1212,18 @@ export function usePlayer(): {
           // A completed transport can still have playable MSE data. Reconnect
           // only when it is actually exhausted, not while it is buffered.
           if (pendingLiveEof) recoverDrainedLiveStream();
+          if (nativeLiveHls) {
+            // Step over a stuck discontinuity seam before the watchdog restarts.
+            const stuckAt = video.currentTime;
+            for (const delayMs of [2000, 5000]) {
+              setTimeout(() => {
+                if (!isCurrentPlayback() || video.paused || video.readyState >= 3 || video.currentTime > stuckAt + 0.5) return;
+                const target = liveGapJumpTarget(video.buffered, video.currentTime);
+                log.warn(`Native live HLS stuck at=${video.currentTime.toFixed(1)} buffered=${describeBuffered(video.buffered)} jump=${target?.toFixed(1) ?? 'none'}`);
+                if (target !== null) video.currentTime = target;
+              }, delayMs);
+            }
+          }
           // Delay showing loading spinner to avoid flashing during brief rebuffers
           if (bgBufferTimer) clearTimeout(bgBufferTimer);
           bgBufferTimer = setTimeout(() => {
