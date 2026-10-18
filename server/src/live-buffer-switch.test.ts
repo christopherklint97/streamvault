@@ -57,3 +57,28 @@ it('lets a superseded channel reconnect once it is played again', async () => {
   workers[0].exitCode = 0; workers[0].emit('close', 0);
   await vi.waitFor(() => expect(workers).toHaveLength(3));
 });
+
+it('releases every other channel when a player starts one, including one switched back to', async () => {
+  // FHD -> HD -> FHD within seconds: both are still polled, so idle checks keep both.
+  await buffer.playlist('fhd', 'http://127.0.0.1:1/api/stream/fhd');
+  await vi.waitFor(() => expect(workers).toHaveLength(1));
+  await buffer.claim('hd');
+  await buffer.playlist('hd', 'http://127.0.0.1:1/api/stream/hd');
+  await vi.waitFor(() => expect(workers).toHaveLength(2));
+  expect(workers[0].kill).toHaveBeenCalled();
+
+  await buffer.claim('fhd');
+  await buffer.playlist('fhd', 'http://127.0.0.1:1/api/stream/fhd');
+  await vi.waitFor(() => expect(workers).toHaveLength(3));
+  expect(workers[1].kill).toHaveBeenCalled();
+  expect(workers[2].kill).not.toHaveBeenCalled();
+  expect(buffer.activeCount).toBe(1);
+});
+
+it('keeps the started channel when a player restarts it', async () => {
+  await buffer.playlist('a', 'http://127.0.0.1:1/api/stream/a');
+  await vi.waitFor(() => expect(workers).toHaveLength(1));
+  await buffer.claim('a');
+  expect(workers[0].kill).not.toHaveBeenCalled();
+  expect(buffer.activeCount).toBe(1);
+});

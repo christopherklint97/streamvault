@@ -370,6 +370,16 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     isUnsafe,
     get activeCount() { return channels.size; },
     get activeReaders() { return activeReaders; },
+    /**
+     * A player started `id`, so every other channel's upstream connection is
+     * stale. Close them before `id` connects: a provider limited to one
+     * connection otherwise evicts streams back and forth, and each reconnect
+     * replays already-seen video. Polling alone cannot tell a channel the
+     * viewer just left from one still played, so idle checks miss quick switches.
+     */
+    async claim(id: string) {
+      await Promise.all([...channels.values()].filter(ch => ch.id !== id).map(retire));
+    },
     async playlist(id: string, url: string, ticket?: string) {
       const ch = await get(id, url);
       if (!ch || !ch.segments.length) return null;
@@ -445,6 +455,7 @@ export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, so
     authorizationWaiters++;
     let ready = false;
     try {
+      await buffer.claim(id);
       const deadline = Date.now() + 5_000;
       while (Date.now() < deadline && !req.destroyed) {
         const manifest = await buffer.playlist(id, url);
