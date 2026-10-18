@@ -16,9 +16,12 @@ export const packetAwareLiveEnabled = (value: string | undefined): boolean => va
 export const LIVE_HLS_MAX_SEGMENT_SECONDS = 12;
 export const LIVE_RECONNECT_ACCESS_MS = 20_000;
 export const LIVE_SWITCH_IDLE_MS = 15_000;
-export const LIVE_HLS_MIN_WINDOW_SECONDS = 3 * LIVE_HLS_MAX_SEGMENT_SECONDS;
+// AVPlayer starts three target durations behind the live edge. Keep two more
+// behind that start point so a rebuffer does not push the player off the
+// trailing edge onto segments that were already deleted.
+export const LIVE_HLS_MIN_WINDOW_SECONDS = 5 * LIVE_HLS_MAX_SEGMENT_SECONDS;
 // Bounds the manifest when a source emits tiny segments.
-export const LIVE_HLS_MAX_WINDOW_SEGMENTS = 24;
+export const LIVE_HLS_MAX_WINDOW_SEGMENTS = 40;
 interface Channel {
   id: string; dir: string; epoch: string; segments: Segment[]; bytes: number; sequence: number; discontinuitySequence: number;
   lastAccess: number; lastPublish: number; supersededAt?: number; worker?: ChildProcess; working?: string;
@@ -202,8 +205,7 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       // Reclaim published stage bytes so a longer manifest can absorb bursts
       // without retaining an unbounded second copy of the media.
       await rm(stage, { force: true }).catch(() => {});
-      // RFC 8216 6.2.2: a live playlist must stay at least three target
-      // durations long; iOS AVPlayer misbehaves on a shorter window.
+      // RFC 8216 6.2.2 requires three target durations; see LIVE_HLS_MIN_WINDOW_SECONDS.
       const windowSeconds = () => ch!.segments.reduce((sum, seg) => sum + seg.duration, 0);
       while (ch.segments.length > 1 && (ch.bytes > maxBytes || ch.segments.length > LIVE_HLS_MAX_WINDOW_SEGMENTS ||
         windowSeconds() - ch.segments[0].duration >= LIVE_HLS_MIN_WINDOW_SECONDS)) {
