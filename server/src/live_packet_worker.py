@@ -15,7 +15,7 @@ import time
 from urllib.parse import urlsplit
 
 import av
-from live_packet_stitch import Stitcher, UnsafeSeam, ts_packets
+from live_packet_stitch import KeyframeStart, Stitcher, UnsafeSeam, ts_packets
 
 # Long-GOP sources can deliver media in bursts. Keep socket waits below the
 # owner's unchanged 15-second source-silence watchdog, not below a normal GOP.
@@ -185,6 +185,7 @@ class Worker:
             with self.lock:
                 self.child = child
             stitcher = Stitcher()
+            start = KeyframeStart()
             with av.open(child.stdin, 'w', format='mpegts', options={'mpegts_flags': '+resend_headers'}) as mux:
                 mapped = None
                 # Keep one PyAV mux and one FFmpeg mux for this channel's lifetime.
@@ -205,10 +206,11 @@ class Worker:
                             for packet in stitcher.feed(chain((first,), packets)):
                                 if self.stop.is_set() or self.failure:
                                     raise UnsafeSeam('worker stopped')
-                                native = packet.native
-                                native.pts, native.dts = packet.pts, packet.dts
-                                native.stream = mapped[packet.kind]
-                                mux.mux(native)
+                                for admitted in start.admit(packet):
+                                    native = admitted.native
+                                    native.pts, native.dts = admitted.pts, admitted.dts
+                                    native.stream = mapped[admitted.kind]
+                                    mux.mux(native)
                         # Clean EOF can bisect a TS packet. A chunked socket
                         # timeout is NOT clean EOF, but after a substantial
                         # body may be retried only through the same strict A/V
@@ -235,10 +237,11 @@ class Worker:
                 if self.failure or self.stop.is_set():
                     raise UnsafeSeam('worker stopped')
                 for packet in stitcher.finish():
-                    native = packet.native
-                    native.pts, native.dts = packet.pts, packet.dts
-                    native.stream = mapped[packet.kind]
-                    mux.mux(native)
+                    for admitted in start.admit(packet):
+                        native = admitted.native
+                        native.pts, native.dts = admitted.pts, admitted.dts
+                        native.stream = mapped[admitted.kind]
+                        mux.mux(native)
             child.stdin.close()
             if child.wait(timeout=10) != 0:
                 raise UnsafeSeam('HLS mux failed')

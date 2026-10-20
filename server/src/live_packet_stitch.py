@@ -44,6 +44,40 @@ def stamp(packet: Packet) -> Stamp:
     return Stamp(packet.pts, packet.dts, sha256(packet.data).digest(), packet.keyframe)
 
 
+class KeyframeStart:
+    """Start a presentation on its first video keyframe, with audio from that instant.
+
+    A stream copy drops video until the first keyframe but keeps earlier audio,
+    so players run audio against a frozen future frame until the clock catches
+    up. Audio held before the keyframe is released only from the keyframe's PTS.
+    """
+
+    def __init__(self, held_audio: int = 2048):
+        self.start: int | None = None
+        self.held: deque[Packet] = deque(maxlen=held_audio)
+        self.trimming_audio = True
+
+    def admit(self, packet: Packet) -> list[Packet]:
+        if self.start is None:
+            if packet.kind == 'audio':
+                self.held.append(packet)
+                return []
+            if not packet.keyframe:
+                return []
+            self.start = packet.pts
+            released = [held for held in self.held if held.pts >= self.start]
+            self.held.clear()
+            self.trimming_audio = not released
+            return released + [packet]
+        if packet.kind == 'audio' and self.trimming_audio:
+            # Only the first post-keyframe audio is trimmed; never filter on
+            # timestamps afterwards (a 33-bit PTS wrap would mute the channel).
+            if packet.pts < self.start:
+                return []
+            self.trimming_audio = False
+        return [packet]
+
+
 class Stitcher:
     def __init__(self, min_run: int = 8, history_packets: int = 2048,
                  max_probe_bytes: int = 32 * 1024 * 1024, max_probe_packets: int = 4096,

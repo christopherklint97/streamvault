@@ -88,7 +88,7 @@ import { buildFragmentedMp4Args } from './vod-remux.js';
 import { buildBrowserCompatibleVideoArgs } from './browser-transcode.js';
 import { buildIosHlsArgs, iosHlsContentType } from './ios-hls.js';
 import { IOS_HLS_IDLE_TIMEOUT_MS, findReusableIosHlsSession, iosHlsProcessExitState, iosHlsSessionKey, iosHlsSessionLimitReason, selectIosHlsSessionsToRetire } from './ios-hls-sessions.js';
-import { buildRecordingHlsArgs, parseRecordingHlsStart } from './recording-hls.js';
+import { buildRecordingHlsArgs, findRecordingHlsCut, parseRecordingHlsStart } from './recording-hls.js';
 import { registerRecordingVodRoutes } from './recording-vod-routes.js';
 import { recordingVodHlsPreparer } from './recording-vod-hls.js';
 import { createIosHlsAuthorizationLimiter, createIosHlsTicket, sanitizeFfmpegMessage, verifyIosHlsTicket } from './ios-hls-security.js';
@@ -2024,7 +2024,7 @@ registerRecordingVodRoutes(app, {
 
 // Native iPhone HLS from a verified local TS master. The opaque session URL
 // keeps refreshing after the short-lived stream ticket has expired.
-app.get('/api/recordings/:id/hls/index.m3u8', (req, res) => {
+app.get('/api/recordings/:id/hls/index.m3u8', async (req, res) => {
   const recordingId = String(req.params.id);
   const channelId = `recording_${recordingId}`;
   const sessionId = typeof req.query.session === 'string' ? req.query.session : null;
@@ -2068,11 +2068,18 @@ app.get('/api/recordings/:id/hls/index.m3u8', (req, res) => {
     return;
   }
   const key = iosHlsSessionKey(channelId, masterPath, startSeconds);
-  const existing = findReusableIosHlsSession(iosHlsSessions, key);
-  if (existing) {
-    res.set('Cache-Control', 'no-store').redirect(302, `/api/recordings/${encodeURIComponent(recordingId)}/hls/index.m3u8?session=${existing}`);
-    return;
-  }
+  const redirectToExisting = () => {
+    const existing = findReusableIosHlsSession(iosHlsSessions, key);
+    if (existing) res.set('Cache-Control', 'no-store').redirect(302, `/api/recordings/${encodeURIComponent(recordingId)}/hls/index.m3u8?session=${existing}`);
+    return !!existing;
+  };
+  if (redirectToExisting()) return;
+  const cut = await findRecordingHlsCut(masterPath, startSeconds).catch(error => {
+    logger.warn(`Recording HLS[${recordingId}]: keyframe probe failed, using a plain seek: ${error instanceof Error ? error.message : error}`);
+    return null;
+  });
+  // A concurrent request may have started this session, or the client left.
+  if (res.headersSent || res.destroyed || redirectToExisting()) return;
   for (const id of selectIosHlsSessionsToRetire(iosHlsSessions, channelId, MAX_IOS_HLS_SESSIONS)) {
     retireIosHlsSession(id, 'superseded');
   }
@@ -2080,7 +2087,7 @@ app.get('/api/recordings/:id/hls/index.m3u8', (req, res) => {
   const directory = path.join(IOS_HLS_ROOT, id);
   fs.mkdirSync(directory, { recursive: true });
   const ff = spawn('ionice', ['-c', '3', 'nice', '-n', '15', 'ffmpeg',
-    ...buildRecordingHlsArgs(masterPath, path.join(directory, 'index.m3u8'), startSeconds)],
+    ...buildRecordingHlsArgs(masterPath, path.join(directory, 'index.m3u8'), startSeconds, cut)],
   { stdio: ['ignore', 'ignore', 'pipe'] });
   iosHlsSessions.set(id, {
     directory, process: ff, channelId, key, state: 'running',
@@ -2101,7 +2108,7 @@ app.get('/api/recordings/:id/hls/index.m3u8', (req, res) => {
     session.state = iosHlsProcessExitState(code, signal);
     if (session.state === 'failed') retireIosHlsSession(id, `ffmpeg-exit-${code ?? signal ?? 'unknown'}`);
   });
-  logger.info(`Recording HLS started: ${recordingId}, offset=${startSeconds}, session=${id}`);
+  logger.info(`Recording HLS started: ${recordingId}, offset=${startSeconds}, keyframe=${cut ? (cut.input + cut.output).toFixed(3) : 'none'}, session=${id}`);
   res.set('Cache-Control', 'no-store').redirect(302, `/api/recordings/${encodeURIComponent(recordingId)}/hls/index.m3u8?session=${id}`);
 });
 

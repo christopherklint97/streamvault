@@ -56,6 +56,51 @@ export function newStageIndices(indices: number[], last: number): number[] | nul
 }
 
 /** One FFmpeg ingest per channel, never one per viewer. No archive files are touched. */
+interface StageProbe {
+  streams?: { index: number; codec_type: string }[];
+  packets?: { stream_index: number; pts_time?: string; dts_time?: string; flags?: string }[];
+}
+export interface LeadingAudioCut { at: number; trimmedSeconds: number }
+
+/**
+ * A stream copy that joins a source mid-GOP keeps audio from the join but video
+ * only from the first keyframe, so players hold that future frame while audio
+ * runs until the clock catches up. Cut the first segment of each generation at
+ * the keyframe's decode time when audio starts noticeably earlier.
+ */
+export function leadingAudioCut(probe: StageProbe, toleranceSeconds = 0.1): LeadingAudioCut | null {
+  const kinds = new Map((probe.streams ?? []).map(stream => [stream.index, stream.codec_type]));
+  let start = Infinity;
+  let firstAudio = Infinity;
+  let keyframeDts: number | null = null;
+  for (const packet of probe.packets ?? []) {
+    const pts = Number(packet.pts_time);
+    const dts = Number(packet.dts_time ?? packet.pts_time);
+    if (!Number.isFinite(pts)) continue;
+    start = Math.min(start, pts);
+    const kind = kinds.get(packet.stream_index);
+    if (kind === 'audio') firstAudio = Math.min(firstAudio, pts);
+    if (kind === 'video' && keyframeDts === null && packet.flags?.startsWith('K') && Number.isFinite(dts)) keyframeDts = dts;
+  }
+  if (keyframeDts === null || !(firstAudio < keyframeDts - toleranceSeconds)) return null;
+  // A millisecond early so float rounding can never trim the keyframe itself.
+  const at = Number((keyframeDts - 0.001).toFixed(3));
+  return { at, trimmedSeconds: Math.max(0, at - start) };
+}
+
+/** Remux one bounded local segment from `cut.at`, keeping its original timestamps. */
+async function trimLeadingAudio(stage: string, cut: LeadingAudioCut): Promise<Buffer> {
+  const output = `${stage}.trim.ts`;
+  try {
+    await probeFile('ffmpeg', ['-hide_banner', '-v', 'error', '-nostdin', '-copyts', '-i', stage,
+      '-ss', String(cut.at), '-output_ts_offset', String(cut.at), '-map', '0', '-c', 'copy',
+      '-muxdelay', '0', '-muxpreload', '0', '-f', 'mpegts', '-y', output], { timeout: 5_000, maxBuffer: 64 * 1024 });
+    return await readFile(output);
+  } finally {
+    await rm(output, { force: true }).catch(() => {});
+  }
+}
+
 export function createLiveBuffer(options: LiveBufferOptions = {}) {
   const root = options.root ?? path.join(process.env.TMPDIR || tmpdir(), 'streamvault-live-buffer');
   const maxChannels = options.maxChannels ?? 4;
@@ -176,21 +221,34 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       } catch { await retireUnsafe(ch); return; }
       if (ch.terminating) return;
       if (!data.length || data.length > maxSegmentBytes) { await retireUnsafe(ch); return; }
+      let publishedDuration = duration;
       if (!packetAware && !ch.stageValidated) {
         // MPEG-TS accepts unsupported subtitles (e.g. WebVTT) as anonymous
         // private data. Validate the first closed segment of each generation
         // before publishing anything; an unrecognizable track fails closed.
         // Probe only the bounded local file, never another upstream request.
+        let cut: LeadingAudioCut | null;
         try {
           const { stdout } = await probeFile('ffprobe', ['-v', 'error', '-show_entries',
-            'stream=codec_type', '-of', 'json', stage], { timeout: 2_000, maxBuffer: 64 * 1024 });
-          const streams = JSON.parse(stdout).streams as { codec_type: string }[];
+            'stream=index,codec_type:packet=stream_index,pts_time,dts_time,flags', '-of', 'json', stage],
+          { timeout: 2_000, maxBuffer: 2 * 1024 * 1024 });
+          const probe = JSON.parse(stdout) as StageProbe;
+          const streams = probe.streams;
           if (!Array.isArray(streams) || !streams.length ||
             streams.some(stream => !['video', 'audio', 'subtitle'].includes(stream.codec_type))) {
             await retireUnsafe(ch); return;
           }
+          cut = leadingAudioCut(probe);
         } catch { await retireUnsafe(ch); return; }
         if (ch.terminating) return;
+        if (cut) {
+          const trimmed = await trimLeadingAudio(stage, cut).catch(() => null);
+          if (ch.terminating) return;
+          if (trimmed?.length && trimmed.length <= maxSegmentBytes) {
+            data = trimmed;
+            publishedDuration = Math.max(0.001, duration - cut.trimmedSeconds);
+          }
+        }
         ch.stageValidated = true;
       }
       try {
@@ -204,7 +262,7 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       catch { void retireUnsafe(ch); return; }
       ch.lastStageIndex = index;
       const discontinuity = ch.segments.length > 0 && ch.segments.at(-1)!.name.split('-')[0] !== String(ch.generation);
-      ch.segments.push({ id, name: key, duration, bytes: data.length, discontinuity });
+      ch.segments.push({ id, name: key, duration: publishedDuration, bytes: data.length, discontinuity });
       ch.bytes += data.length;
       ch.lastPublish = Date.now();
       // The served copy is now independent of FFmpeg's rolling staging list.

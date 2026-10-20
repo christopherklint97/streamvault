@@ -148,6 +148,21 @@ function beginPlaybackSeekScope(): AbortSignal | undefined {
   return playbackSeekController?.signal;
 }
 
+/**
+ * Field check for A/V start sync. A stream that starts audio before its first
+ * video keyframe shows that future frame frozen while audio plays; the first
+ * presented frame then sits ahead of the playback clock.
+ */
+function reportFirstFrameOffset(video: HTMLVideoElement, context: string): void {
+  if (typeof video.requestVideoFrameCallback !== 'function') return;
+  video.requestVideoFrameCallback((_now, frame) => {
+    const offset = frame.mediaTime - video.currentTime;
+    const message = `A/V first frame offset=${offset >= 0 ? '+' : ''}${offset.toFixed(2)}s after ${context} at=${video.currentTime.toFixed(1)}`;
+    if (Math.abs(offset) >= 0.25) log.warn(message);
+    else log.info(message);
+  });
+}
+
 function clearRecordingVodPoll(): void {
   if (recordingVodPoll) clearInterval(recordingVodPoll);
   recordingVodPoll = null;
@@ -1179,6 +1194,7 @@ export function usePlayer(): {
         video.onprogress = signedLiveHlsStartup ? attemptPlay : null;
         video.oncanplaythrough = signedLiveHlsStartup ? attemptPlay : null;
         video.onseeked = () => {
+          if (isCurrentPlayback()) reportFirstFrameOffset(video, 'seek');
           if (signedLiveHlsStartup) attemptPlay();
           if (!channel.dvrHls || !isCurrentPlayback() || !Number.isFinite(video.currentTime)) return;
           // A backward seek resets the progress baseline; old high-water marks
@@ -1233,6 +1249,7 @@ export function usePlayer(): {
         video.onplaying = () => {
           if (!isCurrentPlayback() || ['error', 'awaiting-gesture'].includes(usePlayerStore.getState().status)) return;
           log.info('HTML5 event: playing');
+          reportFirstFrameOffset(video, 'playing');
           if (bgBufferTimer) { clearTimeout(bgBufferTimer); bgBufferTimer = null; }
           setStatus('playing');
           setupMediaSession(channel.name);
@@ -1690,7 +1707,13 @@ export function usePlayer(): {
           );
         }
       };
-      if (appleRecordingHls && channel.recordingId) {
+      // Seek inside an already loaded finite VOD. Reloading it would restart
+      // the native player at 0 and seek again after metadata for every scrub.
+      const loadedRecordingVod = appleRecordingHls && channel.recordingVodReady && !video.error &&
+        video.dataset.streamOffset === '0' && Number.isFinite(video.duration) && video.duration > 0;
+      if (loadedRecordingVod) {
+        video.currentTime = Math.min(targetTime, Math.max(0, video.duration - 1));
+      } else if (appleRecordingHls && channel.recordingId) {
         const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
         const recordingId = channel.recordingId;
         const seekGeneration = html5PlaybackGeneration;

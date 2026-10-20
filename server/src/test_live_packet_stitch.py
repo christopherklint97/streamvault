@@ -1,7 +1,7 @@
 """Dual-stream terminal holdback: a demux EOF can truncate AAC too."""
 import unittest
 from dataclasses import replace
-from live_packet_stitch import Packet, Stitcher, UnsafeSeam
+from live_packet_stitch import KeyframeStart, Packet, Stitcher, UnsafeSeam
 
 def packet(kind, i, shift=0):
     step=3003 if kind=='video' else 1920
@@ -67,5 +67,38 @@ class TerminalAudioTests(unittest.TestCase):
         for kind in ('audio','video'):
             dts=[p.dts for p in output if p.kind==kind]
             self.assertTrue(all(b>a for a,b in zip(dts,dts[1:])))
+
+
+
+def av(kind, pts, key=False):
+    return Packet(kind, pts, pts, b'', key or kind == 'audio')
+
+
+class KeyframeStartTests(unittest.TestCase):
+    def test_starts_audio_and_video_together_at_first_keyframe(self):
+        gate = KeyframeStart()
+        out = []
+        for p in [av('audio', 0), av('video', 3000), av('audio', 1920), av('audio', 3840),
+                  av('video', 6000, True), av('audio', 5760), av('audio', 7680), av('video', 9000)]:
+            out += gate.admit(p)
+        self.assertEqual([(p.kind, p.pts) for p in out],
+                         [('video', 6000), ('audio', 7680), ('video', 9000)])
+
+    def test_releases_audio_muxed_ahead_of_the_keyframe(self):
+        gate = KeyframeStart()
+        out = []
+        for p in [av('audio', 4480), av('audio', 6400), av('video', 6000, True), av('audio', 8320)]:
+            out += gate.admit(p)
+        self.assertEqual([(p.kind, p.pts) for p in out],
+                         [('audio', 6400), ('video', 6000), ('audio', 8320)])
+
+    def test_trims_late_interleaved_audio_until_the_first_admitted_frame(self):
+        gate = KeyframeStart()
+        out = []
+        for p in [av('video', 6000, True), av('audio', 4000), av('audio', 6100),
+                  av('audio', 100)]:  # a later PTS wrap must not mute audio
+            out += gate.admit(p)
+        self.assertEqual([(p.kind, p.pts) for p in out],
+                         [('video', 6000), ('audio', 6100), ('audio', 100)])
 
 if __name__=='__main__':unittest.main()

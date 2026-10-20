@@ -380,6 +380,24 @@ describe('usePlayer manual seek integration', () => {
     expect(video.currentTime).toBe(70);
   });
 
+  it('scrubs inside a loaded native VOD rendition without reloading it', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15');
+    usePlayerStore.setState({ currentChannel: {
+      id: 'recording_r1', name: 'Recording', url: '/api/recordings/r1/stream?ticket=abc',
+      logo: '', group: '', region: '', contentType: 'movies', recordingId: 'r1',
+      recordingTransport: 'mpegts', recordingVodReady: true, duration: 120,
+    } });
+    await act(async () => { hookRef.current?.play(); await Promise.resolve(); });
+    Object.defineProperty(video, 'duration', { configurable: true, value: 120 });
+    const loadedSrc = video.src;
+    const load = vi.spyOn(video, 'load');
+    await act(async () => hookRef.current?.seek(70));
+    expect(video.currentTime).toBe(70);
+    expect(video.src).toBe(loadedSrc);
+    expect(load).not.toHaveBeenCalled();
+    expect(getRecordingVodStatus).not.toHaveBeenCalled();
+  });
+
   it('still closes AVPlay when stop throws during backend cleanup', () => {
     const close = vi.fn();
     (globalThis as typeof globalThis & { webapis: WebApis }).webapis = {
