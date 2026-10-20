@@ -4,8 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { runProcess, type ProcessResult, type RunProcessOptions } from './recorder-media.js';
 import { H264_AUD_FIRST_ARGS, probeVideoCodec } from './h264-access-units.js';
 
-/** Bump to rebuild packages made by older settings (2: H.264 delimiter-first access units). */
-export const RECORDING_VOD_PACKAGE_VERSION = 2;
+/** Bump to rebuild packages made by older settings (3: H.264 delimiter-first access units). */
+export const RECORDING_VOD_PACKAGE_VERSION = 3;
 
 /** The published package is beside the master and is removed with its recording. */
 export function vodHlsDirectory(masterPath: string): string {

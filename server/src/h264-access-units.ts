@@ -14,10 +14,14 @@ export const H264_AUD_FIRST_ARGS = ['-bsf:v', 'h264_metadata=aud=remove,h264_met
 export const isUnsupportedBitstreamFilterError = (stderr: string): boolean =>
   /not supported by the bitstream filter/i.test(stderr);
 
+/** MPEG-TS input lists the stream once per program as well, so read the first entry. */
+export const firstCodecName = (stdout: string): string | null =>
+  stdout.split('\n').map(line => line.trim()).find(Boolean) ?? null;
+
 export function probeVideoCodec(file: string): Promise<string | null> {
   return new Promise(resolve => {
     execFile('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name',
       '-of', 'default=noprint_wrappers=1:nokey=1', file], { timeout: 10_000, maxBuffer: 64 * 1024 },
-    (error, stdout) => resolve(error ? null : stdout.trim() || null));
+    (error, stdout) => resolve(error ? null : firstCodecName(stdout)));
   });
 }
