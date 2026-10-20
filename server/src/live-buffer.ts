@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isAuthorizedRequest } from './security.js';
+import { H264_AUD_FIRST_ARGS, isUnsupportedBitstreamFilterError } from './h264-access-units.js';
 
 interface Segment { id: number; name: string; duration: number; bytes: number; discontinuity: boolean; }
 const probeFile = promisify(execFile);
@@ -31,6 +32,8 @@ interface Channel {
   lastAccess: number; lastPublish: number; supersededAt?: number; worker?: ChildProcess; working?: string;
   generation: number; lastStageIndex: number; timer?: ReturnType<typeof setInterval>; terminating: boolean; retirement?: Promise<void>;
   inspecting?: boolean; publishTask?: Promise<void>; stageValidated?: boolean;
+  /** The source video is not H.264, so the delimiter rewrite is skipped. */
+  plainVideo?: boolean;
 }
 export interface LiveBufferOptions {
   root?: string; maxChannels?: number; maxBytesPerChannel?: number; maxSegmentBytes?: number; maxReaders?: number;
@@ -354,7 +357,8 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     ch.working = working;
     ch.lastPublish = Date.now();
     const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-i', url,
-      '-map', '0:v?', '-map', '0:a?', '-map', '0:s?', '-c', 'copy', '-f', 'segment',
+      '-map', '0:v?', '-map', '0:a?', '-map', '0:s?', '-c', 'copy',
+      ...(ch.plainVideo ? [] : H264_AUD_FIRST_ARGS), '-f', 'segment',
       // HLS's subtitle sidecar muxer only accepts WebVTT; MPEG-TS segments
       // preserve native DVB subtitles. The list names only closed segments;
       // publication builds its own bounded live playlist and reclaims files.
@@ -369,9 +373,13 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       ? spawn('/usr/bin/python3', [path.join(path.dirname(fileURLToPath(import.meta.url)), 'live_packet_worker.py'),
         '--source', url, '--directory', working, '--disk-bytes', String(maxBytes + maxSegmentBytes * 4)],
         { stdio: ['ignore', 'ignore', 'ignore'] })
-      : spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'ignore'] });
+      : spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
     ch.worker = worker;
     worker.on('error', () => {});
+    // Kept in memory only to recognise a non-H.264 source; never logged
+    // because FFmpeg messages can contain upstream URLs.
+    let stderrTail = '';
+    worker.stderr?.on('data', (chunk: Buffer) => { stderrTail = (stderrTail + chunk.toString()).slice(-4096); });
     worker.once('close', () => {
       void (async () => {
         if (ch.terminating || generation !== ch.generation) return;
@@ -384,6 +392,8 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
           if (!retryable) markUnsafe(ch.id);
           await retire(ch); return;
         }
+        // Relaunch without the H.264-only delimiter rewrite for other codecs.
+        if (!ch.plainVideo && isUnsupportedBitstreamFilterError(stderrTail)) ch.plainVideo = true;
         await publishInOrder(ch); // FFmpeg may have finalized its last segment at EOF.
         ch.working = undefined;
         ch.worker = undefined;

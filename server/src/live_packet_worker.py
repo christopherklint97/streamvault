@@ -178,7 +178,10 @@ class Worker:
                     # media while the HTTP source only supplies null packets.
                     '-analyzeduration', '1000000', '-probesize', '1048576',
                     '-f', 'mpegts', '-i', 'pipe:0', '-map', '0:v:0', '-map', '0:a:0',
-                    '-c', 'copy', '-f', 'hls', '-hls_time', '2', '-hls_list_size', '64',
+                    # Delimiter-first access units: Apple players will not start
+                    # video on keyframes with the AUD after SPS/PPS (see h264-access-units.ts).
+                    '-c', 'copy', '-bsf:v', 'h264_metadata=aud=remove,h264_metadata=aud=insert',
+                    '-f', 'hls', '-hls_time', '2', '-hls_list_size', '64',
                     '-hls_flags', 'delete_segments+temp_file+independent_segments+omit_endlist',
                     '-hls_segment_filename', str(self.directory / '%d.ts'), str(self.directory / 'index.m3u8')]
             child = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

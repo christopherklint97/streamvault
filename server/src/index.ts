@@ -90,6 +90,7 @@ import { buildIosHlsArgs, iosHlsContentType } from './ios-hls.js';
 import { IOS_HLS_IDLE_TIMEOUT_MS, findReusableIosHlsSession, iosHlsProcessExitState, iosHlsSessionKey, iosHlsSessionLimitReason, selectIosHlsSessionsToRetire } from './ios-hls-sessions.js';
 import { buildRecordingHlsArgs, findRecordingHlsCut, parseRecordingHlsStart } from './recording-hls.js';
 import { registerRecordingVodRoutes } from './recording-vod-routes.js';
+import { probeVideoCodec } from './h264-access-units.js';
 import { recordingVodHlsPreparer } from './recording-vod-hls.js';
 import { createIosHlsAuthorizationLimiter, createIosHlsTicket, sanitizeFfmpegMessage, verifyIosHlsTicket } from './ios-hls-security.js';
 import { selectIosVodFallback } from './ios-vod.js';
@@ -2074,6 +2075,7 @@ app.get('/api/recordings/:id/hls/index.m3u8', async (req, res) => {
     return !!existing;
   };
   if (redirectToExisting()) return;
+  const h264 = await probeVideoCodec(masterPath) === 'h264';
   const cut = await findRecordingHlsCut(masterPath, startSeconds).catch(error => {
     logger.warn(`Recording HLS[${recordingId}]: keyframe probe failed, using a plain seek: ${error instanceof Error ? error.message : error}`);
     return null;
@@ -2087,7 +2089,7 @@ app.get('/api/recordings/:id/hls/index.m3u8', async (req, res) => {
   const directory = path.join(IOS_HLS_ROOT, id);
   fs.mkdirSync(directory, { recursive: true });
   const ff = spawn('ionice', ['-c', '3', 'nice', '-n', '15', 'ffmpeg',
-    ...buildRecordingHlsArgs(masterPath, path.join(directory, 'index.m3u8'), startSeconds, cut)],
+    ...buildRecordingHlsArgs(masterPath, path.join(directory, 'index.m3u8'), startSeconds, cut, h264)],
   { stdio: ['ignore', 'ignore', 'pipe'] });
   iosHlsSessions.set(id, {
     directory, process: ff, channelId, key, state: 'running',

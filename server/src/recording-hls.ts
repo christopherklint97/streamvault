@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import path from 'node:path';
+import { H264_AUD_FIRST_ARGS } from './h264-access-units.js';
 
 export function parseRecordingHlsStart(value: unknown, durationSeconds: number): number | null {
   if (value === undefined) return 0;
@@ -60,7 +61,7 @@ export async function findRecordingHlsCut(
 
 /** Native iOS HLS reads a local recording at near playback rate, never whole-file at once. */
 export function buildRecordingHlsArgs(
-  masterPath: string, playlistPath: string, startSeconds = 0, cut: RecordingHlsCut | null = null,
+  masterPath: string, playlistPath: string, startSeconds = 0, cut: RecordingHlsCut | null = null, h264 = false,
 ): string[] {
   const inputSeek = cut ? cut.input : startSeconds;
   return [
@@ -70,6 +71,7 @@ export function buildRecordingHlsArgs(
     '-i', masterPath,
     ...(cut && cut.output > 0 ? ['-ss', String(cut.output)] : []),
     '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-sn',
+    ...(h264 ? H264_AUD_FIRST_ARGS : []),
     '-f', 'hls', '-hls_time', '4', '-hls_list_size', '120', '-hls_delete_threshold', '30',
     '-hls_flags', 'delete_segments+temp_file',
     '-hls_segment_filename', path.join(path.dirname(playlistPath), 'segment-%05d.ts'),

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { buildRecordingVodHlsArgs, getRecordingVodHlsState, removeAbandonedRecordingVodStaging, RecordingVodHlsPreparer, rewriteRecordingVodPlaylist, vodHlsDirectory } from './recording-vod-hls';
+import { buildRecordingVodHlsArgs, getRecordingVodHlsState, RECORDING_VOD_PACKAGE_VERSION, removeAbandonedRecordingVodStaging, RecordingVodHlsPreparer, rewriteRecordingVodPlaylist, vodHlsDirectory } from './recording-vod-hls';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
@@ -25,6 +25,10 @@ describe('recording VOD HLS', () => {
     expect(args).toContain('-readrate');
     expect(args[args.indexOf('-c') + 1]).toBe('copy');
     expect(args).not.toContain('delete_segments+temp_file');
+    expect(args).not.toContain('-bsf:v');
+    // H.264 masters get delimiter-first access units for Apple's native player.
+    const h264 = buildRecordingVodHlsArgs('/records/r1.ts', '/records/r1.hls.part/index.m3u8', true);
+    expect(h264[h264.indexOf('-bsf:v') + 1]).toBe('h264_metadata=aud=remove,h264_metadata=aud=insert');
   });
 
   it('publishes seekable status only for a complete manifest and all referenced segments of the current master', async () => {
@@ -35,14 +39,18 @@ describe('recording VOD HLS', () => {
     fs.writeFileSync(path.join(directory, 'segment-00000.ts'), 'segment');
     expect(await getRecordingVodHlsState(file)).toBe('missing');
     const stat = fs.statSync(file);
-    fs.writeFileSync(path.join(directory, 'source.json'), JSON.stringify({ size: stat.size, mtimeMs: stat.mtimeMs, durationSeconds: 4 }));
+    fs.writeFileSync(path.join(directory, 'source.json'), JSON.stringify({ version: RECORDING_VOD_PACKAGE_VERSION, size: stat.size, mtimeMs: stat.mtimeMs, durationSeconds: 4 }));
     expect(await getRecordingVodHlsState(file)).toBe('ready');
+    // Packages from older settings are rebuilt rather than served.
+    fs.writeFileSync(path.join(directory, 'source.json'), JSON.stringify({ size: stat.size, mtimeMs: stat.mtimeMs, durationSeconds: 4 }));
+    expect(await getRecordingVodHlsState(file)).toBe('missing');
+    fs.writeFileSync(path.join(directory, 'source.json'), JSON.stringify({ version: RECORDING_VOD_PACKAGE_VERSION, size: stat.size, mtimeMs: stat.mtimeMs, durationSeconds: 4 }));
     fs.writeFileSync(path.join(directory, 'index.m3u8'), '#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:20,\nsegment-00000.ts\n#EXT-X-ENDLIST\n');
     expect(await getRecordingVodHlsState(file)).toBe('missing');
     fs.writeFileSync(path.join(directory, 'index.m3u8'), '#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:4,\nsegment-00000.ts\n#EXT-X-ENDLIST\n');
-    fs.writeFileSync(path.join(directory, 'source.json'), JSON.stringify({ size: stat.size, mtimeMs: stat.mtimeMs, durationSeconds: 120 }));
+    fs.writeFileSync(path.join(directory, 'source.json'), JSON.stringify({ version: RECORDING_VOD_PACKAGE_VERSION, size: stat.size, mtimeMs: stat.mtimeMs, durationSeconds: 120 }));
     expect(await getRecordingVodHlsState(file)).toBe('missing');
-    fs.writeFileSync(path.join(directory, 'source.json'), JSON.stringify({ size: stat.size, mtimeMs: stat.mtimeMs, durationSeconds: 4 }));
+    fs.writeFileSync(path.join(directory, 'source.json'), JSON.stringify({ version: RECORDING_VOD_PACKAGE_VERSION, size: stat.size, mtimeMs: stat.mtimeMs, durationSeconds: 4 }));
     fs.rmSync(path.join(directory, 'segment-00000.ts'));
     expect(await getRecordingVodHlsState(file)).toBe('missing');
     fs.writeFileSync(path.join(directory, 'segment-00000.ts'), 'segment');
