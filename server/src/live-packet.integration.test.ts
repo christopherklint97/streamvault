@@ -559,12 +559,17 @@ it.each(['chunked', 'length'] as const)('serves one signed, continuous HLS timel
   // Compare the real served HLS inventory, not just its manifest syntax.
   // The first unique successor H.264 picture is non-IDR and must survive.
   const inventory = spawnSync('/usr/bin/python3', ['-c', `
-import av,sys
+import av,re,sys
+def units(data):
+  # Served H.264 is rewritten delimiter-first; compare every other NAL unit.
+  return tuple(n.rstrip(b'\\0') for n in re.split(b'\\0\\0\\1', data)[1:] if n and n[0] & 31 != 9)
 def tracks(name):
   result = {'video':[], 'audio':[]}
   with av.open(name) as media:
     for pkt in media.demux():
-      if pkt.size and pkt.stream.type in result: result[pkt.stream.type].append((bytes(pkt), pkt.is_keyframe))
+      if pkt.size and pkt.stream.type in result:
+        data = bytes(pkt)
+        result[pkt.stream.type].append((units(data) if pkt.stream.type == 'video' else data, pkt.is_keyframe))
   return result
 baseline, served, replay = tracks(sys.argv[1]), tracks(sys.argv[2]), tracks(sys.argv[3])
 unique = replay['video'][60]
