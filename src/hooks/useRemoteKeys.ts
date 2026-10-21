@@ -1,6 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { KEY_CODES } from '../utils/keys';
 import { useAppStore } from '../stores/appStore';
+import { isFocusLost, recoverFocus } from '../utils/focus';
+
+const NAVIGATION_KEYS = new Set<number>([
+  KEY_CODES.UP, KEY_CODES.DOWN, KEY_CODES.LEFT, KEY_CODES.RIGHT, KEY_CODES.ENTER,
+]);
 
 export function useRemoteKeys(): { showInfo: boolean; channelNumber: string } {
   const [showInfo, setShowInfo] = useState(false);
@@ -10,7 +15,16 @@ export function useRemoteKeys(): { showInfo: boolean; channelNumber: string } {
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      const goBack = useAppStore.getState().goBack;
+      const { goBack, currentView, showExitDialog } = useAppStore.getState();
+
+      // A removed or hidden control (closed dialog, cancelled row, view
+      // swap) leaves focus on <body>, where navigation keys would do nothing.
+      if (NAVIGATION_KEYS.has(e.keyCode) && !e.defaultPrevented
+        && currentView !== 'player' && !showExitDialog && isFocusLost()) {
+        e.preventDefault();
+        recoverFocus();
+        return;
+      }
 
       switch (e.keyCode) {
         case KEY_CODES.BACK:

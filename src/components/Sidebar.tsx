@@ -2,6 +2,7 @@ import { useRef, useCallback, useState } from 'react';
 import { useAppStore } from '../stores/appStore';
 import type { View } from '../types';
 import { KEY_CODES } from '../utils/keys';
+import { focusContentEntry } from '../utils/focus';
 import { isMobile } from '../utils/platform';
 import { cn } from '../utils/cn';
 
@@ -80,11 +81,7 @@ export default function Sidebar() {
         }
       } else if (e.keyCode === KEY_CODES.RIGHT) {
         e.preventDefault();
-        const browseEntry = document.querySelector('[data-app-content] [data-active-view] [data-content-entry]') as HTMLElement | null;
-        const container = document.querySelector('[data-app-content] > [tabindex]') as HTMLElement | null;
-        const zoneEntry = container?.querySelector('button:not([disabled]), input:not([disabled]), [data-focusable]:not([disabled])') as HTMLElement | null;
-        const focusable = document.querySelector('[data-app-content] [data-focusable]') as HTMLElement | null;
-        (browseEntry ?? zoneEntry ?? container ?? focusable)?.focus();
+        focusContentEntry();
       }
     },
     [navigate]

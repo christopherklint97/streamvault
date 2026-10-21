@@ -50,3 +50,14 @@ describe('central navigation blocker', () => {
     expect(useAppStore.getState().navigate('settings')).toBe(true);
   });
 });
+
+describe('navigate', () => {
+  it('does not add a Back step when re-selecting the current view', () => {
+    useAppStore.setState({ currentView: 'movies', viewStack: ['home'], navigationBlocker: null });
+
+    expect(useAppStore.getState().navigate('movies')).toBe(true);
+
+    expect(useAppStore.getState().viewStack).toEqual(['home']);
+    expect(useAppStore.getState().currentView).toBe('movies');
+  });
+});

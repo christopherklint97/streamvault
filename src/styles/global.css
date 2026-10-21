@@ -179,6 +179,15 @@ html[data-tizen] [data-app-root] {
 html[data-tizen] [data-app-content] {
   padding: 2rem 2.5rem;
 }
+/* Captions sized for a phone are unreadable from the sofa; lift the small end
+   of the type scale on the TV. text-* utilities read these variables. */
+html[data-tizen] {
+  --text-11: 16px;
+  --text-12: 17px;
+  --text-13: 18px;
+  --text-14: 19px;
+  --text-15: 20px;
+}
 html[data-tizen] [data-app-content][data-fullscreen] {
   padding: 0;
   width: 1920px;

@@ -22,9 +22,9 @@ type EpgByChannel = Record<string, EpgProgram[]>;
 
 const MOBILE = isMobile();
 const EMPTY_CATEGORIES: Category[] = [];
-const HOUR_WIDTH = MOBILE ? 180 : 240; // pixels per hour
-const ROW_HEIGHT = 60;
-const CHANNEL_COL_WIDTH = MOBILE ? 128 : 180;
+const HOUR_WIDTH = MOBILE ? 180 : 400; // pixels per hour
+const ROW_HEIGHT = MOBILE ? 60 : 76;
+const CHANNEL_COL_WIDTH = MOBILE ? 128 : 220;
 const VISIBLE_HOURS = 3;
 const TIMELINE_WIDTH = HOUR_WIDTH * VISIBLE_HOURS;
 const PAGE_SIZE = 30;
@@ -145,6 +145,10 @@ function GuideFilterDropdown({ categories, selectedGroup, onSelect }: { categori
       e.stopPropagation();
       setOpen(false);
       requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
+    } else if (e.keyCode === KEY_CODES.LEFT || e.keyCode === KEY_CODES.RIGHT) {
+      // An open list keeps the remote: Left/Right only move the caret in its search box.
+      e.stopPropagation();
+      if (e.target !== inputRef.current) e.preventDefault();
     }
   }, [open, focusIdx, filtered, handleSelect, handleToggle]);
 
@@ -426,10 +430,6 @@ export default function EpgGuide() {
     return Object.values(epgData).some(programs => programs.length > 0);
   }, [epgData]);
 
-  if (loading) {
-    return <div className="p-3 lg:p-5 h-full flex flex-col overflow-hidden"><div className="text-[#888] text-center py-[60px]">Loading guide...</div></div>;
-  }
-
   return (
     <FocusZone className="p-3 lg:p-5 h-full flex flex-col overflow-hidden outline-hidden">
       <div className="flex items-center gap-2.5 lg:gap-5 mb-4 shrink-0 flex-wrap lg:flex-nowrap">
@@ -449,23 +449,30 @@ export default function EpgGuide() {
         <div className="text-sm text-[#666] ml-auto">{formatDate(new Date(windowStart))}</div>
       </div>
 
-      {channels.length === 0 ? (
+      {/* The toolbar stays mounted while loading so the remote keeps its focus. */}
+      {loading ? (
+        <div className="text-[#888] text-center py-[60px]">Loading guide...</div>
+      ) : channels.length === 0 ? (
         <div className="text-center py-[60px] text-[#444]">
           {selectedGroup && selectedGroup !== 'All' ? 'No channels in this category.' : 'Select a category to browse.'}
         </div>
       ) : (
         <>
-          {!hasAnyEpg && !loading && (
+          {!hasAnyEpg && (
             <div className="text-13 text-[#555] mb-2 px-1">No program guide data available. Click a channel name to play.</div>
           )}
-          <div className="flex-1 overflow-auto relative [-webkit-overflow-scrolling:touch]" ref={gridRef}>
+          <div className="flex-1 overflow-auto relative [-webkit-overflow-scrolling:touch]" ref={gridRef} style={{ scrollPaddingTop: 32, scrollPaddingLeft: CHANNEL_COL_WIDTH }}>
             {/* Timeline header */}
-            <div className="flex sticky top-0 z-[2] bg-dark h-8" style={{ marginLeft: CHANNEL_COL_WIDTH }}>
-              {hourMarkers.map((m, i) => (
-                <div key={i} className="absolute top-0 h-8 flex items-center pl-2 text-13 text-[#666] border-l border-white/[0.06]" style={{ left: m.offset, width: HOUR_WIDTH }}>
-                  {formatTime(m.time)}
-                </div>
-              ))}
+            <div className="flex sticky top-0 z-[2] bg-dark h-8">
+              {/* Corner cell keeps scrolled channel names from showing through the header */}
+              <div className="shrink-0 sticky left-0 z-[1] bg-dark" style={{ width: CHANNEL_COL_WIDTH }} />
+              <div className="relative shrink-0" style={{ width: TIMELINE_WIDTH }}>
+                {hourMarkers.map((m, i) => (
+                  <div key={i} className="absolute top-0 h-8 flex items-center pl-2 text-13 text-[#666] border-l border-white/[0.06]" style={{ left: m.offset, width: HOUR_WIDTH }}>
+                    {formatTime(m.time)}
+                  </div>
+                ))}
+              </div>
             </div>
 
             {/* Channel rows */}
@@ -507,7 +514,12 @@ export default function EpgGuide() {
                               isSelected && 'epg-program-selected'
                             )}
                             style={{ left, width: Math.max(width - 2, 1) }}
-                            onClick={() => setSelectedProgram(isSelected ? null : p)}
+                            onClick={() => {
+                              setSelectedProgram(isSelected ? null : p);
+                              // The detail panel sits below the endless grid, out of reach
+                              // of Down; hand the remote straight to its Record button.
+                              if (!isSelected && !MOBILE) requestAnimationFrame(() => document.querySelector<HTMLElement>('[data-guide-record]')?.focus({ preventScroll: true }));
+                            }}
                             title={`${p.title}\n${formatTime(new Date(p.start))} - ${formatTime(new Date(p.stop))}`}
                           >
                             <span className="text-12 lg:text-13 leading-tight text-[#ddd] line-clamp-2 break-words">{p.title}</span>
@@ -535,21 +547,26 @@ export default function EpgGuide() {
 
       {/* Program detail panel */}
       {selectedProgram && (
-        <div className="shrink-0 p-3.5 lg:p-4 mt-2 bg-white/[0.04] rounded-lg max-h-[100px] lg:max-h-[120px] overflow-y-auto">
-          <div className="text-base font-semibold mb-1">{selectedProgram.title}</div>
-          <div className="text-13 text-[#888] mb-1.5">
-            {formatTime(new Date(selectedProgram.start))} – {formatTime(new Date(selectedProgram.stop))}
+        <div className="shrink-0 p-3.5 lg:p-4 mt-2 bg-white/[0.04] rounded-lg max-h-[100px] lg:max-h-[140px] overflow-y-auto">
+          <div className="flex items-start gap-3 mb-1">
+            <div className="flex-1 min-w-0">
+              <div className="text-base font-semibold">{selectedProgram.title}</div>
+              <div className="text-13 text-[#888]">
+                {formatTime(new Date(selectedProgram.start))} – {formatTime(new Date(selectedProgram.stop))}
+              </div>
+            </div>
+            {new Date(selectedProgram.stop).getTime() > now && (
+              <button
+                data-guide-record
+                className="shrink-0 py-1.5 px-[18px] bg-[#dc2626] text-white rounded-md text-sm font-semibold cursor-pointer transition-colors duration-150 hover:bg-[#b91c1c] focus:bg-[#b91c1c]"
+                onClick={() => handleRecord(selectedProgram.channelId, selectedProgram)}
+              >
+                Record
+              </button>
+            )}
           </div>
           {selectedProgram.description && (
             <div className="text-13 text-[#aaa] leading-snug">{selectedProgram.description}</div>
-          )}
-          {new Date(selectedProgram.stop).getTime() > now && (
-            <button
-              className="inline-block mt-2 py-1.5 px-[18px] bg-[#dc2626] text-white rounded-md text-sm font-semibold cursor-pointer transition-colors duration-150 hover:bg-[#b91c1c] focus:bg-[#b91c1c]"
-              onClick={() => handleRecord(selectedProgram.channelId, selectedProgram)}
-            >
-              Record
-            </button>
           )}
         </div>
       )}
