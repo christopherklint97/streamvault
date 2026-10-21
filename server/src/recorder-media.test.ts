@@ -19,6 +19,9 @@ import {
   parseConfiguredConcurrency,
   runProcess,
   shouldRetryCapture,
+  captureRetryDelayMs,
+  nextQuickCaptureFailures,
+  HEALTHY_CAPTURE_MS,
 } from './recorder-media.js';
 
 describe('recording ffmpeg arguments', () => {
@@ -287,15 +290,15 @@ describe('recording limits and retry accounting', () => {
     expect(parseConfiguredConcurrency('oops', 3)).toBe(3);
   });
 
-  it('allows only one retry while the recording window remains open', () => {
-    expect(shouldRetryCapture(0, 1000, 2000)).toBe(true);
-    expect(shouldRetryCapture(1, 1000, 2000)).toBe(false);
-    expect(shouldRetryCapture(0, 2000, 2000)).toBe(false);
+  it('keeps reconnecting while the recording window stays open', () => {
+    expect(shouldRetryCapture(1_000, 60_000, 10_000)).toBe(true);
+    expect(shouldRetryCapture(55_000, 60_000, 10_000)).toBe(false);
   });
 
-  it('retries a clean early EOF while the recording window remains open', () => {
-    expect(shouldRetryCapture(0, 1000, 2000, 0)).toBe(true);
-    expect(shouldRetryCapture(0, 2000, 2000, 0)).toBe(false);
+  it('backs off only for captures that die before becoming healthy', () => {
+    expect(nextQuickCaptureFailures(3, HEALTHY_CAPTURE_MS)).toBe(0);
+    expect(nextQuickCaptureFailures(0, 5_000)).toBe(1);
+    expect([0, 1, 2, 3, 4, 9].map(captureRetryDelayMs)).toEqual([10_000, 10_000, 20_000, 40_000, 60_000, 60_000]);
   });
 
   it('runs terminal finalization only once when error and close both arrive', async () => {

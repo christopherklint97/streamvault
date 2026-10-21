@@ -118,8 +118,24 @@ export function parseConfiguredConcurrency(value: string, fallback: number): num
   return Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, 8) : fallback;
 }
 
-export function shouldRetryCapture(retryCount: number, now: number, endTime: number, _exitCode?: number | null): boolean {
-  return retryCount < 1 && now < endTime;
+/** A capture that ran this long was healthy; a drop after it starts a fresh backoff. */
+export const HEALTHY_CAPTURE_MS = 60_000;
+const CAPTURE_RETRY_BASE_MS = 10_000;
+const CAPTURE_RETRY_MAX_MS = 60_000;
+
+/** Count of back-to-back captures that died before becoming healthy. */
+export function nextQuickCaptureFailures(previous: number, attemptRanMs: number): number {
+  return attemptRanMs >= HEALTHY_CAPTURE_MS ? 0 : previous + 1;
+}
+
+/** 10 s after a healthy capture drops, doubling per quick failure up to 60 s. */
+export function captureRetryDelayMs(quickFailures: number): number {
+  return Math.min(CAPTURE_RETRY_MAX_MS, CAPTURE_RETRY_BASE_MS * 2 ** Math.max(0, quickFailures - 1));
+}
+
+/** Providers end streams mid-airing; keep reconnecting while the window stays open. */
+export function shouldRetryCapture(now: number, endTime: number, delayMs: number): boolean {
+  return now + delayMs < endTime;
 }
 
 export function buildCaptureSegmentPath(directory: string, recordingId: string, attemptIndex: number): string {
