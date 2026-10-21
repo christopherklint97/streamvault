@@ -86,7 +86,7 @@ import { matchProgramTitle } from './schedule-reconciliation.js';
 import { authorizeHlsProxyUrl, rewriteHlsManifest, signHlsProxyUrl } from './hls.js';
 import { buildFragmentedMp4Args } from './vod-remux.js';
 import { buildBrowserCompatibleVideoArgs } from './browser-transcode.js';
-import { buildIosHlsArgs, iosHlsContentType } from './ios-hls.js';
+import { buildIosHlsArgs, buildIosHlsRecoveryUrl, iosHlsContentType, iosHlsModesNeedRetry, probeIosHlsMediaModes } from './ios-hls.js';
 import { IOS_HLS_IDLE_TIMEOUT_MS, findReusableIosHlsSession, iosHlsProcessExitState, iosHlsSessionKey, iosHlsSessionLimitReason, selectIosHlsSessionsToRetire } from './ios-hls-sessions.js';
 import { buildRecordingHlsArgs, findRecordingHlsCut, parseRecordingHlsStart } from './recording-hls.js';
 import { registerRecordingVodRoutes } from './recording-vod-routes.js';
@@ -148,6 +148,7 @@ const liveAudioTranscodes = new ConcurrentStreamLimiter(2);
 // Bound per-request VOD FFmpeg children; slack covers a seek whose old child is still exiting.
 const vodRemuxes = new ConcurrentStreamLimiter(3);
 const vodTranscodes = new ConcurrentStreamLimiter(2);
+const iosHlsProbes = new ConcurrentStreamLimiter(MAX_IOS_HLS_SESSIONS);
 const iosHlsTicketSecret = randomBytes(32).toString('hex');
 const hlsProxyTicketSecret = randomBytes(32);
 const signedHlsProxyUrl = (url: string) => signHlsProxyUrl(url, hlsProxyTicketSecret);
@@ -1253,7 +1254,7 @@ app.get('/api/ios-hls-authorize/:channelId/index.m3u8', (req, res) => {
   res.set('Cache-Control', 'no-store').redirect(302, `/api/ios-hls/${encodeURIComponent(channelId)}/index.m3u8?${params.toString()}`);
 });
 
-app.get('/api/ios-hls/:channelId/index.m3u8', (req, res) => {
+app.get('/api/ios-hls/:channelId/index.m3u8', async (req, res) => {
   const channelId = req.params.channelId;
   const contentType = iosHlsContentType(channelId, req.query.type);
   if (!contentType || typeof req.query.url !== 'string') {
@@ -1293,7 +1294,12 @@ app.get('/api/ios-hls/:channelId/index.m3u8', (req, res) => {
   if (existingSessionId) {
     const existing = iosHlsSessions.get(existingSessionId);
     if (!existing || existing.channelId !== channelId) {
-      res.status(404).json({ error: 'iPhone stream session expired' });
+      res.set('Cache-Control', 'no-store').redirect(302, buildIosHlsRecoveryUrl(
+        channelId,
+        requestValidation.url.toString(),
+        contentType,
+        startSeconds || 0,
+      ));
       return;
     }
     existing.expiresAt = Date.now() + IOS_HLS_IDLE_TIMEOUT_MS;
@@ -1345,16 +1351,58 @@ app.get('/api/ios-hls/:channelId/index.m3u8', (req, res) => {
     return;
   }
 
+  const sourcePath = `/api/stream/${encodeURIComponent(sourceChannelId)}?url=${encodeURIComponent(sourceValidation.url.toString())}&type=${contentType}`;
+  const sourceUrl = `http://127.0.0.1:${PORT}${sourcePath}`;
+  const releaseProbe = iosHlsProbes.acquire();
+  if (!releaseProbe) {
+    res.set('Retry-After', '2').status(503).json({ error: 'iPhone stream preparation capacity reached' });
+    return;
+  }
+
+  // Copy H.264/AAC sources instead of re-encoding them: a Pi encodes at about
+  // real time, so a transcoded session never catches up with a resume point.
+  let mediaModes: Awaited<ReturnType<typeof probeIosHlsMediaModes>>;
+  try {
+    mediaModes = await probeIosHlsMediaModes(sourceUrl);
+    if (iosHlsModesNeedRetry(mediaModes)) {
+      mediaModes = await probeIosHlsMediaModes(sourceUrl);
+    }
+  } finally {
+    releaseProbe();
+  }
+  if (req.aborted || res.destroyed) return;
+
+  // Another authorized request may have completed while this one was probing.
+  // Reuse it instead of launching duplicate FFmpeg work.
+  const sessionStartedDuringProbe = findReusableIosHlsSession(iosHlsSessions, sessionKey);
+  if (sessionStartedDuringProbe) {
+    const reusable = iosHlsSessions.get(sessionStartedDuringProbe)!;
+    reusable.expiresAt = Date.now() + IOS_HLS_IDLE_TIMEOUT_MS;
+    const params = new URLSearchParams({
+      url: requestValidation.url.toString(),
+      type: contentType,
+      session: sessionStartedDuringProbe,
+    });
+    if (requestedStart) params.set('start', String(requestedStart));
+    res.redirect(302, `/api/ios-hls/${encodeURIComponent(channelId)}/index.m3u8?${params.toString()}`);
+    return;
+  }
+
   const sessionId = randomUUID();
   const directory = path.join(IOS_HLS_ROOT, sessionId);
   const playlistPath = path.join(directory, 'index.m3u8');
+  // Re-evaluate the cap after the asynchronous probe so concurrent starts
+  // cannot create more than the configured number of FFmpeg sessions.
   for (const staleSessionId of selectIosHlsSessionsToRetire(iosHlsSessions, channelId, MAX_IOS_HLS_SESSIONS)) {
     retireIosHlsSession(staleSessionId, 'superseded');
   }
   fs.mkdirSync(directory, { recursive: true });
-  const sourcePath = `/api/stream/${encodeURIComponent(sourceChannelId)}?url=${encodeURIComponent(sourceValidation.url.toString())}&type=${contentType}`;
-  const sourceUrl = `http://127.0.0.1:${PORT}${sourcePath}`;
-  const ff = spawn('ffmpeg', buildIosHlsArgs(sourceUrl, playlistPath, startSeconds || 0), { stdio: ['ignore', 'ignore', 'pipe'] });
+  logger.info(`iOS HLS[${channelId}]: video mode=${mediaModes.video}, audio mode=${mediaModes.audio}`);
+  const ff = spawn(
+    'ffmpeg',
+    buildIosHlsArgs(sourceUrl, playlistPath, requestedStart, mediaModes.video, mediaModes.audio),
+    { stdio: ['ignore', 'ignore', 'pipe'] },
+  );
   iosHlsSessions.set(sessionId, {
     directory,
     process: ff,

@@ -32,6 +32,8 @@ import {
   nextCaptureAttemptIndex,
   parseConfiguredConcurrency,
   shouldRetryCapture,
+  captureRetryDelayMs,
+  nextQuickCaptureFailures,
 } from './recorder-media.js';
 import type { FinalizationProgress } from './recorder-media.js';
 import { startSegmentedRecording, stopSegmentedRecording, cancelSegmentedRecording,
@@ -40,7 +42,6 @@ import { startSegmentedRecording, stopSegmentedRecording, cancelSegmentedRecordi
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_RECORDINGS_DIR = path.join(__dirname, '..', 'data', 'recordings');
 const DEFAULT_MAX_CONCURRENT = 3;
-const RETRY_DELAY_MS = 10_000;
 const FORCE_KILL_DELAY_MS = 10_000;
 
 function getRecordingsDir(): string {
@@ -50,7 +51,9 @@ function getRecordingsDir(): string {
 interface ActiveRecording {
   id: string;
   process: ChildProcess;
+  /** Back-to-back captures that failed before becoming healthy. */
   retryCount: number;
+  startedAt: number;
   stopping: boolean;
   resumeAfterStop: boolean;
   exitCode: number | null;
@@ -469,13 +472,13 @@ function finishStartingRecording(id: string, starting: StartingRecording): void 
   starting.resolve();
 }
 
-function scheduleRetry(id: string): void {
+function scheduleRetry(id: string, delayMs: number): void {
   const previous = retryTimers.get(id);
   if (previous) clearTimeout(previous);
   const timer = setTimeout(() => {
     retryTimers.delete(id);
     void startRecording(id);
-  }, RETRY_DELAY_MS);
+  }, delayMs);
   timer.unref?.();
   retryTimers.set(id, timer);
 }
@@ -613,11 +616,13 @@ export async function startRecording(id: string): Promise<void> {
     }
 
     const endedAt = Date.now();
-    if (shouldRetryCapture(active.retryCount, endedAt, recording.end_time, active.exitCode)) {
-      retryCounts.set(id, active.retryCount + 1);
+    const quickFailures = nextQuickCaptureFailures(active.retryCount, endedAt - active.startedAt);
+    const delayMs = captureRetryDelayMs(quickFailures);
+    if (shouldRetryCapture(endedAt, recording.end_time, delayMs)) {
+      retryCounts.set(id, quickFailures);
       updateRecordingIfStatus(id, ['recording'], { status: 'scheduled', error: null });
-      logger.warn(`Recording ${id}: ffmpeg exited early with code ${String(active.exitCode)}, retrying once in 10s...`);
-      scheduleRetry(id);
+      logger.warn(`Recording ${id}: ffmpeg exited early with code ${String(active.exitCode)} after ${Math.round((endedAt - active.startedAt) / 1000)}s, reconnecting in ${delayMs / 1000}s`);
+      scheduleRetry(id, delayMs);
       return;
     }
 
@@ -632,6 +637,7 @@ export async function startRecording(id: string): Promise<void> {
     id,
     process: ffmpeg,
     retryCount,
+    startedAt: Date.now(),
     stopping: false,
     resumeAfterStop: false,
     exitCode: null,

@@ -326,6 +326,30 @@ describe('recorder lifecycle integration', () => {
     expect(state.records.get('r1')?.analysis_state).toBe('not_requested');
   });
 
+  it('keeps reconnecting after repeated provider drops with backoff until the window ends', async () => {
+    state.records.set('r1', recording({ end_time: 120_000 }));
+    const recorder = await import('./recorder.js');
+
+    await recorder.startRecording('r1');
+    finishCapture(0, 0);
+    await flush();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(state.spawned).toHaveLength(2);
+
+    // A second quick drop backs off to 20 s instead of giving up.
+    finishCapture(1, 0);
+    await flush();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(state.spawned).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(state.spawned).toHaveLength(3);
+    expect(state.spawned[2].args.at(-1)).toMatch(/r1\.segment-000002\.ts\.part$/);
+    expect(state.records.get('r1')?.status).toBe('recording');
+
+    await recorder.stopRecording('r1');
+    expect(state.records.get('r1')?.status).toBe('completed');
+  });
+
   it('does not let an old rule revision advance the edited rule cadence', async () => {
     state.rules.set('rule-1', rule({ rule_revision: 2, cadence_last_success_start: 500 }));
     state.records.set('r1', recording({
