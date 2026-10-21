@@ -198,7 +198,11 @@ export function buildIosHlsArgs(
   const audioArgs = copyMedia
     ? ['-c:a', 'copy']
     : ['-c:a', 'aac', '-b:a', '160k', '-ac', '2'];
-  const pacingArgs = ['-readrate', '1.1', '-readrate_initial_burst', '30'];
+  // Apple's player treats this growing playlist as live and starts about three
+  // target durations behind its end, so its buffer is only the lead FFmpeg
+  // builds. A two-minute burst then 1.25x keeps that lead growing through
+  // provider hiccups and high-bitrate scenes; 1.1x left ~30 s and stalled.
+  const pacingArgs = ['-readrate', '1.25', '-readrate_initial_burst', '120'];
 
   return [
     '-hide_banner', '-loglevel', 'warning',
@@ -215,7 +219,9 @@ export function buildIosHlsArgs(
     '-sn',
     '-f', 'hls',
     '-hls_time', '4',
-    '-hls_list_size', '300',
+    // ~67 min of 4-7 s segments: the lead grows by 0.25 s per second watched,
+    // and the viewer's position must stay inside the window (<= ~3 GB at 6 Mbps).
+    '-hls_list_size', '900',
     '-hls_delete_threshold', '30',
     '-hls_segment_type', 'fmp4',
     '-hls_flags', 'independent_segments+delete_segments',
