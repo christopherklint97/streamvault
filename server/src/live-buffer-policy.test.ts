@@ -124,3 +124,19 @@ it('still returns retryable 503 for genuine cold playlist and authorization warm
   expect(buffer.activeCount).toBe(1);
   expect(unsafe).not.toHaveBeenCalled();
 }, 10000);
+it('releases provider connections held outside the buffer before a player claims a channel', async () => {
+  const onClaim = vi.fn();
+  const app = express();
+  app.use('/api/live', createLiveRouter(buffer, id => id === 'channel-a' ? source : null, { onClaim }));
+  const claimServer = createServer(app);
+  await new Promise<void>(resolve => claimServer.listen(0, '127.0.0.1', resolve));
+  const address = claimServer.address();
+  if (!address || typeof address === 'string') throw Error('no listener');
+  try {
+    await publish(0, '2');
+    await fetch(`http://127.0.0.1:${address.port}/api/live/channel-a/authorize`, auth);
+    expect(onClaim).toHaveBeenCalledExactlyOnceWith('channel-a');
+  } finally {
+    await new Promise<void>(resolve => { claimServer.close(() => resolve()); claimServer.closeAllConnections(); });
+  }
+});

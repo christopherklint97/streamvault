@@ -258,8 +258,27 @@ const liveSource = (id: string) => {
   return channel?.content_type === 'livetv' && channel.url
     ? `http://127.0.0.1:${PORT}/api/stream/${encodeURIComponent(id)}?subs=1` : null;
 };
-app.use('/api/live', createLiveRouter(liveBuffer, liveSource));
-app.use('/api/live-compatible', createLiveRouter(compatibleLiveBuffer, liveSource, { basePath: '/api/live-compatible' }));
+// The provider allows one connection: a stream the viewer left keeps evicting
+// the new one, and every reconnect replays already-seen video. Starting any
+// playback therefore closes playback upstreams held elsewhere (recordings excluded).
+function retireRunningIosHlsSessions(reason: string): void {
+  for (const [sessionId, session] of iosHlsSessions) {
+    if (session.state === 'running') retireIosHlsSession(sessionId, reason);
+  }
+}
+app.use('/api/live', createLiveRouter(liveBuffer, liveSource, {
+  onClaim: async () => {
+    retireRunningIosHlsSessions('live-started');
+    await compatibleLiveBuffer.releaseAll();
+  },
+}));
+app.use('/api/live-compatible', createLiveRouter(compatibleLiveBuffer, liveSource, {
+  basePath: '/api/live-compatible',
+  onClaim: async () => {
+    retireRunningIosHlsSessions('live-started');
+    await liveBuffer.releaseAll();
+  },
+}));
 
 // Request logging; include completion timing only when a request is slow.
 app.use((req, res, next) => {
@@ -1353,6 +1372,11 @@ app.get('/api/ios-hls/:channelId/index.m3u8', async (req, res) => {
 
   const sourcePath = `/api/stream/${encodeURIComponent(sourceChannelId)}?url=${encodeURIComponent(sourceValidation.url.toString())}&type=${contentType}`;
   const sourceUrl = `http://127.0.0.1:${PORT}${sourcePath}`;
+  // This session is about to take the single provider connection (the probe
+  // already opens it): close live channels and any session the viewer left,
+  // including an earlier start point of this title after a seek.
+  retireRunningIosHlsSessions('vod-started');
+  await Promise.all([liveBuffer.releaseAll(), compatibleLiveBuffer.releaseAll()]);
   const releaseProbe = iosHlsProbes.acquire();
   if (!releaseProbe) {
     res.set('Retry-After', '2').status(503).json({ error: 'iPhone stream preparation capacity reached' });
