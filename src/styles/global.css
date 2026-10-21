@@ -28,21 +28,22 @@
   --color-epg-purple: #7c4dff;
   --color-epg-purple-light: #b388ff;
 
-  --font-size-11: 11px;
-  --font-size-12: 12px;
-  --font-size-13: 13px;
-  --font-size-15: 15px;
-  --font-size-17: 17px;
-  --font-size-18: 18px;
-  --font-size-20: 20px;
-  --font-size-22: 22px;
-  --font-size-24: 24px;
-  --font-size-26: 26px;
-  --font-size-28: 28px;
-  --font-size-32: 32px;
-  --font-size-36: 36px;
-  --font-size-48: 48px;
-  --font-size-64: 64px;
+  --text-11: 11px;
+  --text-12: 12px;
+  --text-13: 13px;
+  --text-14: 14px;
+  --text-15: 15px;
+  --text-17: 17px;
+  --text-18: 18px;
+  --text-20: 20px;
+  --text-22: 22px;
+  --text-24: 24px;
+  --text-26: 26px;
+  --text-28: 28px;
+  --text-32: 32px;
+  --text-36: 36px;
+  --text-48: 48px;
+  --text-64: 64px;
 
   --width-tv: 1920px;
   --width-sidebar: 68px;

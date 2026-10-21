@@ -2,19 +2,24 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { runProcess, type ProcessResult, type RunProcessOptions } from './recorder-media.js';
+import { H264_AUD_FIRST_ARGS, probeVideoCodec } from './h264-access-units.js';
+
+/** Bump to rebuild packages made by older settings (3: H.264 delimiter-first access units). */
+export const RECORDING_VOD_PACKAGE_VERSION = 3;
 
 /** The published package is beside the master and is removed with its recording. */
 export function vodHlsDirectory(masterPath: string): string {
   return masterPath.replace(/\.ts$/, '.hls');
 }
 
-export function buildRecordingVodHlsArgs(masterPath: string, playlistPath: string): string[] {
+export function buildRecordingVodHlsArgs(masterPath: string, playlistPath: string, h264 = false): string[] {
   return [
     '-hide_banner', '-loglevel', 'warning', '-nostdin',
     '-fflags', '+genpts+discardcorrupt',
     // Stream-copy faster than playback but bound USB reads/writes while the app is in use.
     '-readrate', '12', '-i', masterPath,
     '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-sn',
+    ...(h264 ? H264_AUD_FIRST_ARGS : []),
     '-f', 'hls', '-hls_time', '6', '-hls_list_size', '0',
     '-hls_playlist_type', 'vod', '-hls_flags', 'independent_segments+temp_file',
     '-hls_segment_filename', path.join(path.dirname(playlistPath), 'segment-%05d.ts'),
@@ -33,8 +38,8 @@ async function inspectPackage(masterPath: string, directory: string): Promise<'m
     ]);
     const fingerprint: unknown = JSON.parse(source);
     if (!fingerprint || typeof fingerprint !== 'object') return 'missing';
-    const { size, mtimeMs, durationSeconds } = fingerprint as { size?: unknown; mtimeMs?: unknown; durationSeconds?: unknown };
-    if (size !== master.size || mtimeMs !== master.mtimeMs ||
+    const { size, mtimeMs, durationSeconds, version } = fingerprint as { size?: unknown; mtimeMs?: unknown; durationSeconds?: unknown; version?: unknown };
+    if (version !== RECORDING_VOD_PACKAGE_VERSION || size !== master.size || mtimeMs !== master.mtimeMs ||
         typeof durationSeconds !== 'number' || !Number.isFinite(durationSeconds) || durationSeconds <= 0 ||
         !manifest.startsWith('#EXTM3U') || !manifest.includes('#EXT-X-PLAYLIST-TYPE:VOD') ||
         !manifest.trimEnd().endsWith('#EXT-X-ENDLIST')) return 'missing';
@@ -138,7 +143,8 @@ export class RecordingVodHlsPreparer {
       }, 5_000);
       let result: ProcessResult;
       try {
-        result = await this.run('ffmpeg', buildRecordingVodHlsArgs(masterPath, path.join(staging, 'index.m3u8')), {
+        const h264 = await probeVideoCodec(masterPath) === 'h264';
+        result = await this.run('ffmpeg', buildRecordingVodHlsArgs(masterPath, path.join(staging, 'index.m3u8'), h264), {
           signal, timeoutMs: 90 * 60_000, backgroundPriority: true, outputLimitBytes: 2048,
         });
       } finally { clearInterval(spaceTimer); }
@@ -147,7 +153,7 @@ export class RecordingVodHlsPreparer {
       if (result.code !== 0) throw new Error(`Recording VOD HLS failed: ${result.stderr.slice(-512)}`);
       const after = await fs.stat(masterPath);
       if (signal.aborted || before.size !== after.size || before.mtimeMs !== after.mtimeMs) return;
-      await fs.writeFile(path.join(staging, 'source.json'), JSON.stringify({ size: before.size, mtimeMs: before.mtimeMs, durationSeconds }));
+      await fs.writeFile(path.join(staging, 'source.json'), JSON.stringify({ version: RECORDING_VOD_PACKAGE_VERSION, size: before.size, mtimeMs: before.mtimeMs, durationSeconds }));
       if (await inspectPackage(masterPath, staging) !== 'ready' || signal.aborted) {
         throw new Error('Recording VOD HLS output is incomplete');
       }

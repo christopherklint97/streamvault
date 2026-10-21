@@ -15,7 +15,7 @@ import time
 from urllib.parse import urlsplit
 
 import av
-from live_packet_stitch import Stitcher, UnsafeSeam, ts_packets
+from live_packet_stitch import KeyframeStart, Stitcher, UnsafeSeam, ts_packets
 
 # Long-GOP sources can deliver media in bursts. Keep socket waits below the
 # owner's unchanged 15-second source-silence watchdog, not below a normal GOP.
@@ -178,13 +178,17 @@ class Worker:
                     # media while the HTTP source only supplies null packets.
                     '-analyzeduration', '1000000', '-probesize', '1048576',
                     '-f', 'mpegts', '-i', 'pipe:0', '-map', '0:v:0', '-map', '0:a:0',
-                    '-c', 'copy', '-f', 'hls', '-hls_time', '2', '-hls_list_size', '64',
+                    # Delimiter-first access units: Apple players will not start
+                    # video on keyframes with the AUD after SPS/PPS (see h264-access-units.ts).
+                    '-c', 'copy', '-bsf:v', 'h264_metadata=aud=remove,h264_metadata=aud=insert',
+                    '-f', 'hls', '-hls_time', '2', '-hls_list_size', '64',
                     '-hls_flags', 'delete_segments+temp_file+independent_segments+omit_endlist',
                     '-hls_segment_filename', str(self.directory / '%d.ts'), str(self.directory / 'index.m3u8')]
             child = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             with self.lock:
                 self.child = child
             stitcher = Stitcher()
+            start = KeyframeStart()
             with av.open(child.stdin, 'w', format='mpegts', options={'mpegts_flags': '+resend_headers'}) as mux:
                 mapped = None
                 # Keep one PyAV mux and one FFmpeg mux for this channel's lifetime.
@@ -205,10 +209,11 @@ class Worker:
                             for packet in stitcher.feed(chain((first,), packets)):
                                 if self.stop.is_set() or self.failure:
                                     raise UnsafeSeam('worker stopped')
-                                native = packet.native
-                                native.pts, native.dts = packet.pts, packet.dts
-                                native.stream = mapped[packet.kind]
-                                mux.mux(native)
+                                for admitted in start.admit(packet):
+                                    native = admitted.native
+                                    native.pts, native.dts = admitted.pts, admitted.dts
+                                    native.stream = mapped[admitted.kind]
+                                    mux.mux(native)
                         # Clean EOF can bisect a TS packet. A chunked socket
                         # timeout is NOT clean EOF, but after a substantial
                         # body may be retried only through the same strict A/V
@@ -235,10 +240,11 @@ class Worker:
                 if self.failure or self.stop.is_set():
                     raise UnsafeSeam('worker stopped')
                 for packet in stitcher.finish():
-                    native = packet.native
-                    native.pts, native.dts = packet.pts, packet.dts
-                    native.stream = mapped[packet.kind]
-                    mux.mux(native)
+                    for admitted in start.admit(packet):
+                        native = admitted.native
+                        native.pts, native.dts = admitted.pts, admitted.dts
+                        native.stream = mapped[admitted.kind]
+                        mux.mux(native)
             child.stdin.close()
             if child.wait(timeout=10) != 0:
                 raise UnsafeSeam('HLS mux failed')

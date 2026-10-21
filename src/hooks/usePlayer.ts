@@ -37,6 +37,7 @@ import { useRecordingStore } from '../stores/recordingStore';
 import { attachFiniteHls } from '../services/finiteHls';
 import { attachLiveHls, prefersNativeLiveHls } from '../services/liveHls';
 import { getAuthorizedLiveHlsUrl } from '../services/livePlayback';
+import { describeBuffered, liveGapJumpTarget } from '../utils/live-gap';
 import { ApiError, getBackendRequestScope } from '../services/api';
 import {
   getAvPlayClockReading,
@@ -145,6 +146,21 @@ function beginPlaybackSeekScope(): AbortSignal | undefined {
   // Tizen 5 (Chromium 63) predates AbortController; generation checks remain.
   playbackSeekController = typeof AbortController === 'undefined' ? null : new AbortController();
   return playbackSeekController?.signal;
+}
+
+/**
+ * Field check for A/V start sync. A stream that starts audio before its first
+ * video keyframe shows that future frame frozen while audio plays; the first
+ * presented frame then sits ahead of the playback clock.
+ */
+function reportFirstFrameOffset(video: HTMLVideoElement, context: string): void {
+  if (typeof video.requestVideoFrameCallback !== 'function') return;
+  video.requestVideoFrameCallback((_now, frame) => {
+    const offset = frame.mediaTime - video.currentTime;
+    const message = `A/V first frame offset=${offset >= 0 ? '+' : ''}${offset.toFixed(2)}s after ${context} at=${video.currentTime.toFixed(1)}`;
+    if (Math.abs(offset) >= 0.25) log.warn(message);
+    else log.info(message);
+  });
 }
 
 function clearRecordingVodPoll(): void {
@@ -1178,6 +1194,7 @@ export function usePlayer(): {
         video.onprogress = signedLiveHlsStartup ? attemptPlay : null;
         video.oncanplaythrough = signedLiveHlsStartup ? attemptPlay : null;
         video.onseeked = () => {
+          if (isCurrentPlayback()) reportFirstFrameOffset(video, 'seek');
           if (signedLiveHlsStartup) attemptPlay();
           if (!channel.dvrHls || !isCurrentPlayback() || !Number.isFinite(video.currentTime)) return;
           // A backward seek resets the progress baseline; old high-water marks
@@ -1211,6 +1228,18 @@ export function usePlayer(): {
           // A completed transport can still have playable MSE data. Reconnect
           // only when it is actually exhausted, not while it is buffered.
           if (pendingLiveEof) recoverDrainedLiveStream();
+          if (nativeLiveHls) {
+            // Step over a stuck discontinuity seam before the watchdog restarts.
+            const stuckAt = video.currentTime;
+            for (const delayMs of [2000, 5000]) {
+              setTimeout(() => {
+                if (!isCurrentPlayback() || video.paused || video.readyState >= 3 || video.currentTime > stuckAt + 0.5) return;
+                const target = liveGapJumpTarget(video.buffered, video.currentTime);
+                log.warn(`Native live HLS stuck at=${video.currentTime.toFixed(1)} buffered=${describeBuffered(video.buffered)} jump=${target?.toFixed(1) ?? 'none'}`);
+                if (target !== null) video.currentTime = target;
+              }, delayMs);
+            }
+          }
           // Delay showing loading spinner to avoid flashing during brief rebuffers
           if (bgBufferTimer) clearTimeout(bgBufferTimer);
           bgBufferTimer = setTimeout(() => {
@@ -1220,6 +1249,7 @@ export function usePlayer(): {
         video.onplaying = () => {
           if (!isCurrentPlayback() || ['error', 'awaiting-gesture'].includes(usePlayerStore.getState().status)) return;
           log.info('HTML5 event: playing');
+          reportFirstFrameOffset(video, 'playing');
           if (bgBufferTimer) { clearTimeout(bgBufferTimer); bgBufferTimer = null; }
           setStatus('playing');
           setupMediaSession(channel.name);
@@ -1677,7 +1707,13 @@ export function usePlayer(): {
           );
         }
       };
-      if (appleRecordingHls && channel.recordingId) {
+      // Seek inside an already loaded finite VOD. Reloading it would restart
+      // the native player at 0 and seek again after metadata for every scrub.
+      const loadedRecordingVod = appleRecordingHls && channel.recordingVodReady && !video.error &&
+        video.dataset.streamOffset === '0' && Number.isFinite(video.duration) && video.duration > 0;
+      if (loadedRecordingVod) {
+        video.currentTime = Math.min(targetTime, Math.max(0, video.duration - 1));
+      } else if (appleRecordingHls && channel.recordingId) {
         const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
         const recordingId = channel.recordingId;
         const seekGeneration = html5PlaybackGeneration;

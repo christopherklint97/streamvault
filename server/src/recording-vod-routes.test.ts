@@ -6,7 +6,7 @@ import express from 'express';
 import type { Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { hasActiveRecordingVodViewer, registerRecordingVodRoutes } from './recording-vod-routes.js';
-import { vodHlsDirectory } from './recording-vod-hls';
+import { RECORDING_VOD_PACKAGE_VERSION, vodHlsDirectory } from './recording-vod-hls';
 
 const roots: string[] = [];
 const servers: Server[] = [];
@@ -23,7 +23,7 @@ function fixture(ready: boolean): string {
     fs.writeFileSync(path.join(dir, 'segment-00000.ts'), 'segment');
     fs.writeFileSync(path.join(dir, 'index.m3u8'), '#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:4,\nsegment-00000.ts\n#EXT-X-ENDLIST\n');
     const stat = fs.statSync(master);
-    fs.writeFileSync(path.join(dir, 'source.json'), JSON.stringify({ size: stat.size, mtimeMs: stat.mtimeMs, durationSeconds: 4 }));
+    fs.writeFileSync(path.join(dir, 'source.json'), JSON.stringify({ version: RECORDING_VOD_PACKAGE_VERSION, size: stat.size, mtimeMs: stat.mtimeMs, durationSeconds: 4 }));
   }
   return master;
 }

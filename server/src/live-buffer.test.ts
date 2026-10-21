@@ -5,7 +5,26 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { createLiveBuffer, createLiveRouter, newStageIndices, LIVE_HLS_MAX_WINDOW_SEGMENTS } from './live-buffer.js';
+import { createLiveBuffer, createLiveRouter, leadingAudioCut, newStageIndices, LIVE_HLS_MAX_WINDOW_SEGMENTS } from './live-buffer.js';
+
+it('cuts a mid-GOP join at the first video keyframe so audio cannot run ahead of a frozen frame', () => {
+  const streams = [{ index: 0, codec_type: 'video' }, { index: 1, codec_type: 'audio' }];
+  const join = {
+    streams,
+    packets: [
+      { stream_index: 1, pts_time: '1.400000', dts_time: '1.400000', flags: 'K__' },
+      { stream_index: 1, pts_time: '1.421333', dts_time: '1.421333', flags: 'K__' },
+      { stream_index: 0, pts_time: '2.442000', dts_time: '2.375000', flags: 'K__' },
+      { stream_index: 1, pts_time: '2.381000', dts_time: '2.381000', flags: 'K__' },
+      { stream_index: 0, pts_time: '2.475000', dts_time: '2.408000', flags: '___' },
+    ],
+  };
+  expect(leadingAudioCut(join)).toEqual({ at: 2.374, trimmedSeconds: expect.closeTo(0.974, 6) });
+  // Already aligned (a keyframe-led segment), audio-only, and keyframe-less stages are left alone.
+  expect(leadingAudioCut({ streams, packets: join.packets.slice(2) })).toBeNull();
+  expect(leadingAudioCut({ streams: [streams[1]], packets: [{ stream_index: 1, pts_time: '1.4', flags: 'K__' }] })).toBeNull();
+  expect(leadingAudioCut({ streams, packets: [join.packets[0], join.packets[4]] })).toBeNull();
+});
 
 it('rejects missing FFmpeg stage segments and ignores already-published windows', () => {
   expect(newStageIndices([0, 1, 2], -1)).toEqual([0, 1, 2]);

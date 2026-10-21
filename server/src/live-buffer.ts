@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isAuthorizedRequest } from './security.js';
+import { H264_AUD_FIRST_ARGS, isUnsupportedBitstreamFilterError } from './h264-access-units.js';
 
 interface Segment { id: number; name: string; duration: number; bytes: number; discontinuity: boolean; }
 const probeFile = promisify(execFile);
@@ -16,14 +17,23 @@ export const packetAwareLiveEnabled = (value: string | undefined): boolean => va
 export const LIVE_HLS_MAX_SEGMENT_SECONDS = 12;
 export const LIVE_RECONNECT_ACCESS_MS = 20_000;
 export const LIVE_SWITCH_IDLE_MS = 15_000;
-export const LIVE_HLS_MIN_WINDOW_SECONDS = 3 * LIVE_HLS_MAX_SEGMENT_SECONDS;
+// AVPlayer starts three target durations behind the live edge. Keep two more
+// behind that start point so a rebuffer does not push the player off the
+// trailing edge onto segments that were already deleted.
+export const LIVE_HLS_MIN_WINDOW_SECONDS = 5 * LIVE_HLS_MAX_SEGMENT_SECONDS;
+// Older native players (iOS 12) start a few segments from the live edge yet
+// reload only once per target duration, draining their buffer every cycle.
+// EXT-X-START pins their start to the RFC 8216 three-target-duration holdback.
+export const LIVE_HLS_NATIVE_START_OFFSET_SECONDS = 3 * LIVE_HLS_MAX_SEGMENT_SECONDS;
 // Bounds the manifest when a source emits tiny segments.
-export const LIVE_HLS_MAX_WINDOW_SEGMENTS = 24;
+export const LIVE_HLS_MAX_WINDOW_SEGMENTS = 40;
 interface Channel {
   id: string; dir: string; epoch: string; segments: Segment[]; bytes: number; sequence: number; discontinuitySequence: number;
   lastAccess: number; lastPublish: number; supersededAt?: number; worker?: ChildProcess; working?: string;
   generation: number; lastStageIndex: number; timer?: ReturnType<typeof setInterval>; terminating: boolean; retirement?: Promise<void>;
   inspecting?: boolean; publishTask?: Promise<void>; stageValidated?: boolean;
+  /** The source video is not H.264, so the delimiter rewrite is skipped. */
+  plainVideo?: boolean;
 }
 export interface LiveBufferOptions {
   root?: string; maxChannels?: number; maxBytesPerChannel?: number; maxSegmentBytes?: number; maxReaders?: number;
@@ -32,6 +42,7 @@ export interface LiveBufferOptions {
   unsafeMarkerStat?: (file: string) => Promise<void>;
   onUnsafe?: (reason: string, id?: string) => void; // fixed, non-URL diagnostic categories
   packetAware?: boolean;
+  nativeStartOffset?: boolean; // advertise EXT-X-START for native players
 }
 
 export function newStageIndices(indices: number[], last: number): number[] | null {
@@ -48,6 +59,51 @@ export function newStageIndices(indices: number[], last: number): number[] | nul
 }
 
 /** One FFmpeg ingest per channel, never one per viewer. No archive files are touched. */
+interface StageProbe {
+  streams?: { index: number; codec_type: string }[];
+  packets?: { stream_index: number; pts_time?: string; dts_time?: string; flags?: string }[];
+}
+export interface LeadingAudioCut { at: number; trimmedSeconds: number }
+
+/**
+ * A stream copy that joins a source mid-GOP keeps audio from the join but video
+ * only from the first keyframe, so players hold that future frame while audio
+ * runs until the clock catches up. Cut the first segment of each generation at
+ * the keyframe's decode time when audio starts noticeably earlier.
+ */
+export function leadingAudioCut(probe: StageProbe, toleranceSeconds = 0.1): LeadingAudioCut | null {
+  const kinds = new Map((probe.streams ?? []).map(stream => [stream.index, stream.codec_type]));
+  let start = Infinity;
+  let firstAudio = Infinity;
+  let keyframeDts: number | null = null;
+  for (const packet of probe.packets ?? []) {
+    const pts = Number(packet.pts_time);
+    const dts = Number(packet.dts_time ?? packet.pts_time);
+    if (!Number.isFinite(pts)) continue;
+    start = Math.min(start, pts);
+    const kind = kinds.get(packet.stream_index);
+    if (kind === 'audio') firstAudio = Math.min(firstAudio, pts);
+    if (kind === 'video' && keyframeDts === null && packet.flags?.startsWith('K') && Number.isFinite(dts)) keyframeDts = dts;
+  }
+  if (keyframeDts === null || !(firstAudio < keyframeDts - toleranceSeconds)) return null;
+  // A millisecond early so float rounding can never trim the keyframe itself.
+  const at = Number((keyframeDts - 0.001).toFixed(3));
+  return { at, trimmedSeconds: Math.max(0, at - start) };
+}
+
+/** Remux one bounded local segment from `cut.at`, keeping its original timestamps. */
+async function trimLeadingAudio(stage: string, cut: LeadingAudioCut): Promise<Buffer> {
+  const output = `${stage}.trim.ts`;
+  try {
+    await probeFile('ffmpeg', ['-hide_banner', '-v', 'error', '-nostdin', '-copyts', '-i', stage,
+      '-ss', String(cut.at), '-output_ts_offset', String(cut.at), '-map', '0', '-c', 'copy',
+      '-muxdelay', '0', '-muxpreload', '0', '-f', 'mpegts', '-y', output], { timeout: 5_000, maxBuffer: 64 * 1024 });
+    return await readFile(output);
+  } finally {
+    await rm(output, { force: true }).catch(() => {});
+  }
+}
+
 export function createLiveBuffer(options: LiveBufferOptions = {}) {
   const root = options.root ?? path.join(process.env.TMPDIR || tmpdir(), 'streamvault-live-buffer');
   const maxChannels = options.maxChannels ?? 4;
@@ -64,6 +120,7 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
   const removeChannelDir = options.removeChannelDir ?? (dir => rm(dir, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 }));
   const unsafeMarkerStat = options.unsafeMarkerStat ?? (async (file: string) => { await stat(file); });
   const packetAware = options.packetAware ?? false;
+  const nativeStartOffset = options.nativeStartOffset ?? false;
   if (![maxChannels, maxBytes, maxSegmentBytes, maxReaders, stallMs, maxUnpublishedMs, idleMs, retryMs, pollMs, segmentSeconds, minFreeBytes]
     .every(n => Number.isFinite(n) && n > 0) || maxBytes < maxSegmentBytes * 2 || !Number.isInteger(maxReaders)) throw Error('Invalid live buffer limits');
   const channels = new Map<string, Channel>();
@@ -167,21 +224,34 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       } catch { await retireUnsafe(ch); return; }
       if (ch.terminating) return;
       if (!data.length || data.length > maxSegmentBytes) { await retireUnsafe(ch); return; }
+      let publishedDuration = duration;
       if (!packetAware && !ch.stageValidated) {
         // MPEG-TS accepts unsupported subtitles (e.g. WebVTT) as anonymous
         // private data. Validate the first closed segment of each generation
         // before publishing anything; an unrecognizable track fails closed.
         // Probe only the bounded local file, never another upstream request.
+        let cut: LeadingAudioCut | null;
         try {
           const { stdout } = await probeFile('ffprobe', ['-v', 'error', '-show_entries',
-            'stream=codec_type', '-of', 'json', stage], { timeout: 2_000, maxBuffer: 64 * 1024 });
-          const streams = JSON.parse(stdout).streams as { codec_type: string }[];
+            'stream=index,codec_type:packet=stream_index,pts_time,dts_time,flags', '-of', 'json', stage],
+          { timeout: 2_000, maxBuffer: 2 * 1024 * 1024 });
+          const probe = JSON.parse(stdout) as StageProbe;
+          const streams = probe.streams;
           if (!Array.isArray(streams) || !streams.length ||
             streams.some(stream => !['video', 'audio', 'subtitle'].includes(stream.codec_type))) {
             await retireUnsafe(ch); return;
           }
+          cut = leadingAudioCut(probe);
         } catch { await retireUnsafe(ch); return; }
         if (ch.terminating) return;
+        if (cut) {
+          const trimmed = await trimLeadingAudio(stage, cut).catch(() => null);
+          if (ch.terminating) return;
+          if (trimmed?.length && trimmed.length <= maxSegmentBytes) {
+            data = trimmed;
+            publishedDuration = Math.max(0.001, duration - cut.trimmedSeconds);
+          }
+        }
         ch.stageValidated = true;
       }
       try {
@@ -195,15 +265,14 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       catch { void retireUnsafe(ch); return; }
       ch.lastStageIndex = index;
       const discontinuity = ch.segments.length > 0 && ch.segments.at(-1)!.name.split('-')[0] !== String(ch.generation);
-      ch.segments.push({ id, name: key, duration, bytes: data.length, discontinuity });
+      ch.segments.push({ id, name: key, duration: publishedDuration, bytes: data.length, discontinuity });
       ch.bytes += data.length;
       ch.lastPublish = Date.now();
       // The served copy is now independent of FFmpeg's rolling staging list.
       // Reclaim published stage bytes so a longer manifest can absorb bursts
       // without retaining an unbounded second copy of the media.
       await rm(stage, { force: true }).catch(() => {});
-      // RFC 8216 6.2.2: a live playlist must stay at least three target
-      // durations long; iOS AVPlayer misbehaves on a shorter window.
+      // RFC 8216 6.2.2 requires three target durations; see LIVE_HLS_MIN_WINDOW_SECONDS.
       const windowSeconds = () => ch!.segments.reduce((sum, seg) => sum + seg.duration, 0);
       while (ch.segments.length > 1 && (ch.bytes > maxBytes || ch.segments.length > LIVE_HLS_MAX_WINDOW_SEGMENTS ||
         windowSeconds() - ch.segments[0].duration >= LIVE_HLS_MIN_WINDOW_SECONDS)) {
@@ -288,7 +357,8 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     ch.working = working;
     ch.lastPublish = Date.now();
     const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-i', url,
-      '-map', '0:v?', '-map', '0:a?', '-map', '0:s?', '-c', 'copy', '-f', 'segment',
+      '-map', '0:v?', '-map', '0:a?', '-map', '0:s?', '-c', 'copy',
+      ...(ch.plainVideo ? [] : H264_AUD_FIRST_ARGS), '-f', 'segment',
       // HLS's subtitle sidecar muxer only accepts WebVTT; MPEG-TS segments
       // preserve native DVB subtitles. The list names only closed segments;
       // publication builds its own bounded live playlist and reclaims files.
@@ -303,9 +373,13 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       ? spawn('/usr/bin/python3', [path.join(path.dirname(fileURLToPath(import.meta.url)), 'live_packet_worker.py'),
         '--source', url, '--directory', working, '--disk-bytes', String(maxBytes + maxSegmentBytes * 4)],
         { stdio: ['ignore', 'ignore', 'ignore'] })
-      : spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'ignore'] });
+      : spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
     ch.worker = worker;
     worker.on('error', () => {});
+    // Kept in memory only to recognise a non-H.264 source; never logged
+    // because FFmpeg messages can contain upstream URLs.
+    let stderrTail = '';
+    worker.stderr?.on('data', (chunk: Buffer) => { stderrTail = (stderrTail + chunk.toString()).slice(-4096); });
     worker.once('close', () => {
       void (async () => {
         if (ch.terminating || generation !== ch.generation) return;
@@ -318,6 +392,8 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
           if (!retryable) markUnsafe(ch.id);
           await retire(ch); return;
         }
+        // Relaunch without the H.264-only delimiter rewrite for other codecs.
+        if (!ch.plainVideo && isUnsupportedBitstreamFilterError(stderrTail)) ch.plainVideo = true;
         await publishInOrder(ch); // FFmpeg may have finalized its last segment at EOF.
         ch.working = undefined;
         ch.worker = undefined;
@@ -385,6 +461,7 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       if (!ch || !ch.segments.length) return null;
       const rows = ['#EXTM3U', '#EXT-X-VERSION:3', `#EXT-X-TARGETDURATION:${LIVE_HLS_MAX_SEGMENT_SECONDS}`,
         `#EXT-X-MEDIA-SEQUENCE:${ch.segments[0].id}`, `#EXT-X-DISCONTINUITY-SEQUENCE:${ch.discontinuitySequence}`];
+      if (nativeStartOffset) rows.push(`#EXT-X-START:TIME-OFFSET=-${LIVE_HLS_NATIVE_START_OFFSET_SECONDS}`);
       for (const seg of ch.segments) {
         if (seg.discontinuity) rows.push('#EXT-X-DISCONTINUITY');
         rows.push(`#EXTINF:${seg.duration.toFixed(3)},`, `segment/${seg.id}.ts?epoch=${ch.epoch}${ticket ? `&ticket=${encodeURIComponent(ticket)}` : ''}`);
