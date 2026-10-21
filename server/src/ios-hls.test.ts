@@ -83,7 +83,7 @@ describe('buildIosHlsArgs', () => {
   it('probes the primary media metadata needed for safe copy-mode selection', () => {
     expect(buildIosHlsProbeArgs('http://source')).toEqual([
       '-v', 'error',
-      '-show_entries', 'stream=codec_type,codec_name,profile,level,pix_fmt,width,height,r_frame_rate,channels,bit_rate',
+      '-show_entries', 'stream=codec_type,codec_name,profile,level,pix_fmt,width,height,r_frame_rate,channels,bit_rate:stream_tags=BPS:format=bit_rate',
       '-of', 'json',
       'http://source',
     ]);
@@ -121,6 +121,17 @@ describe('buildIosHlsArgs', () => {
     expect(selectIosHlsVideoMode(JSON.stringify({ streams: [{ ...base, level: -99 }] }))).toBe('transcode');
     expect(selectIosHlsVideoMode(JSON.stringify({ streams: [{ ...base, level: 40, bit_rate: '6000001' }] }))).toBe('transcode');
     expect(selectIosHlsVideoMode(JSON.stringify({ streams: [{ ...base, level: 40, bit_rate: 'N/A' }] }))).toBe('transcode');
+  });
+
+  it('reads Matroska stream rates from the BPS tag or the container when bit_rate is missing', () => {
+    // An H.264 High@4.0 720p59.94 MKV episode reports bit_rate=N/A for its video stream.
+    const mkv = {
+      codec_type: 'video', codec_name: 'h264', profile: 'High', level: 40, pix_fmt: 'yuv420p',
+      width: 1280, height: 720, r_frame_rate: '19001/317', bit_rate: 'N/A',
+    };
+    expect(selectIosHlsVideoMode(JSON.stringify({ streams: [{ ...mkv, tags: { BPS: '5375372' } }] }))).toBe('copy');
+    expect(selectIosHlsVideoMode(JSON.stringify({ streams: [mkv], format: { bit_rate: '5507419' } }))).toBe('copy');
+    expect(selectIosHlsVideoMode(JSON.stringify({ streams: [{ ...mkv, tags: { BPS: '6000001' } }] }))).toBe('transcode');
   });
 
   it('paces and fully transcodes mixed compatibility instead of risking A/V skew', () => {
