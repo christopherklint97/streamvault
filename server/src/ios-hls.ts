@@ -24,15 +24,37 @@ interface IosHlsProbeStream {
   r_frame_rate?: unknown;
   channels?: unknown;
   bit_rate?: unknown;
+  tags?: { BPS?: unknown };
+}
+
+interface IosHlsProbeOutput {
+  streams: IosHlsProbeStream[];
+  formatBitRate: number;
+}
+
+function parseProbeOutput(probeOutput: string): IosHlsProbeOutput {
+  try {
+    const parsed = JSON.parse(probeOutput) as { streams?: unknown; format?: { bit_rate?: unknown } };
+    return {
+      streams: Array.isArray(parsed.streams) ? parsed.streams as IosHlsProbeStream[] : [],
+      formatBitRate: Number(parsed.format?.bit_rate),
+    };
+  } catch {
+    return { streams: [], formatBitRate: Number.NaN };
+  }
 }
 
 function parseProbeStreams(probeOutput: string): IosHlsProbeStream[] {
-  try {
-    const parsed = JSON.parse(probeOutput) as { streams?: unknown };
-    return Array.isArray(parsed.streams) ? parsed.streams as IosHlsProbeStream[] : [];
-  } catch {
-    return [];
+  return parseProbeOutput(probeOutput).streams;
+}
+
+/** Matroska leaves stream bit_rate empty; its BPS statistics tag, then the container rate, stand in. */
+function videoBitRate(video: IosHlsProbeStream, formatBitRate: number): number {
+  for (const candidate of [video.bit_rate, video.tags?.BPS, formatBitRate]) {
+    const value = Number(candidate);
+    if (Number.isFinite(value) && value > 0) return value;
   }
+  return Number.NaN;
 }
 
 function parseFrameRate(value: unknown): number | null {
@@ -48,14 +70,14 @@ function parseFrameRate(value: unknown): number | null {
 export function buildIosHlsProbeArgs(inputUrl: string): string[] {
   return [
     '-v', 'error',
-    '-show_entries', 'stream=codec_type,codec_name,profile,level,pix_fmt,width,height,r_frame_rate,channels,bit_rate',
+    '-show_entries', 'stream=codec_type,codec_name,profile,level,pix_fmt,width,height,r_frame_rate,channels,bit_rate:stream_tags=BPS:format=bit_rate',
     '-of', 'json',
     inputUrl,
   ];
 }
 
 export function selectIosHlsVideoMode(probeOutput: string): IosHlsVideoMode {
-  const streams = parseProbeStreams(probeOutput);
+  const { streams, formatBitRate } = parseProbeOutput(probeOutput);
   const video = streams.find(stream => stream.codec_type === 'video')
     ?? streams.find(stream => typeof stream.width === 'number' && typeof stream.height === 'number');
   if (!video) return 'transcode';
@@ -65,7 +87,7 @@ export function selectIosHlsVideoMode(probeOutput: string): IosHlsVideoMode {
   const width = typeof video.width === 'number' ? video.width : Number.NaN;
   const height = typeof video.height === 'number' ? video.height : Number.NaN;
   const frameRate = parseFrameRate(video.r_frame_rate);
-  const bitRate = Number(video.bit_rate);
+  const bitRate = videoBitRate(video, formatBitRate);
   const compatibleProfiles = new Set(['Baseline', 'Constrained Baseline', 'Main', 'High']);
   const dimensionsCompatible = Math.max(width, height) <= 1920 && Math.min(width, height) <= 1080;
 
