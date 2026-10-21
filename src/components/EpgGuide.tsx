@@ -475,7 +475,7 @@ export default function EpgGuide() {
                 return (
                   <div key={ch.id} className="flex border-b border-white/[0.04]" style={{ height: ROW_HEIGHT }}>
                     <button
-                      className="shrink-0 flex items-center px-2 lg:px-2.5 text-[12px] lg:text-[13px] leading-tight font-medium text-[#ccc] bg-[#0d0d16] overflow-hidden text-left sticky left-0 z-[1] hover:bg-[#151520]"
+                      className="shrink-0 flex items-center px-2 lg:px-2.5 text-12 lg:text-13 leading-tight font-medium text-[#ccc] bg-[#0d0d16] overflow-hidden text-left sticky left-0 z-[1] hover:bg-[#151520]"
                       style={{ width: CHANNEL_COL_WIDTH }}
                       onClick={() => handleChannelClick(ch)}
                       title={ch.name}
@@ -510,7 +510,7 @@ export default function EpgGuide() {
                             onClick={() => setSelectedProgram(isSelected ? null : p)}
                             title={`${p.title}\n${formatTime(new Date(p.start))} - ${formatTime(new Date(p.stop))}`}
                           >
-                            <span className="text-[12px] lg:text-[13px] leading-tight text-[#ddd] line-clamp-2 break-words">{p.title}</span>
+                            <span className="text-12 lg:text-13 leading-tight text-[#ddd] line-clamp-2 break-words">{p.title}</span>
                           </button>
                         );
                       })}
