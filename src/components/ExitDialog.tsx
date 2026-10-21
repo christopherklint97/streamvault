@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { KEY_CODES } from '../utils/keys';
 import { cn } from '../utils/cn';
+import { isFocusLost, recoverFocus } from '../utils/focus';
 
 export default function ExitDialog() {
   const showExitDialog = useAppStore((s) => s.showExitDialog);
@@ -24,7 +25,15 @@ export default function ExitDialog() {
   // syncs focusedButton state, no setState-in-effect required.
   useEffect(() => {
     if (!showExitDialog) return;
+    const previous = document.activeElement as HTMLElement | null;
     requestAnimationFrame(() => noRef.current?.focus());
+    // Closing unmounts the focused button; hand focus back so the remote keeps working.
+    return () => {
+      requestAnimationFrame(() => {
+        if (previous && previous !== document.body) previous.focus();
+        if (isFocusLost()) recoverFocus();
+      });
+    };
   }, [showExitDialog]);
 
   const handleKeyDown = useCallback(

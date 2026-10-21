@@ -17,6 +17,7 @@ import {
 } from '../services/channel-service';
 import { getCurrentProgram } from '../services/epg-service';
 import { KEY_CODES } from '../utils/keys';
+import { findNearest, type Direction } from '../utils/focus';
 import HorizontalRow from '../components/HorizontalRow';
 
 export default function Home() {
@@ -131,7 +132,7 @@ export default function Home() {
     series: contentTypeCounts['series'] || 0,
   }), [contentTypeCounts]);
 
-  // Simple key handler: ENTER clicks, UP/DOWN/LEFT/RIGHT navigate focusables
+  // ENTER clicks; arrows move spatially between focusables
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     const active = document.activeElement as HTMLElement;
     if (!active) return;
@@ -147,37 +148,19 @@ export default function Home() {
       return;
     }
 
-    // Simple sequential navigation through all focusables
+    const direction = ({
+      [KEY_CODES.UP]: 'up', [KEY_CODES.DOWN]: 'down', [KEY_CODES.LEFT]: 'left', [KEY_CODES.RIGHT]: 'right',
+    } as Record<number, Direction>)[e.keyCode];
     const container = containerRef.current;
-    if (!container) return;
-    const items = container.querySelectorAll('[data-focusable]') as NodeListOf<HTMLElement>;
-    if (items.length === 0) return;
+    if (!direction || !container) return;
 
-    let idx = -1;
-    for (let i = 0; i < items.length; i++) {
-      if (items[i] === active) { idx = i; break; }
-    }
-
-    let next: number;
-    if (e.keyCode === KEY_CODES.DOWN) {
-      next = Math.min(idx + 1, items.length - 1);
-    } else if (e.keyCode === KEY_CODES.UP) {
-      next = Math.max(idx - 1, 0);
-    } else if (e.keyCode === KEY_CODES.RIGHT) {
-      next = Math.min(idx + 1, items.length - 1);
-    } else if (e.keyCode === KEY_CODES.LEFT) {
-      if (idx <= 0) return; // bubble to sidebar
-      next = idx - 1;
-    } else {
-      return;
-    }
-
-    if (next !== idx && next >= 0) {
-      e.preventDefault();
-      e.stopPropagation();
-      items[next].focus({ preventScroll: true });
-      items[next].scrollIntoView({ block: 'nearest' });
-    }
+    // Spatial: Down moves to the next row, not the next card in the same row.
+    const next = findNearest(active, direction, container);
+    if (!next) return; // LEFT at the edge bubbles to the sidebar
+    e.preventDefault();
+    e.stopPropagation();
+    next.focus({ preventScroll: true });
+    next.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }, []);
 
   // Auto-focus first item on mount

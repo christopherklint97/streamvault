@@ -757,12 +757,20 @@ export default function Player() {
           else togglePlay();
           break;
         case KEY_CODES.PAUSE:
+        case KEY_CODES.PLAY_PAUSE:
           e.preventDefault();
           togglePlay();
           break;
         case KEY_CODES.STOP:
           e.preventDefault();
-          stop();
+          handleBack();
+          break;
+        case KEY_CODES.LEFT:
+        case KEY_CODES.RIGHT:
+          // Arrows scrub seekable playback unless a focused control owns them.
+          if (isLive || !hasDuration || e.target !== e.currentTarget) break;
+          e.preventDefault();
+          handleSkip(e.keyCode === KEY_CODES.RIGHT ? 10 : -10);
           break;
         case KEY_CODES.FF:
           e.preventDefault();
@@ -796,7 +804,7 @@ export default function Player() {
           break;
       }
     },
-    [chooseSubtitle, commercialUi.canUndo, handleSkip, handleUndoCommercialSkip, isLive, openSubtitleMenu, playerState.status, resetOSDTimer, retry, showSubtitleMenu, showToast, stop, subtitleMenuCursor, subtitleOptions, switchByOffset, togglePlay]
+    [chooseSubtitle, commercialUi.canUndo, handleBack, handleSkip, handleUndoCommercialSkip, hasDuration, isLive, openSubtitleMenu, playerState.status, resetOSDTimer, retry, showSubtitleMenu, showToast, subtitleMenuCursor, subtitleOptions, switchByOffset, togglePlay]
   );
 
   const handleChannelSelect = useCallback((ch: Channel) => {

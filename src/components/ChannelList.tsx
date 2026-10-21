@@ -8,6 +8,7 @@ import { KEY_CODES } from '../utils/keys';
 import { prefetchImages } from '../utils/image-pool';
 import { markKeyDown, markKeyRendered } from '../utils/perf-monitor';
 import { isMobile } from '../utils/platform';
+import { isFocusLost } from '../utils/focus';
 import { cn } from '../utils/cn';
 import ChannelCard from './ChannelCard';
 import { useFavoritesStore } from '../stores/favoritesStore';
@@ -21,7 +22,7 @@ const MOBILE = isMobile();
 const EMPTY_CATEGORIES: Category[] = [];
 const COLUMN_COUNT = MOBILE ? 3 : 5;
 const ROW_HEIGHT = MOBILE ? 210 : 295;
-const CONTAINER_HEIGHT = 900;
+const CONTAINER_HEIGHT = 900; // mobile grid height and first-render estimate on TV
 const BUFFER = 2;
 const PREFETCH_ROWS = 3;
 const SEARCH_DEBOUNCE_MS = 300;
@@ -180,6 +181,10 @@ function FilterDropdown({ categories, selectedGroup, onSelect }: FilterDropdownP
       e.stopPropagation();
       setOpen(false);
       requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
+    } else if (e.keyCode === KEY_CODES.LEFT || e.keyCode === KEY_CODES.RIGHT) {
+      // An open list keeps the remote: Left/Right only move the caret in its search box.
+      e.stopPropagation();
+      if (e.target !== inputRef.current) e.preventDefault();
     }
   }, [open, focusIdx, filtered, handleSelect, handleToggle]);
 
@@ -308,6 +313,8 @@ export default function ChannelList({ contentType }: ChannelListProps) {
   const [focusZone, setFocusZone] = useState<FocusZone>('search');
   const [focusIndex, setFocusIndex] = useState(0);
   const [scrollOffset, setScrollOffset] = useState(0);
+  // TV/desktop grid fills the rest of the screen; rows are windowed against its measured height.
+  const [gridHeight, setGridHeight] = useState(CONTAINER_HEIGHT);
 
   // Local channel list state (not global store)
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -438,11 +445,23 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     setScrollOffset(nextScrollOffset);
     if (MOBILE || !nextCursor) return;
     const loadedRows = Math.ceil(channels.length / COLUMN_COUNT);
-    const visibleEndRow = Math.ceil((nextScrollOffset + CONTAINER_HEIGHT) / ROW_HEIGHT);
+    const visibleEndRow = Math.ceil((nextScrollOffset + gridHeight) / ROW_HEIGHT);
     if (visibleEndRow >= loadedRows - BUFFER) {
       void loadNextPage();
     }
-  }, [channels.length, nextCursor, loadNextPage]);
+  }, [channels.length, nextCursor, loadNextPage, gridHeight]);
+
+  useEffect(() => {
+    if (MOBILE) return;
+    const measure = () => {
+      const grid = gridRef.current;
+      // Exclude the grid's vertical padding so the focused row clears the bottom edge.
+      if (grid && grid.clientHeight > 0) setGridHeight(grid.clientHeight - 16);
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, []);
 
   // Debounce search
   useEffect(() => {
@@ -510,7 +529,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
 
   // Compute visible row range (TV only)
   const startRow = MOBILE ? 0 : Math.max(0, Math.floor(scrollOffset / ROW_HEIGHT) - BUFFER);
-  const endRow = MOBILE ? totalRows - 1 : Math.min(totalRows - 1, Math.ceil((scrollOffset + CONTAINER_HEIGHT) / ROW_HEIGHT) + BUFFER);
+  const endRow = MOBILE ? totalRows - 1 : Math.min(totalRows - 1, Math.ceil((scrollOffset + gridHeight) / ROW_HEIGHT) + BUFFER);
 
   // Prefetch images for upcoming rows
   useEffect(() => {
@@ -536,6 +555,8 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     requestAnimationFrame(() => {
       const grid = gridRef.current;
       if (!grid) return;
+      // Re-rendering after a page load must not pull focus back from the sidebar or a dialog.
+      if (!containerRef.current?.contains(document.activeElement) && !isFocusLost()) return;
       const el = grid.querySelector(`[data-vindex="${focusIndex}"]`) as HTMLElement | null;
       el?.focus({ preventScroll: true });
       markKeyRendered();
@@ -575,6 +596,25 @@ export default function ChannelList({ contentType }: ChannelListProps) {
     setBrowseState(viewName, { searchQuery: value });
   }, [setBrowseState, viewName]);
 
+  // Focus can arrive from outside this component (sidebar, returning from the
+  // player), so the zone follows real DOM focus rather than only our own keys.
+  const handleFocus = useCallback((e: React.FocusEvent) => {
+    if (MOBILE) return;
+    const target = e.target as HTMLElement;
+    if (target === searchRef.current) {
+      setFocusZone('search');
+    } else if (target.closest('[data-filter-trigger]')) {
+      setFocusZone('filter');
+    } else {
+      const card = target.closest<HTMLElement>('[data-vindex]');
+      const index = Number(card?.dataset.vindex);
+      if (card && Number.isInteger(index)) {
+        setFocusZone('grid');
+        setFocusIndex(index);
+      }
+    }
+  }, []);
+
   // TV keyboard navigation across zones: search, filter button, grid
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (MOBILE) return;
@@ -599,8 +639,8 @@ export default function ChannelList({ contentType }: ChannelListProps) {
         const next = focusIndex + COLUMN_COUNT;
         setFocusIndex(next);
         const nextBottom = (Math.floor(next / COLUMN_COUNT) + 1) * ROW_HEIGHT;
-        if (nextBottom > scrollOffset + CONTAINER_HEIGHT && gridRef.current) {
-          gridRef.current.scrollTop = nextBottom - CONTAINER_HEIGHT;
+        if (nextBottom > scrollOffset + gridHeight && gridRef.current) {
+          gridRef.current.scrollTop = nextBottom - gridHeight;
         }
       }
     } else if (e.keyCode === KEY_CODES.UP) {
@@ -660,7 +700,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
         handleSelect(channels[focusIndex]);
       }
     }
-  }, [focusZone, focusIndex, channels, scrollOffset, handleSelect]);
+  }, [focusZone, focusIndex, channels, scrollOffset, gridHeight, handleSelect]);
 
   // Re-focus search when this view becomes active (including first mount)
   const isActiveView = useAppStore((s) => s.currentView) === viewName;
@@ -793,7 +833,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
   }
 
   return (
-    <div ref={containerRef} className="flex flex-col gap-3 lg:gap-4 animate-fade-in" onKeyDown={handleKeyDown}>
+    <div ref={containerRef} className={cn('flex flex-col gap-3 lg:gap-4 animate-fade-in', !MOBILE && 'h-full')} onKeyDown={handleKeyDown} onFocus={handleFocus}>
       <h1 className="text-20 lg:text-28 font-bold">{label}</h1>
       <div className="flex flex-col lg:flex-row gap-2 lg:gap-3 items-stretch lg:items-start">
         <div className="flex gap-2.5 flex-1">
@@ -806,13 +846,15 @@ export default function ChannelList({ contentType }: ChannelListProps) {
             value={searchQuery}
             onChange={(e) => handleSearchChange(e.target.value)}
             // Tizen sometimes swallows arrow keys inside <input>; route them
-            // explicitly to the same handler the parent div uses.
+            // explicitly to the same handler the parent div uses, once — the
+            // bubbled copy would advance a second zone.
             onKeyDown={(e) => {
               if (
                 e.keyCode === KEY_CODES.DOWN ||
                 e.keyCode === KEY_CODES.UP ||
                 e.keyCode === KEY_CODES.RIGHT
               ) {
+                e.stopPropagation();
                 handleKeyDown(e);
               }
             }}
@@ -836,7 +878,7 @@ export default function ChannelList({ contentType }: ChannelListProps) {
       </div>
       <div className="text-13 lg:text-base text-[#555]">{countText}</div>
       <div
-        className="h-[900px] overflow-y-auto relative py-2 px-1 [content-visibility:auto]"
+        className={cn('overflow-y-auto relative py-2 px-1 [content-visibility:auto]', MOBILE ? 'h-[900px]' : 'flex-1 min-h-0')}
         ref={gridRef}
         onScroll={handleGridScroll}
       >

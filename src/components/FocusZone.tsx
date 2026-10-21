@@ -1,104 +1,7 @@
 import { useRef, useEffect, useCallback, type ReactNode } from 'react';
 import { KEY_CODES } from '../utils/keys';
 import { cn } from '../utils/cn';
-
-type Direction = 'up' | 'down' | 'left' | 'right';
-
-const FOCUSABLE_SELECTOR = [
-  '[data-focusable]:not([disabled]):not([aria-hidden="true"])',
-  'button:not([disabled]):not([aria-hidden="true"])',
-  'input:not([disabled]):not([aria-hidden="true"])',
-  'textarea:not([disabled]):not([aria-hidden="true"])',
-  'select:not([disabled]):not([aria-hidden="true"])',
-  'a[href]:not([aria-hidden="true"])',
-].join(',');
-
-/**
- * Spatial navigation: find the nearest [data-focusable] element
- * in a given direction from the currently focused element.
- *
- * Uses a weighted scoring system:
- * - Primary axis distance (the direction of movement)
- * - Secondary axis distance (perpendicular, penalized heavily to prefer alignment)
- */
-/**
- * Compute the gap between two ranges on one axis.
- * Returns 0 if they overlap, otherwise the distance between closest edges.
- */
-function axisGap(aMin: number, aMax: number, bMin: number, bMax: number): number {
-  if (aMax <= bMin) return bMin - aMax;
-  if (bMax <= aMin) return aMin - bMax;
-  return 0; // overlapping
-}
-
-function findNearest(
-  current: HTMLElement,
-  direction: Direction,
-  container: HTMLElement,
-): HTMLElement | null {
-  const rect = current.getBoundingClientRect();
-
-  const candidates = container.querySelectorAll(FOCUSABLE_SELECTOR);
-  let best: HTMLElement | null = null;
-  let bestScore = Infinity;
-
-  for (let i = 0; i < candidates.length; i++) {
-    const candidate = candidates[i] as HTMLElement;
-    if (candidate === current) continue;
-    // Skip hidden or zero-size elements
-    if (candidate.offsetParent === null && candidate.offsetHeight === 0) continue;
-
-    const cRect = candidate.getBoundingClientRect();
-    if (cRect.width === 0 && cRect.height === 0) continue;
-
-    let primaryDist: number;
-    let secondaryGap: number;
-    let isInDirection: boolean;
-
-    const cy = rect.top + rect.height / 2;
-    const ccy = cRect.top + cRect.height / 2;
-    const cx = rect.left + rect.width / 2;
-    const ccx = cRect.left + cRect.width / 2;
-
-    switch (direction) {
-      case 'up':
-        isInDirection = ccy < cy - 1;
-        primaryDist = cy - ccy;
-        // Use edge-gap instead of center distance — 0 if they overlap horizontally
-        secondaryGap = axisGap(rect.left, rect.right, cRect.left, cRect.right);
-        break;
-      case 'down':
-        isInDirection = ccy > cy + 1;
-        primaryDist = ccy - cy;
-        secondaryGap = axisGap(rect.left, rect.right, cRect.left, cRect.right);
-        break;
-      case 'left':
-        isInDirection = ccx < cx - 1;
-        primaryDist = cx - ccx;
-        secondaryGap = axisGap(rect.top, rect.bottom, cRect.top, cRect.bottom);
-        break;
-      case 'right':
-        isInDirection = ccx > cx + 1;
-        primaryDist = ccx - cx;
-        secondaryGap = axisGap(rect.top, rect.bottom, cRect.top, cRect.bottom);
-        break;
-    }
-
-    if (!isInDirection) continue;
-
-    // Score: primary distance + heavy penalty for non-overlapping elements.
-    // If elements overlap on the perpendicular axis, secondaryGap is 0
-    // so they're scored purely by distance in the movement direction.
-    const score = primaryDist + secondaryGap * 5;
-
-    if (score < bestScore) {
-      bestScore = score;
-      best = candidate;
-    }
-  }
-
-  return best;
-}
+import { findNearest, firstRenderedFocusable, isFocusLost, type Direction } from '../utils/focus';
 
 function isTextInput(el: HTMLElement): boolean {
   if (el.tagName === 'TEXTAREA') return true;
@@ -146,10 +49,7 @@ export default function FocusZone({ children, className, onEnter, onBack }: Focu
     const active = document.activeElement;
     if (active instanceof HTMLElement && active !== container && container.contains(active)) return;
 
-    const first = container.querySelector(FOCUSABLE_SELECTOR) as HTMLElement | null;
-    if (first) {
-      first.focus({ preventScroll: true });
-    }
+    firstRenderedFocusable(container)?.focus({ preventScroll: true });
   }, []);
 
   const handleKeyDown = useCallback(
@@ -203,8 +103,9 @@ export default function FocusZone({ children, className, onEnter, onBack }: Focu
       })();
       if (!direction) return;
 
-      // Text inputs: let LEFT/RIGHT through for cursor movement
-      if (isTextInput(active) && (direction === 'left' || direction === 'right')) {
+      // Text inputs and sliders: let LEFT/RIGHT through for caret / value changes
+      const ownsHorizontal = isTextInput(active) || (active as HTMLInputElement).type === 'range';
+      if (ownsHorizontal && (direction === 'left' || direction === 'right')) {
         return;
       }
 
@@ -232,11 +133,8 @@ export default function FocusZone({ children, className, onEnter, onBack }: Focu
       const active = document.activeElement;
       // If focus is on body, or on an element no longer in the DOM, or on our container itself
       // but NOT if focus is validly on a sidebar item (user navigated via sidebar)
-      const focusLost = !active || active === document.body || active === container;
-      const focusOnDeadElement = active && active !== document.body && !document.body.contains(active);
-      if (focusLost || focusOnDeadElement) {
-        const first = container.querySelector(FOCUSABLE_SELECTOR) as HTMLElement | null;
-        first?.focus({ preventScroll: true });
+      if (active === container || isFocusLost()) {
+        firstRenderedFocusable(container)?.focus({ preventScroll: true });
       }
     });
 

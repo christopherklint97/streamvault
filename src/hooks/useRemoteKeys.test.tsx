@@ -56,3 +56,61 @@ describe('useRemoteKeys BACK', () => {
     expect(goBack).not.toHaveBeenCalled();
   });
 });
+
+function press(keyCode: number) {
+  const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'keyCode', { value: keyCode });
+  (document.activeElement ?? document.body).dispatchEvent(event);
+}
+
+function ContentHarness() {
+  useRemoteKeys();
+  return (
+    <main data-app-content>
+      <div style={{ display: 'none' }}><button data-focusable>Hidden kept-alive view</button></div>
+      <button data-focusable>Visible entry</button>
+    </main>
+  );
+}
+
+describe('useRemoteKeys lost focus', () => {
+  let root: Root;
+  let container: HTMLDivElement;
+  const originalView = useAppStore.getState().currentView;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    useAppStore.setState({ currentView: originalView, showExitDialog: false });
+  });
+
+  it('moves focus to the visible content when an arrow arrives with nothing focused', async () => {
+    useAppStore.setState({ currentView: 'home', showExitDialog: false });
+    await act(async () => root.render(<ContentHarness />));
+    // happy-dom has no layout: give the display:none subtree the empty box list a browser reports.
+    const hidden = container.querySelector('[style] button')!;
+    Object.defineProperty(hidden, 'getClientRects', { value: () => [] });
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(document.activeElement).toBe(document.body);
+
+    press(KEY_CODES.DOWN);
+
+    expect(document.activeElement?.textContent).toBe('Visible entry');
+  });
+
+  it('leaves the player to handle its own keys', async () => {
+    useAppStore.setState({ currentView: 'player', showExitDialog: false });
+    await act(async () => root.render(<ContentHarness />));
+    (document.activeElement as HTMLElement | null)?.blur();
+
+    press(KEY_CODES.DOWN);
+
+    expect(document.activeElement).toBe(document.body);
+  });
+});

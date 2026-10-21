@@ -85,6 +85,11 @@ export const useAppStore = create<AppState & AppActions>()((set, get) => ({
     const blocker = get().navigationBlocker;
     if (blocker && !blocker()) return false;
     const { currentView, viewStack } = get();
+    // Re-selecting the current view must not add a Back step that goes nowhere.
+    if (view === currentView) {
+      set({ selectedGroup: null, showExitDialog: false });
+      return true;
+    }
     pushState(view);
     set({
       viewStack: [...viewStack, currentView],

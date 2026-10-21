@@ -125,7 +125,7 @@ function AppContent() {
   useEffect(() => {
     if (typeof tizen !== 'undefined' && tizen.tvinputdevice) {
       const keysToRegister = [
-        'MediaPlay', 'MediaPause', 'MediaStop', 'MediaFastForward', 'MediaRewind',
+        'MediaPlay', 'MediaPause', 'MediaPlayPause', 'MediaStop', 'MediaFastForward', 'MediaRewind',
         'ChannelUp', 'ChannelDown', 'Info', 'ColorF0Red', 'ColorF1Green',
         'ColorF2Yellow', 'ColorF3Blue', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
       ];
@@ -183,6 +183,11 @@ function AppContent() {
   // Handle LEFT key on main content to return focus to sidebar
   const handleMainKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.keyCode === KEY_CODES.LEFT) {
+      // Inside a text field Left moves the caret; leave only from its start.
+      const field = e.target as HTMLInputElement;
+      if (field.type === 'range') return;
+      if ((field.tagName === 'INPUT' || field.tagName === 'TEXTAREA') && field.selectionStart !== null
+        && (field.selectionStart > 0 || field.selectionEnd !== field.selectionStart)) return;
       e.preventDefault();
       const activeItem = document.querySelector('[data-sidebar-item][data-active]') as HTMLElement | null;
       const fallback = document.querySelector('[data-sidebar-item]') as HTMLElement | null;
@@ -267,7 +272,7 @@ function AppContent() {
         {/* Persistent browse views — stay mounted once visited to preserve state */}
         {BROWSE_VIEWS.map(({ view, contentType }) => (
           (currentView === view || visitedViews[view]) ? (
-            <div key={view} {...(currentView === view ? { 'data-active-view': '' } : {})} style={{ display: currentView === view ? undefined : 'none' }}>
+            <div key={view} className={MOBILE_APP ? undefined : 'h-full'} {...(currentView === view ? { 'data-active-view': '' } : {})} style={{ display: currentView === view ? undefined : 'none' }}>
               <ChannelList contentType={contentType} />
             </div>
           ) : null

@@ -7,6 +7,8 @@ export const KEY_CODES = {
   DOWN: 40,
   PLAY: 415,
   PAUSE: 19,
+  /** Single play/pause key on Samsung One/Smart remotes. */
+  PLAY_PAUSE: 10252,
   STOP: 413,
   FF: 417,
   REW: 412,
