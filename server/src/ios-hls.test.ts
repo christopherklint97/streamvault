@@ -142,18 +142,16 @@ describe('buildIosHlsArgs', () => {
 
     expect(args[videoCodecIndex + 1]).toBe('libx264');
     expect(args[audioCodecIndex + 1]).toBe('aac');
-    expect(args).toContain('-readrate');
-    expect(args).toContain('1.1');
+    expect(args[args.indexOf('-readrate') + 1]).toBe('1.25');
   });
 
-  it('paces copy mode and keeps a bounded rolling segment window', () => {
+  it('builds a growing lead ahead of the player inside a bounded rolling window', () => {
     const args = buildIosHlsArgs('http://source', '/tmp/session/index.m3u8', 0, 'copy', 'copy');
 
-    expect(args).toContain('-readrate');
-    expect(args).toContain('1.1');
-    expect(args).toContain('-readrate_initial_burst');
-    expect(args).toContain('-hls_list_size');
-    expect(args[args.indexOf('-hls_list_size') + 1]).toBe('300');
+    // AVPlayer buffers only what is published beyond its live start point.
+    expect(args[args.indexOf('-readrate') + 1]).toBe('1.25');
+    expect(args[args.indexOf('-readrate_initial_burst') + 1]).toBe('120');
+    expect(args[args.indexOf('-hls_list_size') + 1]).toBe('900');
     expect(args).toContain('-hls_delete_threshold');
     expect(args[args.indexOf('-hls_delete_threshold') + 1]).toBe('30');
     expect(args).toContain('independent_segments+delete_segments');
