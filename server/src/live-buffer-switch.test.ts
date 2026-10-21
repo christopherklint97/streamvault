@@ -82,3 +82,11 @@ it('keeps the started channel when a player restarts it', async () => {
   expect(workers[0].kill).not.toHaveBeenCalled();
   expect(buffer.activeCount).toBe(1);
 });
+
+it('releases every channel when another kind of playback takes the provider connection', async () => {
+  await buffer.playlist('a', 'http://127.0.0.1:1/api/stream/a');
+  await vi.waitFor(() => expect(workers).toHaveLength(1));
+  await buffer.releaseAll();
+  expect(workers[0].kill).toHaveBeenCalled();
+  expect(buffer.activeCount).toBe(0);
+});

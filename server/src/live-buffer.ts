@@ -456,6 +456,10 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     async claim(id: string) {
       await Promise.all([...channels.values()].filter(ch => ch.id !== id).map(retire));
     },
+    /** Another kind of playback took the provider connection; close every channel. */
+    async releaseAll() {
+      await Promise.all([...channels.values()].map(retire));
+    },
     async playlist(id: string, url: string, ticket?: string) {
       const ch = await get(id, url);
       if (!ch || !ch.segments.length) return null;
@@ -490,7 +494,11 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
 }
 
 export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, source: (id: string) => string | null | undefined,
-  options: { basePath?: '/api/live' | '/api/live-compatible' } = {}) {
+  options: {
+    basePath?: '/api/live' | '/api/live-compatible';
+    /** Release provider connections held outside this buffer before `id` connects. */
+    onClaim?: (id: string) => Promise<void> | void;
+  } = {}) {
   const basePath = options.basePath ?? '/api/live';
   const router = Router();
   const secret = randomBytes(32);
@@ -532,6 +540,7 @@ export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, so
     authorizationWaiters++;
     let ready = false;
     try {
+      await options.onClaim?.(id);
       await buffer.claim(id);
       const deadline = Date.now() + 5_000;
       while (Date.now() < deadline && !req.destroyed) {
