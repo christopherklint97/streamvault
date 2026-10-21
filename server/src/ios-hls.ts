@@ -224,3 +224,16 @@ export function buildIosHlsArgs(
     playlistPath,
   ];
 }
+
+/**
+ * Stream-copied segments are cut at source keyframes, so their length varies
+ * and FFmpeg raises EXT-X-TARGETDURATION as longer GOPs appear. Apple's player
+ * rejects a live playlist whose target duration changes or is exceeded and
+ * stalls after loadedmetadata, so advertise a fixed ceiling from the start.
+ */
+export const IOS_HLS_TARGET_DURATION_FLOOR = 10;
+
+export function stabilizeIosHlsPlaylist(playlist: string): string {
+  return playlist.replace(/^#EXT-X-TARGETDURATION:(\d+)$/m, (_line, seconds: string) =>
+    `#EXT-X-TARGETDURATION:${Math.max(Number(seconds), IOS_HLS_TARGET_DURATION_FLOOR)}`);
+}
