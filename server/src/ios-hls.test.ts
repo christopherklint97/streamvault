@@ -7,6 +7,7 @@ import {
   iosHlsModesNeedRetry,
   selectIosHlsAudioMode,
   selectIosHlsVideoMode,
+  stabilizeIosHlsPlaylist,
 } from './ios-hls';
 
 describe('buildIosHlsArgs', () => {
@@ -192,5 +193,13 @@ describe('buildIosHlsArgs', () => {
     expect(args).toContain('aac');
     expect(args).toContain('-hls_segment_type');
     expect(args).toContain('fmp4');
+  });
+
+  it('advertises a fixed target duration so copied keyframe-cut segments never exceed it', () => {
+    const early = '#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.387000,\nsegment-00000.m4s\n';
+    const later = early.replace('TARGETDURATION:4', 'TARGETDURATION:7') + '#EXTINF:6.707000,\nsegment-00001.m4s\n';
+    expect(stabilizeIosHlsPlaylist(early)).toContain('#EXT-X-TARGETDURATION:10\n');
+    expect(stabilizeIosHlsPlaylist(later)).toContain('#EXT-X-TARGETDURATION:10\n');
+    expect(stabilizeIosHlsPlaylist(later.replace('TARGETDURATION:7', 'TARGETDURATION:12'))).toContain('#EXT-X-TARGETDURATION:12\n');
   });
 });

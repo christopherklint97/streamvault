@@ -86,7 +86,7 @@ import { matchProgramTitle } from './schedule-reconciliation.js';
 import { authorizeHlsProxyUrl, rewriteHlsManifest, signHlsProxyUrl } from './hls.js';
 import { buildFragmentedMp4Args } from './vod-remux.js';
 import { buildBrowserCompatibleVideoArgs } from './browser-transcode.js';
-import { buildIosHlsArgs, buildIosHlsRecoveryUrl, iosHlsContentType, iosHlsModesNeedRetry, probeIosHlsMediaModes } from './ios-hls.js';
+import { buildIosHlsArgs, buildIosHlsRecoveryUrl, iosHlsContentType, iosHlsModesNeedRetry, probeIosHlsMediaModes, stabilizeIosHlsPlaylist } from './ios-hls.js';
 import { IOS_HLS_IDLE_TIMEOUT_MS, findReusableIosHlsSession, iosHlsProcessExitState, iosHlsSessionKey, iosHlsSessionLimitReason, selectIosHlsSessionsToRetire } from './ios-hls-sessions.js';
 import { buildRecordingHlsArgs, findRecordingHlsCut, parseRecordingHlsStart } from './recording-hls.js';
 import { registerRecordingVodRoutes } from './recording-vod-routes.js';
@@ -1307,7 +1307,7 @@ app.get('/api/ios-hls/:channelId/index.m3u8', async (req, res) => {
     const startedAt = Date.now();
     const sendExistingPlaylist = () => {
       if (fs.existsSync(existingPlaylist)) {
-        const playlist = fs.readFileSync(existingPlaylist, 'utf8')
+        const playlist = stabilizeIosHlsPlaylist(fs.readFileSync(existingPlaylist, 'utf8'))
           .replace(/(init\.mp4|segment-\d+\.m4s)/g, `/api/ios-hls-assets/${existingSessionId}/$1`);
         res.type('application/vnd.apple.mpegurl').set('Cache-Control', 'no-store').send(playlist);
         return;
