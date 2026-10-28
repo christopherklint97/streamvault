@@ -86,7 +86,7 @@ import { matchProgramTitle } from './schedule-reconciliation.js';
 import { authorizeHlsProxyUrl, rewriteHlsManifest, signHlsProxyUrl } from './hls.js';
 import { buildFragmentedMp4Args } from './vod-remux.js';
 import { buildBrowserCompatibleVideoArgs } from './browser-transcode.js';
-import { buildIosHlsArgs, buildIosHlsRecoveryUrl, iosHlsContentType, iosHlsModesNeedRetry, probeIosHlsMediaModes, stabilizeIosHlsPlaylist } from './ios-hls.js';
+import { buildIosHlsArgs, buildIosHlsRecoveryUrl, iosHlsContentType, iosHlsModesNeedRetry, iosHlsPlaylistReady, probeIosHlsMediaModes, stabilizeIosHlsPlaylist } from './ios-hls.js';
 import { IOS_HLS_IDLE_TIMEOUT_MS, findReusableIosHlsSession, iosHlsProcessExitState, iosHlsSessionKey, iosHlsSessionLimitReason, selectIosHlsSessionsToRetire } from './ios-hls-sessions.js';
 import { buildRecordingHlsArgs, findRecordingHlsCut, parseRecordingHlsStart } from './recording-hls.js';
 import { registerRecordingVodRoutes } from './recording-vod-routes.js';
@@ -149,6 +149,7 @@ const liveAudioTranscodes = new ConcurrentStreamLimiter(2);
 const vodRemuxes = new ConcurrentStreamLimiter(3);
 const vodTranscodes = new ConcurrentStreamLimiter(2);
 const iosHlsProbes = new ConcurrentStreamLimiter(MAX_IOS_HLS_SESSIONS);
+const iosHlsProbeCache = new Map<string, Awaited<ReturnType<typeof probeIosHlsMediaModes>>>();
 const iosHlsTicketSecret = randomBytes(32).toString('hex');
 const hlsProxyTicketSecret = randomBytes(32);
 const signedHlsProxyUrl = (url: string) => signHlsProxyUrl(url, hlsProxyTicketSecret);
@@ -1324,9 +1325,13 @@ app.get('/api/ios-hls/:channelId/index.m3u8', async (req, res) => {
     existing.expiresAt = Date.now() + IOS_HLS_IDLE_TIMEOUT_MS;
     const existingPlaylist = path.join(existing.directory, 'index.m3u8');
     const startedAt = Date.now();
+    let firstSegmentAt: number | null = null;
     const sendExistingPlaylist = () => {
-      if (fs.existsSync(existingPlaylist)) {
-        const playlist = stabilizeIosHlsPlaylist(fs.readFileSync(existingPlaylist, 'utf8'))
+      const raw = fs.existsSync(existingPlaylist) ? fs.readFileSync(existingPlaylist, 'utf8') : null;
+      if (raw?.includes('#EXTINF')) firstSegmentAt ??= Date.now();
+      if (raw && (existing.state !== 'running'
+        || iosHlsPlaylistReady(raw, firstSegmentAt === null ? null : Date.now() - firstSegmentAt))) {
+        const playlist = stabilizeIosHlsPlaylist(raw)
           .replace(/(init\.mp4|segment-\d+\.m4s)/g, `/api/ios-hls-assets/${existingSessionId}/$1`);
         res.type('application/vnd.apple.mpegurl').set('Cache-Control', 'no-store').send(playlist);
         return;
@@ -1385,11 +1390,19 @@ app.get('/api/ios-hls/:channelId/index.m3u8', async (req, res) => {
 
   // Copy H.264/AAC sources instead of re-encoding them: a Pi encodes at about
   // real time, so a transcoded session never catches up with a resume point.
-  let mediaModes: Awaited<ReturnType<typeof probeIosHlsMediaModes>>;
+  // A seek starts a new session of the same title: reuse its probe result.
+  const sourceKey = sourceValidation.url.toString();
+  let mediaModes = iosHlsProbeCache.get(sourceKey);
   try {
-    mediaModes = await probeIosHlsMediaModes(sourceUrl);
-    if (iosHlsModesNeedRetry(mediaModes)) {
-      mediaModes = await probeIosHlsMediaModes(sourceUrl);
+    if (!mediaModes) {
+      const first = await probeIosHlsMediaModes(sourceUrl);
+      mediaModes = first;
+      if (iosHlsModesNeedRetry(first)) mediaModes = await probeIosHlsMediaModes(sourceUrl);
+      // A timed-out probe reports transcode; cache only answers that repeat.
+      if (!iosHlsModesNeedRetry(first) || (first.video === mediaModes.video && first.audio === mediaModes.audio)) {
+        iosHlsProbeCache.set(sourceKey, mediaModes);
+        if (iosHlsProbeCache.size > 64) iosHlsProbeCache.delete(iosHlsProbeCache.keys().next().value!);
+      }
     }
   } finally {
     releaseProbe();
