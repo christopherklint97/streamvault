@@ -25,6 +25,16 @@ export const LIVE_HLS_MIN_WINDOW_SECONDS = 5 * LIVE_HLS_MAX_SEGMENT_SECONDS;
 // reload only once per target duration, draining their buffer every cycle.
 // EXT-X-START pins their start to the RFC 8216 three-target-duration holdback.
 export const LIVE_HLS_NATIVE_START_OFFSET_SECONDS = 3 * LIVE_HLS_MAX_SEGMENT_SECONDS;
+// Native players do not start on a playlist holding one short segment; they
+// wait a whole reload cycle (half of the 12 s target duration). Providers burst
+// tens of seconds on connect, so authorization waits this long after the first
+// segment for that burst unless the window already reaches the start offset.
+export const LIVE_HLS_STARTUP_GRACE_MS = 1_500;
+export function liveHlsStartupReady(manifest: string, msSinceFirstSegment: number): boolean {
+  let seconds = 0;
+  for (const match of manifest.matchAll(/^#EXTINF:([\d.]+)/gm)) seconds += Number(match[1]);
+  return seconds >= LIVE_HLS_NATIVE_START_OFFSET_SECONDS || msSinceFirstSegment >= LIVE_HLS_STARTUP_GRACE_MS;
+}
 // Bounds the manifest when a source emits tiny segments.
 export const LIVE_HLS_MAX_WINDOW_SEGMENTS = 40;
 interface Channel {
@@ -543,10 +553,15 @@ export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, so
       await options.onClaim?.(id);
       await buffer.claim(id);
       const deadline = Date.now() + 5_000;
+      let firstSegmentAt: number | null = null;
       while (Date.now() < deadline && !req.destroyed) {
         const manifest = await buffer.playlist(id, url);
         if (buffer.isUnsafe(id)) break;
-        if (manifest?.includes('\nsegment/')) { ready = true; break; }
+        if (manifest?.includes('\nsegment/')) {
+          firstSegmentAt ??= Date.now();
+          ready = true;
+          if (liveHlsStartupReady(manifest, Date.now() - firstSegmentAt)) break;
+        }
         await new Promise(resolve => setTimeout(resolve, 100));
       }
     } finally { authorizationWaiters--; }

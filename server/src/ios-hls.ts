@@ -243,3 +243,27 @@ export function stabilizeIosHlsPlaylist(playlist: string): string {
   return playlist.replace(/^#EXT-X-TARGETDURATION:(\d+)$/m, (_line, seconds: string) =>
     `#EXT-X-TARGETDURATION:${Math.max(Number(seconds), IOS_HLS_TARGET_DURATION_FLOOR)}`);
 }
+
+/** Seconds of media listed in an HLS playlist. */
+export function hlsPlaylistSeconds(playlist: string): number {
+  let total = 0;
+  for (const match of playlist.matchAll(/^#EXTINF:([\d.]+)/gm)) total += Number(match[1]);
+  return total;
+}
+
+// Hold the first playlist this long after its first segment for a fuller one.
+export const IOS_HLS_STARTUP_GRACE_MS = 1_500;
+
+/**
+ * Apple's player reloads an unchanged live playlist only after half a target
+ * duration and will not start on a single short segment, so answering with the
+ * first segment costs a whole reload cycle. Answer once three target durations
+ * are listed (FFmpeg's read burst gets there within about a second), the
+ * session has ended, or the startup grace has passed since the first segment.
+ */
+export function iosHlsPlaylistReady(playlist: string, msSinceFirstSegment: number | null): boolean {
+  if (!playlist.includes('#EXTINF')) return false;
+  return playlist.includes('#EXT-X-ENDLIST')
+    || hlsPlaylistSeconds(playlist) >= 3 * IOS_HLS_TARGET_DURATION_FLOOR
+    || (msSinceFirstSegment !== null && msSinceFirstSegment >= IOS_HLS_STARTUP_GRACE_MS);
+}

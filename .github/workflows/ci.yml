@@ -48,10 +48,12 @@ jobs:
       - name: Typecheck server
         run: cd server && npm run typecheck
 
+      # Low-severity advisories without an upstream fix (deepmerge via workbox-build)
+      # would otherwise block every change; moderate and above still fail the build.
       - name: Audit all dependencies (including build/test tooling)
         run: |
-          npm audit
-          cd server && npm audit
+          npm audit --audit-level=moderate
+          cd server && npm audit --audit-level=moderate
 
       - name: Test
         run: npm run test -- --maxWorkers=1 --no-file-parallelism

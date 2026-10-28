@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({ spawn: vi.fn() }));
 vi.mock('node:child_process', async importOriginal => ({
   ...await importOriginal<typeof import('node:child_process')>(), spawn: mocks.spawn,
 }));
-import { createLiveBuffer, createLiveRouter, LIVE_HLS_MAX_SEGMENT_SECONDS } from './live-buffer.js';
+import { createLiveBuffer, createLiveRouter, LIVE_HLS_MAX_SEGMENT_SECONDS, liveHlsStartupReady } from './live-buffer.js';
 
 let root: string;
 let buffer: ReturnType<typeof createLiveBuffer>;
@@ -139,4 +139,11 @@ it('releases provider connections held outside the buffer before a player claims
   } finally {
     await new Promise<void>(resolve => { claimServer.close(() => resolve()); claimServer.closeAllConnections(); });
   }
+});
+
+it('authorizes live HLS once the connect burst fills the start window or the grace passes', () => {
+  const manifest = (seconds: number[]) => seconds.map((d, i) => `#EXTINF:${d.toFixed(3)},\nsegment/${i}.ts`).join('\n');
+  expect(liveHlsStartupReady(manifest([3.84]), 100)).toBe(false);
+  expect(liveHlsStartupReady(manifest(Array(10).fill(3.84)), 100)).toBe(true);
+  expect(liveHlsStartupReady(manifest([3.84]), 1_500)).toBe(true);
 });

@@ -5,6 +5,7 @@ import {
   buildIosHlsRecoveryUrl,
   iosHlsContentType,
   iosHlsModesNeedRetry,
+  iosHlsPlaylistReady,
   selectIosHlsAudioMode,
   selectIosHlsVideoMode,
   stabilizeIosHlsPlaylist,
@@ -199,5 +200,25 @@ describe('buildIosHlsArgs', () => {
     expect(stabilizeIosHlsPlaylist(early)).toContain('#EXT-X-TARGETDURATION:10\n');
     expect(stabilizeIosHlsPlaylist(later)).toContain('#EXT-X-TARGETDURATION:10\n');
     expect(stabilizeIosHlsPlaylist(later.replace('TARGETDURATION:7', 'TARGETDURATION:12'))).toContain('#EXT-X-TARGETDURATION:12\n');
+  });
+});
+
+describe('iosHlsPlaylistReady', () => {
+  const playlist = (durations: number[], end = false) => ['#EXTM3U', '#EXT-X-TARGETDURATION:5',
+    ...durations.flatMap((d, i) => [`#EXTINF:${d.toFixed(3)},`, `segment-${i}.m4s`]),
+    ...(end ? ['#EXT-X-ENDLIST'] : [])].join('\n');
+
+  it('waits for a first segment', () => {
+    expect(iosHlsPlaylistReady('#EXTM3U\n#EXT-X-TARGETDURATION:5', 5_000)).toBe(false);
+  });
+
+  it('holds a short playlist during the startup grace, then releases it', () => {
+    expect(iosHlsPlaylistReady(playlist([5]), 200)).toBe(false);
+    expect(iosHlsPlaylistReady(playlist([5]), 1_500)).toBe(true);
+  });
+
+  it('answers at once with three target durations or a finished title', () => {
+    expect(iosHlsPlaylistReady(playlist([10, 10, 10]), 0)).toBe(true);
+    expect(iosHlsPlaylistReady(playlist([4], true), 0)).toBe(true);
   });
 });
