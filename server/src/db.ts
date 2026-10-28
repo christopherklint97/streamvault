@@ -468,6 +468,10 @@ export function getChannelsByContentTypeCursor(contentType: string, limit: numbe
 
 // --- Direct substring search ---
 
+export const SEARCH_RESULT_LIMIT = 200;
+// Rank a wider candidate pool so exact and prefix matches survive the cut.
+const SEARCH_CANDIDATE_LIMIT = 1000;
+
 export function searchChannelsByName(query: string, contentType?: string, group?: string): DBChannel[] {
   const words = query.trim().toLowerCase().split(/\s+/).filter(w => w.length > 0);
   if (words.length === 0) return [];
@@ -486,7 +490,7 @@ export function searchChannelsByName(query: string, contentType?: string, group?
   }
   if (contentType) { sql += ' AND channels.content_type = ?'; params.push(contentType); }
   if (group) { sql += ' AND channels.grp = ?'; params.push(group); }
-  sql += ' LIMIT 200';
+  sql += ` LIMIT ${SEARCH_CANDIDATE_LIMIT}`;
 
   const results = db.prepare(sql).all(...params) as DBChannel[];
 
@@ -504,7 +508,7 @@ export function searchChannelsByName(query: string, contentType?: string, group?
     return aName.localeCompare(bName);
   });
 
-  return results.slice(0, 50);
+  return results.slice(0, SEARCH_RESULT_LIMIT);
 }
 
 export function getChannelCountByContentType(contentType: string): number {
