@@ -70,6 +70,13 @@ describe('buildIosHlsArgs', () => {
     expect(args).not.toContain('-ac');
   });
 
+  it('copies Dolby Digital Plus audio that iPhones decode natively', () => {
+    const probeOutput = JSON.stringify({
+      streams: [{ codec_type: 'audio', codec_name: 'eac3', profile: 'unknown', channels: 6 }],
+    });
+    expect(selectIosHlsAudioMode(probeOutput)).toBe('copy');
+  });
+
   it('transcodes unsupported provider audio to browser-safe stereo AAC', () => {
     const probeOutput = JSON.stringify({
       streams: [{ codec_type: 'audio', codec_name: 'dts', profile: 'DTS', channels: 6 }],
@@ -121,7 +128,7 @@ describe('buildIosHlsArgs', () => {
       width: 1920, height: 1080, r_frame_rate: '24000/1001', bit_rate: '2249147',
     };
     expect(selectIosHlsVideoMode(JSON.stringify({ streams: [{ ...base, level: -99 }] }))).toBe('transcode');
-    expect(selectIosHlsVideoMode(JSON.stringify({ streams: [{ ...base, level: 40, bit_rate: '6000001' }] }))).toBe('transcode');
+    expect(selectIosHlsVideoMode(JSON.stringify({ streams: [{ ...base, level: 40, bit_rate: '20000001' }] }))).toBe('transcode');
     expect(selectIosHlsVideoMode(JSON.stringify({ streams: [{ ...base, level: 40, bit_rate: 'N/A' }] }))).toBe('transcode');
   });
 
@@ -133,7 +140,9 @@ describe('buildIosHlsArgs', () => {
     };
     expect(selectIosHlsVideoMode(JSON.stringify({ streams: [{ ...mkv, tags: { BPS: '5375372' } }] }))).toBe('copy');
     expect(selectIosHlsVideoMode(JSON.stringify({ streams: [mkv], format: { bit_rate: '5507419' } }))).toBe('copy');
-    expect(selectIosHlsVideoMode(JSON.stringify({ streams: [{ ...mkv, tags: { BPS: '6000001' } }] }))).toBe('transcode');
+    expect(selectIosHlsVideoMode(JSON.stringify({ streams: [{ ...mkv, tags: { BPS: '20000001' } }] }))).toBe('transcode');
+    // A 1080p 9.3 Mbps episode used to be re-encoded slower than real time.
+    expect(selectIosHlsVideoMode(JSON.stringify({ streams: [{ ...mkv, width: 1920, height: 1080, tags: { BPS: '9349934' } }] }))).toBe('copy');
   });
 
   it('paces and fully transcodes mixed compatibility instead of risking A/V skew', () => {
