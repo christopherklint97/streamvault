@@ -76,6 +76,8 @@ export function buildIosHlsProbeArgs(inputUrl: string): string[] {
   ];
 }
 
+export const IOS_HLS_COPY_MAX_BIT_RATE = 20_000_000;
+
 export function selectIosHlsVideoMode(probeOutput: string): IosHlsVideoMode {
   const { streams, formatBitRate } = parseProbeOutput(probeOutput);
   const video = streams.find(stream => stream.codec_type === 'video')
@@ -89,6 +91,9 @@ export function selectIosHlsVideoMode(probeOutput: string): IosHlsVideoMode {
   const frameRate = parseFrameRate(video.r_frame_rate);
   const bitRate = videoBitRate(video, formatBitRate);
   const compatibleProfiles = new Set(['Baseline', 'Constrained Baseline', 'Main', 'High']);
+  // iPhones decode 1080p H.264 well past this; the cap bounds the rolling
+  // segment window (~67 min, <= ~10 GB). Transcoding instead runs slower than
+  // real time on the Pi, so a copyable stream should never be re-encoded.
   const dimensionsCompatible = Math.max(width, height) <= 1920 && Math.min(width, height) <= 1080;
 
   return video.codec_name === 'h264'
@@ -102,17 +107,18 @@ export function selectIosHlsVideoMode(probeOutput: string): IosHlsVideoMode {
     && frameRate <= 60
     && Number.isFinite(bitRate)
     && bitRate > 0
-    && bitRate <= 6_000_000
+    && bitRate <= IOS_HLS_COPY_MAX_BIT_RATE
     ? 'copy'
     : 'transcode';
 }
 
 export function selectIosHlsAudioMode(probeOutput: string): IosHlsAudioMode {
   const audio = parseProbeStreams(probeOutput).find(stream => stream.codec_type === 'audio');
-  const compatibleProfiles = new Set(['LC', 'HE-AAC', 'HE-AACv2']);
-  return audio?.codec_name === 'aac'
-    && typeof audio.profile === 'string'
-    && compatibleProfiles.has(audio.profile)
+  const compatibleAacProfiles = new Set(['LC', 'HE-AAC', 'HE-AACv2']);
+  // Apple HLS carries Dolby Digital (Plus) in fMP4, and every iPhone decodes it.
+  const codecCompatible = audio?.codec_name === 'ac3' || audio?.codec_name === 'eac3'
+    || (audio?.codec_name === 'aac' && typeof audio.profile === 'string' && compatibleAacProfiles.has(audio.profile));
+  return codecCompatible
     && typeof audio.channels === 'number'
     && audio.channels > 0
     && audio.channels <= 8
