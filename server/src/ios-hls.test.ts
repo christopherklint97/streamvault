@@ -70,11 +70,11 @@ describe('buildIosHlsArgs', () => {
     expect(args).not.toContain('-ac');
   });
 
-  it('copies Dolby Digital Plus audio that iPhones decode natively', () => {
+  it('transcodes Dolby Digital Plus audio that the iPhone player would not decode', () => {
     const probeOutput = JSON.stringify({
       streams: [{ codec_type: 'audio', codec_name: 'eac3', profile: 'unknown', channels: 6 }],
     });
-    expect(selectIosHlsAudioMode(probeOutput)).toBe('copy');
+    expect(selectIosHlsAudioMode(probeOutput)).toBe('transcode');
   });
 
   it('transcodes unsupported provider audio to browser-safe stereo AAC', () => {
@@ -145,14 +145,22 @@ describe('buildIosHlsArgs', () => {
     expect(selectIosHlsVideoMode(JSON.stringify({ streams: [{ ...mkv, width: 1920, height: 1080, tags: { BPS: '9349934' } }] }))).toBe('copy');
   });
 
-  it('paces and fully transcodes mixed compatibility instead of risking A/V skew', () => {
-    const args = buildIosHlsArgs('http://source', '/tmp/session/index.m3u8', 0, 'copy', 'transcode');
-    const videoCodecIndex = args.indexOf('-c:v');
-    const audioCodecIndex = args.indexOf('-c:a');
+  it('copies compatible video while re-encoding audio on one inexact seek timeline', () => {
+    const args = buildIosHlsArgs('http://source', '/tmp/session/index.m3u8', 115.5, 'copy', 'transcode');
 
-    expect(args[videoCodecIndex + 1]).toBe('libx264');
-    expect(args[audioCodecIndex + 1]).toBe('aac');
+    expect(args[args.indexOf('-c:v') + 1]).toBe('copy');
+    expect(args[args.indexOf('-c:a') + 1]).toBe('aac');
+    expect(args.indexOf('-noaccurate_seek')).toBeLessThan(args.indexOf('-ss'));
+    expect(args.indexOf('-ss')).toBeLessThan(args.indexOf('-i'));
     expect(args[args.indexOf('-readrate') + 1]).toBe('1.25');
+  });
+
+  it('keeps an exact seek when both streams are copied or both re-encoded', () => {
+    for (const [video, audio] of [['copy', 'copy'], ['transcode', 'copy'], ['transcode', 'transcode']] as const) {
+      const args = buildIosHlsArgs('http://source', '/tmp/session/index.m3u8', 115.5, video, audio);
+      expect(args).not.toContain('-noaccurate_seek');
+      expect(args[args.indexOf('-c:a') + 1]).toBe(video === 'copy' ? 'copy' : 'aac');
+    }
   });
 
   it('builds a growing lead ahead of the player inside a bounded rolling window', () => {

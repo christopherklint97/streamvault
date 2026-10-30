@@ -114,11 +114,11 @@ export function selectIosHlsVideoMode(probeOutput: string): IosHlsVideoMode {
 
 export function selectIosHlsAudioMode(probeOutput: string): IosHlsAudioMode {
   const audio = parseProbeStreams(probeOutput).find(stream => stream.codec_type === 'audio');
-  const compatibleAacProfiles = new Set(['LC', 'HE-AAC', 'HE-AACv2']);
-  // Apple HLS carries Dolby Digital (Plus) in fMP4, and every iPhone decodes it.
-  const codecCompatible = audio?.codec_name === 'ac3' || audio?.codec_name === 'eac3'
-    || (audio?.codec_name === 'aac' && typeof audio.profile === 'string' && compatibleAacProfiles.has(audio.profile));
-  return codecCompatible
+  const compatibleProfiles = new Set(['LC', 'HE-AAC', 'HE-AACv2']);
+  // Copied E-AC-3 reached loadedmetadata on an iPhone but never decoded a frame.
+  return audio?.codec_name === 'aac'
+    && typeof audio.profile === 'string'
+    && compatibleProfiles.has(audio.profile)
     && typeof audio.channels === 'number'
     && audio.channels > 0
     && audio.channels <= 8
@@ -191,17 +191,24 @@ export function buildIosHlsArgs(
 ): string[] {
   const slash = playlistPath.lastIndexOf('/');
   const outputDir = slash >= 0 ? playlistPath.slice(0, slash) : '.';
-  // Mixed copy/transcode pipelines can introduce codec delay and A/V skew.
-  // Preserve both source timelines together, or transcode both together.
-  const copyMedia = videoMode === 'copy' && audioMode === 'copy';
-  const videoArgs = copyMedia
+  // Copied video can only start at a keyframe. Re-encoding audio alongside it is
+  // cheap, but FFmpeg's accurate seek would trim that audio to the exact start
+  // while the video starts at the earlier keyframe, so mixed sessions seek
+  // inexactly to keep both on one timeline. Re-encoded video keeps a frame-exact
+  // start, which copied audio cannot match, so it takes the audio with it.
+  const copyVideo = videoMode === 'copy';
+  const copyAudio = copyVideo && audioMode === 'copy';
+  const seekArgs = startSeconds > 0
+    ? [...(copyVideo && !copyAudio ? ['-noaccurate_seek'] : []), '-ss', String(startSeconds)]
+    : [];
+  const videoArgs = copyVideo
     ? ['-c:v', 'copy']
     : [
       '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '24', '-pix_fmt', 'yuv420p',
       '-vf', "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
       '-force_key_frames', 'expr:gte(t,n_forced*4)',
     ];
-  const audioArgs = copyMedia
+  const audioArgs = copyAudio
     ? ['-c:a', 'copy']
     : ['-c:a', 'aac', '-b:a', '160k', '-ac', '2'];
   // Apple's player treats this growing playlist as live and starts about three
@@ -212,7 +219,7 @@ export function buildIosHlsArgs(
 
   return [
     '-hide_banner', '-loglevel', 'warning',
-    ...(startSeconds > 0 ? ['-ss', String(startSeconds)] : []),
+    ...seekArgs,
     '-reconnect', '1',
     '-reconnect_on_network_error', '1',
     '-reconnect_streamed', '1',
