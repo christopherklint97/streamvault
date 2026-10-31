@@ -430,7 +430,7 @@ describe('stream-copy HLS capture', () => {
       capture.start('show', true);
       expect(spawnWriter).toHaveBeenCalledTimes(2);
 
-      const releaseFirst = await capture.acquirePlaybackLease();
+      const releaseFirst = await capture.acquirePlaybackLease('other');
       expect(spawned[0].kill).toHaveBeenCalledWith('SIGINT');
       expect(writers.has('a')).toBe(false);
       expect(writers.has('show')).toBe(true); // scheduled-show capture keeps running
@@ -439,7 +439,7 @@ describe('stream-copy HLS capture', () => {
       capture.start('a'); // retry timers and startAll cannot reclaim the connection
       expect(writers.has('a')).toBe(false);
 
-      const releaseSecond = await capture.acquirePlaybackLease(); // zap: overlapping viewers
+      const releaseSecond = await capture.acquirePlaybackLease('other'); // zap: overlapping viewers
       releaseFirst();
       vi.advanceTimersByTime(60_000);
       expect(writers.has('a')).toBe(false);
@@ -449,6 +449,46 @@ describe('stream-copy HLS capture', () => {
       expect(writers.has('a')).toBe(false);
       vi.advanceTimersByTime(1);
       expect(writers.has('a')).toBe(true);
+      await capture.stopAll();
+    } finally { vi.useRealTimers(); db.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('keeps capturing a channel that playback shares, until no viewer needs it', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'archive-shared-lease-'));
+    const db = new Database(':memory:'); ensureArchiveSchema(db);
+    const store = createArchiveStore(db);
+    store.configure('a', 'A', true, 24); store.configure('b', 'B', true, 24);
+    vi.useFakeTimers();
+    const spawned: { kill: ReturnType<typeof vi.fn> }[] = [];
+    const spawnWriter = vi.fn(() => {
+      const proc = Object.assign(new EventEmitter(), { stderr: new EventEmitter(),
+        kill: vi.fn((signal: string) => { if (signal === 'SIGINT') queueMicrotask(() => proc.emit('close', 0, signal)); return true; }) });
+      spawned.push(proc);
+      return proc as unknown as ChildProcess;
+    });
+    try {
+      const capture = new ArchiveCapture(store, root, 3001, undefined,
+        spawnWriter as unknown as typeof import('node:child_process').spawn);
+      const writers = (capture as unknown as { writers: Map<string, unknown> }).writers;
+      capture.start('a');
+      capture.start('b');
+
+      const releaseA = await capture.acquirePlaybackLease('a');
+      expect(writers.has('a')).toBe(true); // rides the viewer's upstream
+      expect(writers.has('b')).toBe(false);
+      capture.start('b');
+      expect(writers.has('b')).toBe(false);
+
+      const releaseB = await capture.acquirePlaybackLease('b'); // zap to another channel
+      releaseA();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(spawned[0].kill).toHaveBeenCalledWith('SIGINT');
+      expect(writers.has('a')).toBe(false);
+      expect(store.getArchive('a')).toMatchObject({ status: 'stopped', error: 'Paused while a stream is playing' });
+      releaseB();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(writers.has('a')).toBe(true);
+      expect(writers.has('b')).toBe(true);
       await capture.stopAll();
     } finally { vi.useRealTimers(); db.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });

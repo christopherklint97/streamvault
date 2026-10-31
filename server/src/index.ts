@@ -111,6 +111,7 @@ import {
 import { parseByteRange } from './ranges.js';
 import { createArchiveRouter } from './archive-routes.js';
 import { createLiveBuffer, createLiveRouter, packetAwareLiveEnabled } from './live-buffer.js';
+import { createLiveUpstreamShare } from './live-upstream-share.js';
 import { loadArchiveSigningKey } from './archive-hls.js';
 import { ArchiveCapture } from './archive-capture.js';
 import { pruneArchive } from './archive-retention.js';
@@ -267,17 +268,18 @@ function retireRunningIosHlsSessions(reason: string): void {
     if (session.state === 'running') retireIosHlsSession(sessionId, reason);
   }
 }
+// Both buffers may play the same channel: it shares one upstream connection.
 app.use('/api/live', createLiveRouter(liveBuffer, liveSource, {
-  onClaim: async () => {
+  onClaim: async id => {
     retireRunningIosHlsSessions('live-started');
-    await compatibleLiveBuffer.releaseAll();
+    await compatibleLiveBuffer.claim(id);
   },
 }));
 app.use('/api/live-compatible', createLiveRouter(compatibleLiveBuffer, liveSource, {
   basePath: '/api/live-compatible',
-  onClaim: async () => {
+  onClaim: async id => {
     retireRunningIosHlsSessions('live-started');
-    await liveBuffer.releaseAll();
+    await liveBuffer.claim(id);
   },
 }));
 
@@ -1495,6 +1497,12 @@ app.get('/api/ios-hls-assets/:sessionId/:asset', (req, res) => {
 });
 
 // ---------- Stream Proxy ----------
+const liveUpstreams = createLiveUpstreamShare();
+function isLikelyHlsManifest(contentType: string | undefined, url: string): boolean {
+  const type = contentType?.toLowerCase() || '';
+  return type.includes('mpegurl') || type.includes('m3u') || url.endsWith('.m3u8');
+}
+
 // Proxies stream URLs through the server so mobile clients don't need
 // direct access to the Xtream server (avoids CORS and network issues).
 
@@ -1528,7 +1536,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
   const isLive = contentType === 'livetv';
   // Viewer playback and recordings take the provider connection from archive capture.
   if (!isLoopbackCaptureSession(req.socket.remoteAddress, req.get('x-streamvault-capture-session'))) {
-    const release = await archiveCapture.acquirePlaybackLease();
+    const release = await archiveCapture.acquirePlaybackLease(channelId);
     if (res.destroyed) { release(); return; }
     res.once('close', release);
   }
@@ -1545,13 +1553,14 @@ app.get('/api/stream/:channelId', async (req, res) => {
     // Web→Node stream conversion overhead, and rides the shared keepalive
     // pool (huge win for VOD seeks). Live has no body timeout; VOD gets a
     // 30s headers timeout.
-    const upstream = await requestStream(
-      streamUrl,
-      upstreamHeaders,
-      10,
-      isLive ? 30_000 : 30_000,
-      allowUpstreamRedirect,
-    );
+    const connect = () => requestStream(streamUrl, upstreamHeaders, 10, 30_000, allowUpstreamRedirect);
+    // Every viewer, recording and archive writer of a stored live channel
+    // shares one provider connection; only a raw media response is shareable.
+    const upstream = isLive && channel?.url
+      ? await liveUpstreams.open(channelId, connect, shared =>
+        shared.statusCode < 400 && !isUpstreamHtmlResponse(pickHeader(shared.headers, 'content-type')) &&
+        !isLikelyHlsManifest(pickHeader(shared.headers, 'content-type'), streamUrl))
+      : await connect();
 
     logger.info('Stream proxy: upstream redirect resolved');
     const upstreamCT = pickHeader(upstream.headers, 'content-type');
@@ -1610,7 +1619,7 @@ app.get('/api/stream/:channelId', async (req, res) => {
     }
 
     const contentType = upstreamCT?.toLowerCase() || '';
-    const isM3u8 = contentType.includes('mpegurl') || contentType.includes('m3u') || streamUrl.endsWith('.m3u8');
+    const isM3u8 = isLikelyHlsManifest(upstreamCT, streamUrl);
 
     // Preserve 206 Partial Content when client sent a Range — required for
     // browsers/AVPlay to enable seeking. If upstream answered 200 to a Range

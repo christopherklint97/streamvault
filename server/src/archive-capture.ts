@@ -246,13 +246,16 @@ export class ArchiveCapture {
   private showChannels = new Set<string>();
   // Providers often allow one upstream connection. Viewer playback and file
   // recordings hold a lease; background archive capture yields until it ends.
+  // Capture of a leased channel keeps running: it shares that channel's upstream.
   private playbackLeases = 0;
+  private leasedChannels = new Map<string, number>();
   private playbackResumeTimer: NodeJS.Timeout | null = null;
   private playbackPause: Promise<void> = Promise.resolve();
 
   /** Pause background capture until the returned release runs; resolves once paused. */
-  async acquirePlaybackLease(): Promise<() => void> {
+  async acquirePlaybackLease(channelId: string): Promise<() => void> {
     this.playbackLeases += 1;
+    this.leasedChannels.set(channelId, (this.leasedChannels.get(channelId) ?? 0) + 1);
     if (this.playbackResumeTimer) { clearTimeout(this.playbackResumeTimer); this.playbackResumeTimer = null; }
     if (this.playbackLeases === 1) this.playbackPause = this.pauseForPlayback();
     let released = false;
@@ -260,6 +263,15 @@ export class ArchiveCapture {
       if (released) return;
       released = true;
       this.playbackLeases -= 1;
+      const remaining = (this.leasedChannels.get(channelId) ?? 1) - 1;
+      if (remaining > 0) this.leasedChannels.set(channelId, remaining);
+      else this.leasedChannels.delete(channelId);
+      // Capture that rode this channel's shared upstream would otherwise
+      // hold a second connection beside the remaining viewers.
+      if (this.playbackLeases > 0 && !remaining && !this.stopping && !this.showChannels.has(channelId)) {
+        void this.pauseChannel(channelId);
+        return;
+      }
       if (this.playbackLeases > 0 || this.stopping) return;
       // Zapping briefly closes one stream before opening the next.
       this.playbackResumeTimer = setTimeout(() => {
@@ -277,18 +289,20 @@ export class ArchiveCapture {
 
   private async pauseForPlayback(): Promise<void> {
     const channels = [...new Set([...this.writers.keys(), ...this.retry.keys()])]
-      .filter(id => !this.showChannels.has(id));
+      .filter(id => !this.showChannels.has(id) && !this.leasedChannels.has(id));
     if (!channels.length) return;
     logger.info(`Archive capture pausing ${channels.length} channel(s) for playback`);
-    await Promise.all(channels.map(async id => {
-      await this.stop(id);
-      if (this.playbackLeases > 0) this.store.setStatus(id, 'stopped', 'Paused while a stream is playing');
-    }));
+    await Promise.all(channels.map(id => this.pauseChannel(id)));
+  }
+
+  private async pauseChannel(channelId: string): Promise<void> {
+    await this.stop(channelId);
+    if (this.playbackLeases > 0) this.store.setStatus(channelId, 'stopped', 'Paused while a stream is playing');
   }
 
   start(channelId: string, forShow = false): void {
     if (forShow) this.showChannels.add(channelId);
-    if (this.playbackLeases > 0 && !this.showChannels.has(channelId)) return;
+    if (this.playbackLeases > 0 && !this.showChannels.has(channelId) && !this.leasedChannels.has(channelId)) return;
     if (this.stopping || this.writers.has(channelId) || this.retry.has(channelId) ||
       (!this.store.getArchive(channelId)?.enabled && !this.showChannels.has(channelId))) return;
     fs.mkdirSync(this.root, { recursive: true });
