@@ -10,8 +10,9 @@ into the non-root runtime.
 
 ## Reproducible inputs and authenticity
 
-- `Dockerfile` pins the Node base by version and digest and Debian main/security
-  package resolution to `20261009T000000Z` snapshots. APT archive signatures and
+- `Dockerfile` pins the Node base by version and digest; `build/media/debian.env`
+  pins Debian main/security package resolution to `20261009T000000Z` snapshots and
+  `build/media/runtime-packages.txt` lists the runtime packages. APT archive signatures and
   package hashes remain mandatory. Only snapshot expiry checking is disabled.
   The slim base has no CA trust store, so the initial signed APT transaction uses
   HTTP; after installing CA certificates the same snapshot sources use HTTPS.

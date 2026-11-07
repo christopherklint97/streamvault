@@ -2,8 +2,9 @@
 # Stage the GPL corresponding source of the image's native media stack:
 # the exact upstream archives scripts/build-native-media.sh builds (same URLs,
 # same SHA-256 pins from build/media/sources.env, same FFmpeg signature check),
-# plus the local Comskip patch shim and the build recipe. CI attaches the result
-# to every v* GitHub Release.
+# plus the local Comskip patch shim and the build recipe. Part of the source
+# bundle that scripts/build-source-bundle.sh assembles (it adds the Debian
+# source packages); this alone does not need Docker.
 #
 #   scripts/fetch-media-sources.sh OUTDIR
 set -euo pipefail

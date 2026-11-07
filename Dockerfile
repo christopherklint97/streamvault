@@ -19,19 +19,17 @@ RUN node scripts/collect-licenses.mjs /app /app/third-party-licenses
 # Bootstrap CA certificates over HTTP with mandatory Debian archive signatures;
 # switch the same immutable snapshot URLs to HTTPS immediately afterward.
 FROM ${NODE_IMAGE} AS media-base
-RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/* \
+COPY build/media/debian.env build/media/runtime-packages.txt /tmp/media/
+RUN . /tmp/media/debian.env \
+ && rm -f /etc/apt/sources.list /etc/apt/sources.list.d/* \
  && printf '%s\n' \
-    'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20261009T000000Z/ trixie main' \
-    'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20261009T000000Z/ trixie-security main' \
+    "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/$DEBIAN_SNAPSHOT/ trixie main" \
+    "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/$DEBIAN_SNAPSHOT/ trixie-security main" \
     > /etc/apt/sources.list \
- && apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates util-linux python3 libargtable2-0 \
-    libx264-164 libx265-215 libvpx9 libaom3 libdav1d7 libass9 libgnutls30t64 \
-    libfreetype6 libfontconfig1 libharfbuzz0b libmp3lame0 libopus0 \
-    libvorbis0a libvorbisenc2 libtheoraenc1 libtheoradec1 libwebp7 libwebpmux3 \
-    libopenjp2-7 libsoxr0 libzimg2 libzvbi0t64 fonts-dejavu-core \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends $(sed 's/#.*//' /tmp/media/runtime-packages.txt) \
  && /usr/bin/python3 -c 'from pathlib import Path; p=Path("/etc/apt/sources.list"); p.write_text(p.read_text().replace("http://", "https://"))' \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* /tmp/media
 
 ## One shared upstream FFmpeg ABI for ffmpeg/ffprobe, Comskip and source-built PyAV.
 FROM media-base AS native-build
@@ -79,12 +77,15 @@ RUN mkdir -p "$TMPDIR" \
 ## Non-root compiled runtime: no compiler, distro FFmpeg, pip, or bundled PyAV ABI.
 FROM media-base
 ARG GIT_REVISION=unknown
+# scripts/media-pin-hash.sh; names the corresponding-source bundle (CI sets it).
+ARG MEDIA_PIN_HASH=unknown
 LABEL org.opencontainers.image.title="StreamVault" \
       org.opencontainers.image.description="Self-hosted IPTV backend and PWA with DVR recording, built on FFmpeg, Comskip and PyAV" \
       org.opencontainers.image.source="https://github.com/christopherklint97/streamvault" \
       org.opencontainers.image.url="https://github.com/christopherklint97/streamvault" \
-      org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.revision=$GIT_REVISION
+      org.opencontainers.image.licenses="MIT AND GPL-2.0-or-later" \
+      org.opencontainers.image.revision=$GIT_REVISION \
+      io.github.christopherklint97.streamvault.source-bundle="ghcr.io/christopherklint97/streamvault-sources:$MEDIA_PIN_HASH"
 ENV NODE_ENV=production TMPDIR=/app/tmp \
     PATH=/opt/media/bin:$PATH PYTHONPATH=/opt/media/python \
     COMSKIP_PATH=/opt/media/bin/comskip \
@@ -104,15 +105,27 @@ COPY --from=frontend-build /app/dist public/
 # License texts, third-party notices and the native build recipe (GPL corresponding
 # source pointers). Only tracked, non-secret repository files are copied here.
 COPY LICENSE THIRD_PARTY_NOTICES.md /usr/share/doc/streamvault/
-COPY build/media/sources.env build/media/python-build-requirements.txt build/media/ffmpeg-release.asc \
+COPY build/media/sources.env build/media/debian.env build/media/runtime-packages.txt \
+     build/media/python-build-requirements.txt build/media/ffmpeg-release.asc \
      scripts/build-native-media.sh scripts/comskip-ffmpeg-compat.h scripts/patch-comskip-ffmpeg.py \
-     scripts/fetch-media-sources.sh /usr/share/doc/streamvault/source/
+     scripts/fetch-media-sources.sh scripts/media-pin-hash.sh /usr/share/doc/streamvault/source/
 COPY --from=native-build /opt/media/share/licenses/ /usr/share/doc/streamvault/licenses/
 COPY --from=frontend-build /app/third-party-licenses/ /usr/share/doc/streamvault/licenses/frontend/
 # Build-context file modes follow the host umask (0600 under umask 077);
 # the node user must still be able to read everything copied in.
-RUN printf 'StreamVault image built from commit %s\nSource and build recipe: https://github.com/christopherklint97/streamvault/tree/%s\nSee THIRD_PARTY_NOTICES.md for components, licenses and the corresponding-source offer.\n' \
-      "$GIT_REVISION" "$GIT_REVISION" > /usr/share/doc/streamvault/SOURCE \
+RUN printf '%s\n' \
+      "StreamVault image built from commit $GIT_REVISION" \
+      "Source and build recipe: https://github.com/christopherklint97/streamvault/tree/$GIT_REVISION" \
+      "" \
+      "Media pin hash: $MEDIA_PIN_HASH" \
+      "Corresponding source of the GPL/LGPL components (FFmpeg, Comskip, PyAV, Debian source packages):" \
+      "  OCI artifact:   ghcr.io/christopherklint97/streamvault-sources:$MEDIA_PIN_HASH" \
+      "  GitHub Release: https://github.com/christopherklint97/streamvault/releases/tag/media-sources-$MEDIA_PIN_HASH" \
+      "Fetch with:" \
+      "  oras pull ghcr.io/christopherklint97/streamvault-sources:$MEDIA_PIN_HASH" \
+      "  gh release download media-sources-$MEDIA_PIN_HASH --repo christopherklint97/streamvault" \
+      "See THIRD_PARTY_NOTICES.md for components and licenses." \
+      > /usr/share/doc/streamvault/SOURCE \
  && chmod -R a+rX /app/scripts /app/config /app/package.json /app/public /etc/comskip /usr/share/doc/streamvault \
  && mkdir -p /app/data/recordings /app/tmp \
  && chown node:node /app/data /app/data/recordings /app/tmp \
