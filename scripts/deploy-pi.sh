@@ -19,6 +19,9 @@
 # streamvault-server:latest → check out the commit → docker compose up -d --no-build --pull never
 # → wait for /api/health and confirm the container runs the new image.
 set -euo pipefail
+# The script checks out other commits (including other versions of itself) while it
+# runs, so the whole body is one brace group that bash parses before executing.
+{
 cd "$(dirname "$0")/.."
 
 REPO_IMAGE=ghcr.io/christopherklint97/streamvault
@@ -47,7 +50,7 @@ while [ $# -gt 0 ]; do
 		rollback=latest-rollback
 		case "${2:-}" in "" | -*) ;; *) rollback=$2; shift ;; esac
 		;;
-	-h | --help) sed -n '2,22p' "$0"; exit 0 ;;
+	-h | --help) sed -n '2,20p' "$0"; exit 0 ;;
 	-*) echo "unknown option: $1" >&2; exit 2 ;;
 	*) [ -z "$target" ] || { echo "only one REF allowed" >&2; exit 2; }; target=$1 ;;
 	esac
@@ -269,3 +272,5 @@ else
 	[ -z "$rollback_tag" ] || echo "rollback: scripts/deploy-pi.sh --rollback $rollback_tag" >&2
 	die "new container is not healthy"
 fi
+exit 0
+}
