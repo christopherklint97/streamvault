@@ -14,10 +14,10 @@ in `/usr/share/doc/streamvault/`:
 | --- | --- |
 | `LICENSE` | StreamVault (MIT) |
 | `THIRD_PARTY_NOTICES.md` | This file |
-| `SOURCE` | The StreamVault commit the image was built from, and its source URL |
+| `SOURCE` | The StreamVault commit the image was built from, its media pin hash, and where the corresponding source bundle is |
 | `licenses/` | FFmpeg (`COPYING.GPLv2`, `LICENSE.md`), `Comskip-LICENSE`, `PyAV-LICENSE` |
 | `licenses/frontend/` | License files of every package bundled into the web frontend (`INDEX.tsv` lists them) |
-| `source/` | `build-native-media.sh`, `sources.env` (versions and SHA-256 pins), the Python build lock, the FFmpeg release key, the Comskip patch shim, and `fetch-media-sources.sh` |
+| `source/` | `build-native-media.sh`, `sources.env` (versions and SHA-256 pins), `debian.env` (Debian snapshot), `runtime-packages.txt` (Debian runtime packages), the Python build lock, the FFmpeg release key, the Comskip patch shim, `fetch-media-sources.sh` and `media-pin-hash.sh` |
 
 `/opt/media/evidence/` additionally holds FFmpeg's configure output
 (`config.h`, `config.mak`), the signature check result, and the Debian
@@ -51,20 +51,29 @@ are not in the image.
 
 ## Debian packages
 
-The image is based on `node:26.11.1-trixie-slim` (Debian 13). Its packages,
-including the shared libraries FFmpeg links to, come from the Debian snapshot
-`20261009T000000Z` (`snapshot.debian.org/archive/debian/20261009T000000Z/` and
+The image is based on `node:26.11.1-trixie-slim` (Debian 13). The packages in
+`build/media/runtime-packages.txt` and their dependencies, including the shared
+libraries FFmpeg links to, come from the Debian snapshot in
+`build/media/debian.env` (`20261009T000000Z`:
+`snapshot.debian.org/archive/debian/20261009T000000Z/` and
 `.../debian-security/20261009T000000Z/`). GPL-licensed libraries among them
 include **libx264** (`libx264-164`, GPL-2.0-or-later) and **libx265**
-(`libx265-215`, GPL-2.0-or-later). The full list of installed packages and
-versions is `/opt/media/evidence/runtime-packages.tsv`; each package's license
-is in `/usr/share/doc/<package>/copyright`. Their source packages for exactly
-those versions are available from the same snapshot, for example:
+(`libx265-215`, GPL-2.0-or-later); others are under the LGPL (for example
+GnuTLS, LAME, libsoxr, zvbi, FriBidi, GLib). The full list of installed packages
+and versions is `/opt/media/evidence/runtime-packages.tsv`; each package's
+license is in `/usr/share/doc/<package>/copyright`.
 
-```bash
-# in a Debian trixie container with deb-src entries for the snapshot above
-apt-get source libx264-164=<version> libx265-215=<version>
-```
+The source bundle (below) contains the Debian source package (`.dsc`, orig and
+Debian tarballs) of every package that apt adds to the base image and whose
+Debian copyright file names a GPL, LGPL or AGPL license for any of its files,
+fetched from the same snapshot by `apt-get source`. `debian-packages.tsv` in the
+bundle lists every added package per architecture with its source package and
+the GPL-family licenses found; `debian-sources.txt` lists the source packages
+included.
+Packages that already come with the `node:26.11.1-trixie-slim` base image
+(Debian's base system, such as `libc6` and `bash`) are not repackaged in the
+bundle; `/opt/media/evidence/runtime-packages.tsv` names their versions, and
+their Debian source packages are on snapshot.debian.org.
 
 ## Node.js and npm packages
 
@@ -76,18 +85,53 @@ apt-get source libx264-164=<version> libx265-215=<version>
 
 ## Corresponding source
 
-- **Release images (`X.Y.Z`, `X.Y`, `latest`)**: every `v*` GitHub Release at
-  <https://github.com/christopherklint97/streamvault/releases> has the exact
-  FFmpeg, PyAV and Comskip source archives the image was built from, the FFmpeg
-  signature, the Comskip patch shim, the build script and the Dockerfile
-  attached, with a `SHA256SUMS` file.
-- **`edge` and `sha-<commit>` images**: `/usr/share/doc/streamvault/SOURCE`
-  names the commit. That commit's `Dockerfile`, `scripts/build-native-media.sh`
-  and `build/media/sources.env` pin the exact upstream archives by URL and
-  SHA-256. `scripts/fetch-media-sources.sh OUTDIR` from the same commit
-  downloads and verifies them.
-- **Written offer**: for at least three years after we last distribute a given
-  image, we will provide the complete corresponding source for the GPL
-  components in it (including the Debian source packages it uses) to anyone who
-  asks. Open an issue at <https://github.com/christopherklint97/streamvault/issues>
-  naming the image tag or digest.
+The complete corresponding source of the GPL and LGPL components of every
+published image (`sha-<commit>`, `edge`, `X.Y.Z`, `X.Y`, `latest`) is
+distributed next to the image, in two identical copies:
+
+- the OCI artifact `ghcr.io/christopherklint97/streamvault-sources:<pin>`, in
+  the same registry as the image;
+- the GitHub Release `media-sources-<pin>` (a pre-release) at
+  <https://github.com/christopherklint97/streamvault/releases>.
+
+`<pin>` is the image's media pin hash: 16 hex digits computed by
+`scripts/media-pin-hash.sh` over everything the native media stack is built
+from (`build/media/*`, the build script, the Comskip patch files, the bundle
+scripts and the pinned base image). Every image carries it in the
+`io.github.christopherklint97.streamvault.source-bundle` label and in
+`/usr/share/doc/streamvault/SOURCE`. CI creates the bundle once per pin hash
+and does not publish an image until its bundle exists in both places.
+
+The bundle contains:
+
+- the exact FFmpeg source archive with its upstream `.asc` signature, the
+  Comskip archive and the PyAV sdist;
+- the Comskip compatibility shim (`comskip-ffmpeg-compat.h`), the script that
+  applies it (`patch-comskip-ffmpeg.py`) and its regression test;
+- `build-native-media.sh`, the `Dockerfile`, the pin files (`sources.env`,
+  `debian.env`, `runtime-packages.txt`, the Python build lock, the FFmpeg
+  release key) and the scripts that assembled the bundle;
+- `debian-sources.tar`: the Debian source packages described above;
+- `SHA256SUMS` over all of it, and `MEDIA_PIN_HASH`.
+
+To fetch it, find the bundle reference of the image (the multi-arch index
+carries it as an annotation, the image config as a label), then pull it:
+
+```bash
+image=ghcr.io/christopherklint97/streamvault:latest
+bundle=$(docker buildx imagetools inspect --raw "$image" |
+  jq -r '.annotations["io.github.christopherklint97.streamvault.source-bundle"]')
+# or, for a pulled image:
+#   docker image inspect --format '{{ index .Config.Labels "io.github.christopherklint97.streamvault.source-bundle" }}' "$image"
+pin=${bundle##*:}
+
+# From the registry, with oras (https://oras.land)
+mkdir "streamvault-sources-$pin" && cd "streamvault-sources-$pin"
+oras pull "$bundle"
+# or from GitHub: gh release download "media-sources-$pin" --repo christopherklint97/streamvault
+
+sha256sum --check SHA256SUMS
+```
+
+The Git commit named in `SOURCE` holds StreamVault's own source and the same
+build recipe; `scripts/build-source-bundle.sh` in it rebuilds the bundle.

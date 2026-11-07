@@ -7,6 +7,12 @@ name: CI
 # passed, then signs and attests it. Run manually with dry_run (the default) to
 # exercise registry login, digest pushes and the manifest merge from any branch
 # without creating tags, signatures or attestations.
+#
+# GPL corresponding source: every image names a source bundle keyed by the media
+# pin hash (scripts/media-pin-hash.sh). On a push to main or a v* tag the
+# source-bundle job creates the bundle once per pin hash, as an OCI artifact
+# next to the image and as a pre-release named media-sources-<hash>; publish
+# refuses to tag an image until both exist.
 on:
   push:
     branches: [main]
@@ -25,6 +31,10 @@ permissions:
 
 env:
   IMAGE: ghcr.io/christopherklint97/streamvault
+  SOURCES_IMAGE: ghcr.io/christopherklint97/streamvault-sources
+  SOURCE_BUNDLE_LABEL: io.github.christopherklint97.streamvault.source-bundle
+  ORAS_VERSION: 1.3.6
+  ORAS_SHA256: 66fb0ad7206f3f6fa77ed5b552049d364ccf4b50b1684554f731f76302b52ca0
   # Digest pushes need a writable token: never on pull_request, never in forks.
   PUSH_DIGESTS: ${{ github.repository == 'christopherklint97/streamvault' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
   # The registry build cache is written only from main.
@@ -32,10 +42,28 @@ env:
   OCI_LABELS: |
     org.opencontainers.image.title=StreamVault
     org.opencontainers.image.description=Self-hosted IPTV backend and PWA with DVR recording, built on FFmpeg, Comskip and PyAV
-    org.opencontainers.image.licenses=MIT
+    org.opencontainers.image.licenses=MIT AND GPL-2.0-or-later
 
 jobs:
+  # Names the corresponding-source bundle for this commit's native media inputs.
+  media-pin:
+    runs-on: ubuntu-latest
+    outputs:
+      hash: ${{ steps.pin.outputs.hash }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Media pin hash
+        id: pin
+        run: |
+          hash=$(scripts/media-pin-hash.sh)
+          [[ "$hash" =~ ^[0-9a-f]{16}$ ]] || { echo "::error::bad media pin hash: $hash"; exit 1; }
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+          echo "Media pin $hash: $SOURCES_IMAGE:$hash, release media-sources-$hash" >> "$GITHUB_STEP_SUMMARY"
+
   build-and-test:
+    needs: media-pin
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -99,7 +127,9 @@ jobs:
       - name: Apps2Samsung workflow contract checks (offline)
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/test_tizen_wgt_workflow.py
       - name: Deploy script syntax
-        run: bash -n scripts/deploy-pi.sh scripts/fetch-media-sources.sh scripts/check-image-notices.sh
+        run: |
+          bash -n scripts/deploy-pi.sh scripts/fetch-media-sources.sh scripts/check-image-notices.sh \
+            scripts/media-pin-hash.sh scripts/media-runtime-packages.sh scripts/build-source-bundle.sh
 
       - name: Build
         run: npm run build
@@ -127,7 +157,9 @@ jobs:
           load: true
           tags: streamvault-ci:packet
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: GIT_REVISION=${{ github.sha }}
+          build-args: |
+            GIT_REVISION=${{ github.sha }}
+            MEDIA_PIN_HASH=${{ needs.media-pin.outputs.hash }}
           cache-from: |
             type=registry,ref=${{ env.IMAGE }}:buildcache-amd64
             type=gha,scope=amd64
@@ -140,7 +172,9 @@ jobs:
           docker run --rm -e STREAMVAULT_ASSERT_PRODUCTION=1 streamvault-ci:packet node scripts/smoke-runtime.mjs
           bash scripts/test-packaged-source.sh streamvault-ci:packet
       - name: License notices are in the image
-        run: bash scripts/check-image-notices.sh streamvault-ci:packet "$GITHUB_SHA"
+        env:
+          PIN: ${{ needs.media-pin.outputs.hash }}
+        run: bash scripts/check-image-notices.sh streamvault-ci:packet "$GITHUB_SHA" "$PIN"
       # Same commit, inputs and builder as the tested image: every layer comes
       # from the local cache, so this pushes what the steps above tested.
       - name: Push tested image by digest
@@ -151,7 +185,9 @@ jobs:
           context: .
           platforms: linux/amd64
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: GIT_REVISION=${{ github.sha }}
+          build-args: |
+            GIT_REVISION=${{ github.sha }}
+            MEDIA_PIN_HASH=${{ needs.media-pin.outputs.hash }}
           cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-amd64
           sbom: true
           provenance: mode=max
@@ -172,6 +208,7 @@ jobs:
           if-no-files-found: error
 
   arm64-image:
+    needs: media-pin
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
@@ -202,7 +239,9 @@ jobs:
           load: true
           tags: streamvault-ci:arm64
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: GIT_REVISION=${{ github.sha }}
+          build-args: |
+            GIT_REVISION=${{ github.sha }}
+            MEDIA_PIN_HASH=${{ needs.media-pin.outputs.hash }}
           cache-from: |
             type=registry,ref=${{ env.IMAGE }}:buildcache-arm64
             type=gha,scope=arm64
@@ -221,7 +260,9 @@ jobs:
       - name: Test ARM64 server, media and Python sources in packaged runtime
         run: bash scripts/test-packaged-source.sh streamvault-ci:arm64
       - name: License notices are in the image
-        run: bash scripts/check-image-notices.sh streamvault-ci:arm64 "$GITHUB_SHA"
+        env:
+          PIN: ${{ needs.media-pin.outputs.hash }}
+        run: bash scripts/check-image-notices.sh streamvault-ci:arm64 "$GITHUB_SHA" "$PIN"
       - name: Push tested image by digest
         id: push
         if: env.PUSH_DIGESTS == 'true'
@@ -230,7 +271,9 @@ jobs:
           context: .
           platforms: linux/arm64
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: GIT_REVISION=${{ github.sha }}
+          build-args: |
+            GIT_REVISION=${{ github.sha }}
+            MEDIA_PIN_HASH=${{ needs.media-pin.outputs.hash }}
           cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-arm64
           sbom: true
           provenance: mode=max
@@ -259,26 +302,170 @@ jobs:
           compression-level: 0
           if-no-files-found: error
 
-  # GPL corresponding source: the exact pinned archives, verified like the build does.
-  media-sources:
-    runs-on: ubuntu-latest
+  # The Debian packages apt adds to the runtime image, per architecture, with
+  # the GPL-family licenses their copyright files name.
+  media-packages:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Fetch and verify pinned media sources
-        run: scripts/fetch-media-sources.sh "$RUNNER_TEMP/media-sources"
-      - if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - name: Install the runtime package set from the pinned snapshot
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          scripts/media-runtime-packages.sh > "$RUNNER_TEMP/debian-packages-$ARCH.tsv"
+          awk -F'\t' -v a="$ARCH" 'NR > 1 && $1 != a { bad = 1 } END { exit bad || NR < 2 }' "$RUNNER_TEMP/debian-packages-$ARCH.tsv"
+          column -t -s $'\t' "$RUNNER_TEMP/debian-packages-$ARCH.tsv"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: media-sources
-          path: ${{ runner.temp }}/media-sources/*
+          name: debian-packages-${{ matrix.arch }}
+          path: ${{ runner.temp }}/debian-packages-${{ matrix.arch }}.tsv
           retention-days: 2
-          compression-level: 0
           if-no-files-found: error
 
+  # GPL corresponding source, once per media pin hash: the exact FFmpeg, Comskip
+  # and PyAV archives, the build recipe and the GPL/LGPL Debian source packages.
+  # Pushes to main and v* tags create it (as an OCI artifact and a pre-release)
+  # if it does not exist yet; other runs only build it to validate the recipe.
+  source-bundle:
+    needs: [media-pin, media-packages]
+    runs-on: ubuntu-latest
+    # One creator per pin hash at a time; the second run finds the bundle.
+    concurrency:
+      group: ${{ github.event_name == 'push' && format('source-bundle-{0}', needs.media-pin.outputs.hash) || format('source-bundle-{0}-{1}', github.run_id, github.run_attempt) }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      packages: write
+    env:
+      PIN: ${{ needs.media-pin.outputs.hash }}
+      CREATE: ${{ github.repository == 'christopherklint97/streamvault' && github.event_name == 'push' }}
+      GH_TOKEN: ${{ github.token }}
+    outputs:
+      ready: ${{ steps.bundle.outputs.ready }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install oras
+        run: |
+          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/oras.tar.gz" \
+            "https://github.com/oras-project/oras/releases/download/v$ORAS_VERSION/oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+          echo "$ORAS_SHA256  $RUNNER_TEMP/oras.tar.gz" | sha256sum --check --strict -
+          mkdir -p "$RUNNER_TEMP/oras"
+          tar -xzf "$RUNNER_TEMP/oras.tar.gz" -C "$RUNNER_TEMP/oras" oras
+          echo "$RUNNER_TEMP/oras" >> "$GITHUB_PATH"
+      - name: Log in to GHCR
+        if: env.CREATE == 'true'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: debian-packages-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/debian-packages
+      - name: Create or verify the source bundle
+        id: bundle
+        run: |
+          set -euo pipefail
+          ref="$SOURCES_IMAGE:$PIN"
+          tag="media-sources-$PIN"
+          repo="$GITHUB_REPOSITORY"
+          dir="$RUNNER_TEMP/source-bundle"
+          oci_exists() { oras manifest fetch "$ref" >/dev/null 2>&1; }
+          # A published (non-draft) release whose assets are exactly SHA256SUMS
+          # and every file it lists.
+          release_complete() {
+            local listed assets
+            listed=$(gh release download "$tag" --repo "$repo" --pattern SHA256SUMS --output - 2>/dev/null |
+              awk '{ print $2 }' | { cat; echo SHA256SUMS; } | sort) || return 1
+            assets=$(gh release view "$tag" --repo "$repo" --json isDraft,assets \
+              --jq 'if .isDraft then error("draft") else .assets[].name end' 2>/dev/null | sort) || return 1
+            [ -n "$assets" ] && [ "$listed" = "$assets" ]
+          }
+          push_oci() {
+            (cd "$dir" && oras push "$ref" \
+              --artifact-type application/vnd.christopherklint97.streamvault.source-bundle.v1 \
+              --annotation "org.opencontainers.image.source=https://github.com/$repo" \
+              --annotation "org.opencontainers.image.description=GPL corresponding source for StreamVault images with media pin $PIN" \
+              --annotation "org.opencontainers.image.revision=$GITHUB_SHA" \
+              -- *)
+          }
+          push_release() {
+            if ! gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+              {
+                printf 'GPL corresponding source for the StreamVault container images with media pin `%s`.\n\n' "$PIN"
+                printf 'Images name it in the `%s` label and in `/usr/share/doc/streamvault/SOURCE`. The same files are the OCI artifact `%s`.\n\n' "$SOURCE_BUNDLE_LABEL" "$ref"
+                printf 'Contents: the exact FFmpeg (with its signature), Comskip and PyAV source archives, the Comskip compatibility shim and patch script, the native build script, the Dockerfile and pin files, and `debian-sources.tar` with the Debian source packages of every GPL/LGPL Debian package in the image (`debian-packages.tsv` lists them). Check with `sha256sum --check SHA256SUMS`. See THIRD_PARTY_NOTICES.md.\n'
+              } > "$RUNNER_TEMP/notes.md"
+              gh release create "$tag" --repo "$repo" --target "$GITHUB_SHA" --draft --prerelease --latest=false \
+                --title "Media sources $PIN" --notes-file "$RUNNER_TEMP/notes.md"
+            fi
+            gh release upload "$tag" "$dir"/* --repo "$repo" --clobber
+            gh release edit "$tag" --repo "$repo" --draft=false --prerelease --latest=false
+          }
+          verify_dir() { (cd "$dir" && sha256sum --check --strict --quiet SHA256SUMS && [ "$(cat MEDIA_PIN_HASH)" = "$PIN" ]); }
+
+          have_oci=false; have_release=false
+          oci_exists && have_oci=true
+          release_complete && have_release=true
+          echo "OCI artifact $ref: $have_oci; release $tag: $have_release"
+          if [ "$have_oci" = true ] && [ "$have_release" = true ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "Source bundle for media pin $PIN already exists." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$CREATE" != true ] && { [ "$have_oci" = true ] || [ "$have_release" = true ]; }; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Bundle exists (OCI $have_oci, release $have_release); nothing to validate."
+            exit 0
+          fi
+          mkdir -p "$dir"
+          # Fill a missing location from the existing one so both stay identical.
+          if [ "$CREATE" = true ] && [ "$have_oci" = true ]; then
+            (cd "$dir" && oras pull "$ref")
+          elif [ "$CREATE" = true ] && [ "$have_release" = true ]; then
+            gh release download "$tag" --repo "$repo" --dir "$dir"
+          else
+            scripts/build-source-bundle.sh "$dir" "$RUNNER_TEMP"/debian-packages/*.tsv
+          fi
+          verify_dir
+          {
+            echo "### Source bundle for media pin $PIN"
+            echo "$(du -cb "$dir"/* | tail -n1 | cut -f1) bytes in $(find "$dir" -type f | wc -l) files"
+            echo
+            echo '| Source package | Licenses (Debian copyright) |'
+            echo '| --- | --- |'
+            awk -F'\t' 'NR > 1 && $6 != "-" { print "| `" $4 " " $5 "` | " $6 " |" }' "$dir/debian-packages.tsv" | sort -u
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$CREATE" != true ]; then
+            echo "Validated only; bundles are created on pushes to main and v* tags."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [ "$have_oci" = true ] || push_oci
+          [ "$have_release" = true ] || push_release
+          oci_exists || { echo "::error::$ref is missing after push"; exit 1; }
+          release_complete || { echo "::error::release $tag is incomplete after upload"; exit 1; }
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+          if ! oras manifest fetch --registry-config "$(mktemp -d)/config.json" "$ref" >/dev/null 2>&1; then
+            echo "::warning::$ref is not anonymously pullable. Make the ghcr.io/christopherklint97/streamvault-sources package public (Package settings → Change visibility)."
+          fi
+
   publish:
-    needs: [build-and-test, arm64-image]
+    needs: [media-pin, build-and-test, arm64-image, source-bundle]
     if: github.repository == 'christopherklint97/streamvault' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     # Never let an older run overwrite edge/latest while a newer one publishes.
@@ -322,7 +509,38 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
           labels: ${{ env.OCI_LABELS }}
-          annotations: ${{ env.OCI_LABELS }}
+          annotations: |
+            ${{ env.OCI_LABELS }}
+            ${{ env.SOURCE_BUNDLE_LABEL }}=${{ env.SOURCES_IMAGE }}:${{ needs.media-pin.outputs.hash }}
+      - name: Install oras
+        run: |
+          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/oras.tar.gz" \
+            "https://github.com/oras-project/oras/releases/download/v$ORAS_VERSION/oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+          echo "$ORAS_SHA256  $RUNNER_TEMP/oras.tar.gz" | sha256sum --check --strict -
+          mkdir -p "$RUNNER_TEMP/oras"
+          tar -xzf "$RUNNER_TEMP/oras.tar.gz" -C "$RUNNER_TEMP/oras" oras
+          echo "$RUNNER_TEMP/oras" >> "$GITHUB_PATH"
+      # Bundles are never deleted, so once both locations exist no later step
+      # can race with them; tag nothing until they do.
+      - name: Corresponding source bundle exists
+        env:
+          PIN: ${{ needs.media-pin.outputs.hash }}
+          READY: ${{ needs.source-bundle.outputs.ready }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ok=true
+          [ "$READY" = true ] || ok=false
+          oras manifest fetch "$SOURCES_IMAGE:$PIN" >/dev/null || ok=false
+          [ "$(gh release view "media-sources-$PIN" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = false ] || ok=false
+          if [ "$ok" = true ]; then
+            echo "Source bundle: $SOURCES_IMAGE:$PIN and release media-sources-$PIN"
+          elif [ "$DRY_RUN" = true ]; then
+            echo "::warning::no source bundle for media pin $PIN; a real publish would stop here"
+          else
+            echo "::error::no complete source bundle for media pin $PIN; refusing to publish"
+            exit 1
+          fi
       - name: Merge tested digests into one multi-arch manifest
         id: manifest
         run: |
@@ -375,32 +593,46 @@ jobs:
             echo "::warning::$ref is not anonymously pullable. Make the ghcr.io/christopherklint97/streamvault package public (Package settings → Change visibility)."
           fi
 
-  # v* tags: attach the GPL corresponding source to the GitHub Release.
+  # v* tags: attach the image's source bundle (pulled from GHCR) to the release.
   release-sources:
-    needs: [publish, media-sources]
+    needs: [media-pin, publish]
     if: github.repository == 'christopherklint97/streamvault' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      packages: read
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - name: Install oras
+        run: |
+          curl -fsSL --proto '=https' -o "$RUNNER_TEMP/oras.tar.gz" \
+            "https://github.com/oras-project/oras/releases/download/v$ORAS_VERSION/oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+          echo "$ORAS_SHA256  $RUNNER_TEMP/oras.tar.gz" | sha256sum --check --strict -
+          mkdir -p "$RUNNER_TEMP/oras"
+          tar -xzf "$RUNNER_TEMP/oras.tar.gz" -C "$RUNNER_TEMP/oras" oras
+          echo "$RUNNER_TEMP/oras" >> "$GITHUB_PATH"
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
-          name: media-sources
-          path: sources
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
       - name: Attach corresponding source to the release
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
+          PIN: ${{ needs.media-pin.outputs.hash }}
           IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
         run: |
           set -euo pipefail
-          (cd sources && sha256sum --check --strict SHA256SUMS)
+          mkdir sources
+          (cd sources && oras pull "$SOURCES_IMAGE:$PIN" && sha256sum --check --strict SHA256SUMS && [ "$(cat MEDIA_PIN_HASH)" = "$PIN" ])
           if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             {
               printf 'Container image: `%s:%s` (`%s`)\n\n' "$IMAGE" "${TAG#v}" "$IMAGE_DIGEST"
-              printf 'The attached archives are the exact FFmpeg, PyAV and Comskip sources the image was built from, with the Comskip patch shim, the build script and SHA256SUMS (GPL corresponding source; see THIRD_PARTY_NOTICES.md).\n'
+              printf 'The attached files are the GPL corresponding source of the image (media pin `%s`, also at `%s:%s` and in the release `media-sources-%s`): the exact FFmpeg, PyAV and Comskip sources, the Comskip patch shim, the build script, the Dockerfile, the GPL/LGPL Debian source packages and SHA256SUMS. See THIRD_PARTY_NOTICES.md.\n' "$PIN" "$SOURCES_IMAGE" "$PIN" "$PIN"
             } > notes.md
-            gh release create "$TAG" --repo "$REPO" --verify-tag --title "$TAG" --notes-file notes.md
+            latest=true
+            case "$TAG" in *-*) latest=false ;; esac
+            gh release create "$TAG" --repo "$REPO" --verify-tag --title "$TAG" --notes-file notes.md --latest="$latest"
           fi
           gh release upload "$TAG" sources/* --repo "$REPO" --clobber

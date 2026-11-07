@@ -1,0 +1,9 @@
+# Debian packages installed into the runtime image (Dockerfile media-base stage),
+# resolved from the snapshot in debian.env. scripts/media-runtime-packages.sh
+# installs the same set to find the GPL/LGPL packages whose Debian source goes
+# into the corresponding-source bundle.
+ca-certificates util-linux python3 libargtable2-0
+libx264-164 libx265-215 libvpx9 libaom3 libdav1d7 libass9 libgnutls30t64
+libfreetype6 libfontconfig1 libharfbuzz0b libmp3lame0 libopus0
+libvorbis0a libvorbisenc2 libtheoraenc1 libtheoradec1 libwebp7 libwebpmux3
+libopenjp2-7 libsoxr0 libzimg2 libzvbi0t64 fonts-dejavu-core

@@ -92,25 +92,34 @@ docker buildx imagetools inspect ghcr.io/christopherklint97/streamvault:edge \
 
 ### Source code and licenses
 
-StreamVault is MIT-licensed, but the image also contains FFmpeg built with
-x264/x265 (GPL-2.0-or-later), a patched Comskip (GPL-2.0), PyAV and Debian
-libraries. [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) lists the
+StreamVault is MIT-licensed. The image is labelled `MIT AND GPL-2.0-or-later`
+because it also contains FFmpeg built with x264/x265 (GPL-2.0-or-later), a
+patched Comskip (GPL-2.0), PyAV and Debian libraries. [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) lists the
 components, versions, licenses and source URLs; inside the image it is in
 `/usr/share/doc/streamvault/` with the license texts and the native build
 recipe.
 
-Corresponding source:
+Corresponding source: every image names a source bundle that holds the exact
+FFmpeg (with its signature), Comskip and PyAV source archives, the Comskip
+patch shim, the build script, the Dockerfile, the Debian source packages of the
+GPL/LGPL Debian libraries in the image, and `SHA256SUMS`. It is published next
+to the image, as the OCI artifact
+`ghcr.io/christopherklint97/streamvault-sources:<pin>` and as the pre-release
+`media-sources-<pin>` on the
+[Releases](https://github.com/christopherklint97/streamvault/releases) page.
+`<pin>` is in the image's `io.github.christopherklint97.streamvault.source-bundle`
+label and in `/usr/share/doc/streamvault/SOURCE`; CI does not publish an image
+before its bundle exists.
 
-- Release images: each `v*` [GitHub Release](https://github.com/christopherklint97/streamvault/releases)
-  has the exact FFmpeg, PyAV and Comskip source archives used, the Comskip
-  patch shim, the build script, the Dockerfile and `SHA256SUMS` attached.
-- `edge` and `sha-*` images: `/usr/share/doc/streamvault/SOURCE` names the
-  commit; `scripts/build-native-media.sh` and `build/media/sources.env` in that
-  commit pin every upstream archive by URL and SHA-256, and
-  `scripts/fetch-media-sources.sh OUTDIR` downloads and verifies them.
-- Written offer: for at least three years after we last distribute an image, we
-  will provide the complete corresponding source of its GPL components on
-  request. Open an issue naming the image tag or digest.
+```bash
+image=ghcr.io/christopherklint97/streamvault:latest
+bundle=$(docker buildx imagetools inspect --raw "$image" |
+  jq -r '.annotations["io.github.christopherklint97.streamvault.source-bundle"]')
+pin=${bundle##*:}
+mkdir "sources-$pin" && cd "sources-$pin"
+oras pull "$bundle"   # or: gh release download "media-sources-$pin" --repo christopherklint97/streamvault
+sha256sum --check SHA256SUMS
+```
 
 ## Features
 
