@@ -12,6 +12,8 @@ COPY scripts/ scripts/
 COPY src/ src/
 COPY public/ public/
 RUN VITE_SERVER_URL="" NODE_OPTIONS="--max-old-space-size=512" GOMAXPROCS=1 nice -n 15 npm run build
+# The bundle inlines these packages; ship their license texts next to it.
+RUN node scripts/collect-licenses.mjs /app /app/third-party-licenses
 
 ## Pin Debian package resolution for both native build and runtime.
 # Bootstrap CA certificates over HTTP with mandatory Debian archive signatures;
@@ -77,7 +79,12 @@ RUN mkdir -p "$TMPDIR" \
 ## Non-root compiled runtime: no compiler, distro FFmpeg, pip, or bundled PyAV ABI.
 FROM media-base
 ARG GIT_REVISION=unknown
-LABEL org.opencontainers.image.revision=$GIT_REVISION
+LABEL org.opencontainers.image.title="StreamVault" \
+      org.opencontainers.image.description="Self-hosted IPTV backend and PWA with DVR recording, built on FFmpeg, Comskip and PyAV" \
+      org.opencontainers.image.source="https://github.com/christopherklint97/streamvault" \
+      org.opencontainers.image.url="https://github.com/christopherklint97/streamvault" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.revision=$GIT_REVISION
 ENV NODE_ENV=production TMPDIR=/app/tmp \
     PATH=/opt/media/bin:$PATH PYTHONPATH=/opt/media/python \
     COMSKIP_PATH=/opt/media/bin/comskip \
@@ -94,9 +101,19 @@ COPY server/package.json ./
 COPY server/config/ config/
 COPY server/config/comskip/espn.ini /etc/comskip/espn.ini
 COPY --from=frontend-build /app/dist public/
+# License texts, third-party notices and the native build recipe (GPL corresponding
+# source pointers). Only tracked, non-secret repository files are copied here.
+COPY LICENSE THIRD_PARTY_NOTICES.md /usr/share/doc/streamvault/
+COPY build/media/sources.env build/media/python-build-requirements.txt build/media/ffmpeg-release.asc \
+     scripts/build-native-media.sh scripts/comskip-ffmpeg-compat.h scripts/patch-comskip-ffmpeg.py \
+     scripts/fetch-media-sources.sh /usr/share/doc/streamvault/source/
+COPY --from=native-build /opt/media/share/licenses/ /usr/share/doc/streamvault/licenses/
+COPY --from=frontend-build /app/third-party-licenses/ /usr/share/doc/streamvault/licenses/frontend/
 # Build-context file modes follow the host umask (0600 under umask 077);
 # the node user must still be able to read everything copied in.
-RUN chmod -R a+rX /app/scripts /app/config /app/package.json /app/public /etc/comskip \
+RUN printf 'StreamVault image built from commit %s\nSource and build recipe: https://github.com/christopherklint97/streamvault/tree/%s\nSee THIRD_PARTY_NOTICES.md for components, licenses and the corresponding-source offer.\n' \
+      "$GIT_REVISION" "$GIT_REVISION" > /usr/share/doc/streamvault/SOURCE \
+ && chmod -R a+rX /app/scripts /app/config /app/package.json /app/public /etc/comskip /usr/share/doc/streamvault \
  && mkdir -p /app/data/recordings /app/tmp \
  && chown node:node /app/data /app/data/recordings /app/tmp \
  && dpkg-query -W > /opt/media/evidence/runtime-packages.tsv

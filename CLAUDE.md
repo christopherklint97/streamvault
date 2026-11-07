@@ -59,4 +59,6 @@
 - Platform: Raspberry Pi (aarch64), Debian 13
 - Node v24+ via nvm - run `source ~/.zshrc` before node/npm commands in shell
 - Package manager: npm
-- Docker deployment: `docker compose up -d --build` from project root
+- Docker images: CI (`.github/workflows/ci.yml`) builds amd64 and arm64 natively, smoke-tests them, and publishes `ghcr.io/christopherklint97/streamvault` (`sha-<commit>`, `edge`; `X.Y.Z`/`X.Y`/`latest` on `v*` tags), signed, attested and with SBOMs. Do not build images on the Pi.
+- Production deploy: from the production worktree `~/services/streamvault-production`, run `scripts/deploy-pi.sh --wait` (deploys the attested `sha-<origin/main>` image, refuses during recordings, keeps 5 `streamvault-server:rollback-<stamp>` tags). Roll back with `scripts/deploy-pi.sh --rollback [tag]`. Never `docker compose up --build` there; its `.env` pins `COMPOSE_PROJECT_NAME`, `COMPOSE_FILE` and `STREAMVAULT_IMAGE=streamvault-server:latest`.
+- Licensing: the image ships GPL FFmpeg/Comskip. Keep `THIRD_PARTY_NOTICES.md` in sync when `build/media/sources.env` or the native stack changes.
