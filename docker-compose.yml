@@ -7,6 +7,10 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # Prebuilt multi-arch image from CI; `docker compose build` still builds locally
+    # and tags the result with this name. Override with STREAMVAULT_IMAGE, e.g.
+    # ghcr.io/christopherklint97/streamvault:edge, a pinned :X.Y.Z, or a local tag.
+    image: ${STREAMVAULT_IMAGE:-ghcr.io/christopherklint97/streamvault:latest}
     build:
       context: .
       dockerfile: Dockerfile

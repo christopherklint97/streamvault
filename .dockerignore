@@ -26,3 +26,23 @@ certs
 **/recordings
 prototypes
 Screenshot*.png
+# Never let credentials, local state or media into the build context.
+**/.npmrc
+**/.netrc
+**/.ssh
+**/.docker
+**/.aws
+**/.config
+**/*.sqlite
+**/*.sqlite3
+**/*.sqlite-*
+**/*.crt
+**/*.mp4
+**/*.mkv
+**/*.tar
+**/*.tar.gz
+**/*.tgz
+**/*.zip
+**/backups
+**/tmp
+docs

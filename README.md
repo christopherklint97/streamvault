@@ -12,12 +12,14 @@ Raspberry Pi, Proxmox guest, or server. Installing a `.wgt`, including through
 Apps2Samsung, does not install that backend. The StreamVault backend URL is
 separate from the Xtream server URL supplied by an IPTV provider.
 
-Start the backend on a Docker host:
+Start the backend on a Docker host with the prebuilt image (see
+[Run with Docker](#run-with-docker)):
 
 ```bash
 git clone https://github.com/christopherklint97/streamvault.git
 cd streamvault
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 Verify it from another device on the same network, replacing `<backend-ip>`
@@ -35,6 +37,80 @@ logs are available on the Docker host:
 ```bash
 docker compose logs -f server
 ```
+
+## Run with Docker
+
+CI publishes a multi-arch image (`linux/amd64`, `linux/arm64`) to
+`ghcr.io/christopherklint97/streamvault`. Each image is built natively per
+architecture from the same commit and published only after lint, unit tests and
+the packaged-runtime smoke tests pass on both architectures.
+
+```bash
+git clone https://github.com/christopherklint97/streamvault.git
+cd streamvault
+# Optional: pick a tag (default :latest, the newest release).
+echo 'STREAMVAULT_IMAGE=ghcr.io/christopherklint97/streamvault:latest' >> .env
+docker compose pull
+docker compose up -d
+curl --fail http://127.0.0.1:3002/api/health
+```
+
+Update with `docker compose pull && docker compose up -d`. Data lives in the
+`streamvault_data` and `streamvault_recordings` volumes and survives updates.
+To build from source instead, set `STREAMVAULT_IMAGE` to a local name such as
+`streamvault:local` and run `docker compose up -d --build`.
+
+| Tag | Meaning |
+| --- | --- |
+| `latest` | Newest `vX.Y.Z` release |
+| `X.Y.Z`, `X.Y` | A release, and the newest patch of a minor release |
+| `edge` | Newest green commit on `main` |
+| `sha-<full commit sha>` | One specific green commit on `main` (used by the Pi deploy script) |
+
+`latest` exists only after the first `v*` release tag; until then use `edge`.
+
+### Verify the image
+
+Every published manifest has a GitHub build-provenance attestation, a keyless
+Sigstore (cosign) signature, and per-architecture SBOM and provenance from
+BuildKit.
+
+```bash
+# Build provenance (gh >= 2.49): built by this repo's CI workflow
+gh attestation verify oci://ghcr.io/christopherklint97/streamvault:edge \
+  --owner christopherklint97
+
+# Cosign signature
+cosign verify ghcr.io/christopherklint97/streamvault:edge \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github\.com/christopherklint97/streamvault/\.github/workflows/ci\.yml@refs/(heads/main|tags/v.+)$'
+
+# SBOM (SPDX) for one architecture
+docker buildx imagetools inspect ghcr.io/christopherklint97/streamvault:edge \
+  --format '{{ json (index .SBOM "linux/arm64").SPDX }}'
+```
+
+### Source code and licenses
+
+StreamVault is MIT-licensed, but the image also contains FFmpeg built with
+x264/x265 (GPL-2.0-or-later), a patched Comskip (GPL-2.0), PyAV and Debian
+libraries. [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) lists the
+components, versions, licenses and source URLs; inside the image it is in
+`/usr/share/doc/streamvault/` with the license texts and the native build
+recipe.
+
+Corresponding source:
+
+- Release images: each `v*` [GitHub Release](https://github.com/christopherklint97/streamvault/releases)
+  has the exact FFmpeg, PyAV and Comskip source archives used, the Comskip
+  patch shim, the build script, the Dockerfile and `SHA256SUMS` attached.
+- `edge` and `sha-*` images: `/usr/share/doc/streamvault/SOURCE` names the
+  commit; `scripts/build-native-media.sh` and `build/media/sources.env` in that
+  commit pin every upstream archive by URL and SHA-256, and
+  `scripts/fetch-media-sources.sh OUTDIR` downloads and verifies them.
+- Written offer: for at least three years after we last distribute an image, we
+  will provide the complete corresponding source of its GPL components on
+  request. Open an issue naming the image tag or digest.
 
 ## Features
 
@@ -120,7 +196,7 @@ Useful server environment variables:
 
 ## VPN-routed Xtream upstream (optional)
 
-VPN routing is fully opt-in: the normal `docker compose up -d --build` command and base `docker-compose.yml` continue to use direct host egress. The VPN is enabled only when `docker-compose.vpn.yml` is explicitly included.
+VPN routing is fully opt-in: the normal `docker compose up -d` command and base `docker-compose.yml` continue to use direct host egress. The VPN is enabled only when `docker-compose.vpn.yml` is explicitly included.
 
 StreamVault can run inside a [Gluetun](https://github.com/qdm12/gluetun) network namespace so every Xtream API and media request exits through a VPN while clients keep using the same StreamVault URL (`http://<server>:3002`). This includes API sync, EPG, artwork redirects, live streams, VOD, series episodes, and recordings. Gluetun's firewall is fail-closed, so a dropped tunnel cannot silently leak upstream traffic through the host connection.
 
@@ -132,7 +208,7 @@ chmod 600 .env
 # Edit .env with credentials from a Gluetun-supported VPN provider.
 # Keep VPN_TYPE=wireguard and VPN_SERVER_COUNTRIES=Finland where supported.
 
-docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.vpn.yml up -d
 ```
 
 Verify the tunnel and unchanged client endpoint:
@@ -152,7 +228,7 @@ To return to direct egress:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.vpn.yml down
-docker compose up -d --build
+docker compose up -d
 ```
 
 ## Tizen signing
@@ -179,10 +255,33 @@ From GitHub **Actions → Build Tizen WGT → Run workflow**, choose the branch 
 
 ## Deployment
 
-```bash
-# Docker (serves both API + PWA on port 3002)
-docker compose up -d --build
+Self-hosting: see [Run with Docker](#run-with-docker). The image serves both the
+API and the PWA on port 3002.
 
-# Tizen TV
+### Raspberry Pi production (maintainer)
+
+Production runs from a detached worktree whose `.env` pins
+`COMPOSE_PROJECT_NAME=streamvault`, `COMPOSE_FILE` and
+`STREAMVAULT_IMAGE=streamvault-server:latest`. Deploy the CI-built image; do not
+run `docker compose up --build` on the Pi.
+
+```bash
+cd ~/services/streamvault-production
+scripts/deploy-pi.sh --wait              # origin/main; waits for CI to publish sha-<commit>
+scripts/deploy-pi.sh --wait <commit|ref> # a specific green commit on main
+scripts/deploy-pi.sh --rollback          # newest streamvault-server:rollback-<stamp>
+scripts/deploy-pi.sh --rollback rollback-20261107-201500
+```
+
+The script verifies the image's build-provenance attestation against this
+repository's CI workflow and commit (fail closed; `--skip-verify` bypasses it),
+refuses to restart while a recording is running, finalizing or about to start
+(`--force` overrides), keeps the five newest rollback tags, runs
+`docker compose up -d --no-build --pull never`, and waits for `/api/health`.
+It needs `gh` 2.49 or newer for `gh attestation` (or `GH=/path/to/gh`).
+
+### Tizen TV
+
+```bash
 ./scripts/deploy-tv.sh
 ```
