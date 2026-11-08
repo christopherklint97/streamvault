@@ -160,9 +160,7 @@ jobs:
           build-args: |
             GIT_REVISION=${{ github.sha }}
             MEDIA_PIN_HASH=${{ needs.media-pin.outputs.hash }}
-          cache-from: |
-            type=registry,ref=${{ env.IMAGE }}:buildcache-amd64
-            type=gha,scope=amd64
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-amd64
           cache-to: ${{ env.PUSH_CACHE == 'true' && format('type=registry,ref={0}:buildcache-amd64,mode=max', env.IMAGE) || '' }}
       - name: Clean non-root application boot
         run: node scripts/smoke-docker-startup.mjs streamvault-ci:packet
@@ -242,9 +240,7 @@ jobs:
           build-args: |
             GIT_REVISION=${{ github.sha }}
             MEDIA_PIN_HASH=${{ needs.media-pin.outputs.hash }}
-          cache-from: |
-            type=registry,ref=${{ env.IMAGE }}:buildcache-arm64
-            type=gha,scope=arm64
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-arm64
           cache-to: ${{ env.PUSH_CACHE == 'true' && format('type=registry,ref={0}:buildcache-arm64,mode=max', env.IMAGE) || '' }}
       - name: Smoke ARM64 runtime
         run: |
