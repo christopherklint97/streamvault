@@ -175,10 +175,10 @@ describe('buildIosHlsArgs', () => {
     expect(args).toContain('independent_segments+delete_segments');
   });
 
-  it('omits fMP4 edit lists so copied video and re-encoded audio share one timeline', () => {
+  it('omits fMP4 edit lists and interleaves audio with video inside each segment', () => {
     for (const [video, audio] of [['copy', 'transcode'], ['copy', 'copy'], ['transcode', 'transcode']] as const) {
       const args = buildIosHlsArgs('http://source', '/tmp/session/index.m3u8', 131.4, video, audio);
-      expect(args[args.indexOf('-hls_segment_options') + 1]).toBe('use_editlist=0');
+      expect(args[args.indexOf('-hls_segment_options') + 1]).toBe('use_editlist=0:frag_interleave=6');
     }
   });
 
