@@ -119,6 +119,29 @@ function clearFiniteHlsStallTimer() {
   if (finiteHlsStallTimer) clearTimeout(finiteHlsStallTimer);
   finiteHlsStallTimer = null;
 }
+// iPhone native VOD can stay "playing" while WebKit refetches one server HLS
+// segment forever. `stalled` fires constantly during healthy playback, so only
+// a media clock that stops advancing triggers a reload at the same position.
+// 12s = three 4s server segments, the live stall timeout. A source that has
+// not advanced yet gets the 30s first-frame budget; reloads back off 20s, 25s,
+// 30s (server probe alone may take 10s) before playback errors out.
+const NATIVE_VOD_STALL_MS = 12_000;
+const NATIVE_VOD_STARTUP_MS = 30_000;
+const NATIVE_VOD_RELOAD_WINDOWS_MS = [20_000, 25_000, 30_000];
+// Media seconds a reloaded source must play before its attempts are forgiven.
+const NATIVE_VOD_SUSTAINED_PROGRESS_S = 30;
+let nativeVodStallTimer: ReturnType<typeof setTimeout> | null = null;
+let nativeVodStall = { attempts: 0, lastTime: 0, progressFrom: null as number | null };
+let nativeVodWatchdogMounts = 0;
+let armActiveNativeVodWatchdog: (() => void) | null = null;
+function clearNativeVodStallTimer() {
+  if (nativeVodStallTimer) clearTimeout(nativeVodStallTimer);
+  nativeVodStallTimer = null;
+}
+function resetNativeVodStallWatchdog() {
+  clearNativeVodStallTimer();
+  nativeVodStall = { attempts: 0, lastTime: 0, progressFrom: null };
+}
 let bgProgressInterval: ReturnType<typeof setInterval> | null = null;
 let bgBufferTimer: ReturnType<typeof setTimeout> | null = null;
 let recordingVodPoll: ReturnType<typeof setInterval> | null = null;
@@ -194,6 +217,24 @@ function loadFiniteRecordingHls(video: HTMLVideoElement, url: string, positionSe
   }, { once: true });
   video.src = url;
   video.load();
+}
+
+/** Load a fresh iPhone server HLS session at an absolute position (user seek or stall reload). */
+function reloadAppleMobileVod(
+  video: HTMLVideoElement,
+  channel: Channel,
+  path: string,
+  targetTime: number,
+  subtitleTrack: SubtitleTrack | undefined,
+): void {
+  const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
+  video.dataset.streamOffset = String(targetTime);
+  video.src = `${apiBaseUrl}${path}`;
+  video.load();
+  if (subtitleTrack) {
+    startBrowserSubtitleTrack(video, channel, subtitleTrack, apiBaseUrl, getBrowserSubtitleTiming(targetTime, 0));
+  }
+  video.play().catch(() => {});
 }
 
 function clearTextTrackCues(track: TextTrack): void {
@@ -437,6 +478,8 @@ export function stopActivePlayback() {
 
   stopBgProgressTracking();
   clearNativeVodStartupTimer();
+  resetNativeVodStallWatchdog();
+  armActiveNativeVodWatchdog = null;
   clearFiniteHlsStallTimer();
   clearAvplayDeferredRetryTimer();
   avplayConsecutiveFailures = 0;
@@ -605,6 +648,8 @@ export function usePlayer(): {
 
     const playStartedAt = Date.now();
     clearNativeVodStartupTimer();
+    resetNativeVodStallWatchdog();
+    armActiveNativeVodWatchdog = null;
     resumeGesturePlayback = null;
     const recoveringProgressedLive = liveRecoveryRestartFromProgress;
     liveRecoveryRestartFromProgress = false;
@@ -1088,6 +1133,66 @@ export function usePlayer(): {
           video.load();
         }, 30_000);
       };
+      const nativeVodStallBlocked = () => !isCurrentPlayback() || !isCurrentAuthorization() ||
+        transportInvalidated || video.paused || video.ended ||
+        ['idle', 'error', 'awaiting-gesture'].includes(usePlayerStore.getState().status);
+      const recoverNativeVodStall = () => {
+        const position = normalizePlaybackStart(Number(video.dataset.streamOffset || '0') + video.currentTime);
+        if (nativeVodStall.attempts >= NATIVE_VOD_RELOAD_WINDOWS_MS.length) {
+          log.warn(`VOD stalled at ${position.toFixed(1)}s — giving up after ${nativeVodStall.attempts} reloads`);
+          resetNativeVodStallWatchdog();
+          saveProgressNow();
+          transportInvalidated = true;
+          resumeGesturePlayback = null;
+          setError('Playback stopped making progress. Check the connection and tap to retry.');
+          video.pause();
+          // Keep the clock at the stall position after the session is dropped.
+          video.dataset.streamOffset = String(position);
+          video.removeAttribute('src');
+          video.load();
+          return;
+        }
+        const path = iphoneVodPlaybackPath(channel.id, channel.url, channel.contentType, position);
+        if (!path) return;
+        nativeVodStall = { attempts: nativeVodStall.attempts + 1, lastTime: 0, progressFrom: null };
+        log.warn(`VOD stalled — reloading at ${position.toFixed(1)}s (attempt ${nativeVodStall.attempts})`);
+        const subtitles = browserSubtitleSession.forChannel(channel.id);
+        reloadAppleMobileVod(video, channel, path, position,
+          subtitles.tracks.find(track => track.index === subtitles.selectedIndex));
+        armNativeVodStallWatchdog();
+      };
+      // Arms once playback has started; only media progress or a new source resets it.
+      const armNativeVodStallWatchdog = (reset = false) => {
+        if (!appleMobileVodPath || nativeVodWatchdogMounts === 0) return;
+        if (reset) clearNativeVodStallTimer();
+        if (nativeVodStallTimer || nativeVodStallBlocked()) return;
+        const windowMs = nativeVodStall.progressFrom !== null ? NATIVE_VOD_STALL_MS
+          : nativeVodStall.attempts > 0 ? NATIVE_VOD_RELOAD_WINDOWS_MS[nativeVodStall.attempts - 1]
+            : NATIVE_VOD_STARTUP_MS;
+        const armedAt = Date.now();
+        nativeVodStallTimer = setTimeout(() => {
+          nativeVodStallTimer = null;
+          if (nativeVodStallBlocked()) return;
+          // A suspended or hidden page fires overdue timers on return; give the
+          // resumed element a full window before judging it stalled.
+          if (document.visibilityState === 'hidden' || Date.now() - armedAt > windowMs + 5_000) {
+            armNativeVodStallWatchdog();
+            return;
+          }
+          recoverNativeVodStall();
+        }, windowMs);
+      };
+      const noteNativeVodProgress = () => {
+        if (!appleMobileVodPath || !isCurrentPlayback() || video.currentTime <= nativeVodStall.lastTime + 0.05) return;
+        nativeVodStall.lastTime = video.currentTime;
+        if (nativeVodStall.progressFrom === null) nativeVodStall.progressFrom = video.currentTime;
+        if (nativeVodStall.attempts > 0 &&
+            video.currentTime - nativeVodStall.progressFrom >= NATIVE_VOD_SUSTAINED_PROGRESS_S) {
+          log.info(`VOD stall recovery: playback sustained after ${nativeVodStall.attempts} reload(s)`);
+          nativeVodStall.attempts = 0;
+        }
+        armNativeVodStallWatchdog(true);
+      };
       const failEndedGestureTransport = () => {
         // Latch terminal failure even before the initial play promise settles.
         transportInvalidated = true;
@@ -1220,6 +1325,11 @@ export function usePlayer(): {
         video.oncanplaythrough = signedLiveHlsStartup ? attemptPlay : null;
         video.onseeked = () => {
           if (isCurrentPlayback()) reportFirstFrameOffset(video, 'seek');
+          if (appleMobileVodPath && isCurrentPlayback() && Number.isFinite(video.currentTime)) {
+            // A native-controls seek moves the clock; measure progress from there.
+            nativeVodStall.lastTime = video.currentTime;
+            armNativeVodStallWatchdog(true);
+          }
           if (signedLiveHlsStartup) attemptPlay();
           if (!channel.dvrHls || !isCurrentPlayback() || !Number.isFinite(video.currentTime)) return;
           // A backward seek resets the progress baseline; old high-water marks
@@ -1228,6 +1338,7 @@ export function usePlayer(): {
           armFiniteHlsStallTimer(true);
         };
         video.onplay = () => {
+          armNativeVodStallWatchdog();
           // Native controls, iOS fullscreen and lock-screen resume bypass
           // togglePlay; re-arm live recovery that a user pause suspended.
           if (isLiveTs && isCurrentPlayback() && liveStreamRecovery.isSuspended() &&
@@ -1239,6 +1350,7 @@ export function usePlayer(): {
         };
         video.onpause = () => {
           clearFiniteHlsStallTimer();
+          if (appleMobileVodPath && isCurrentPlayback()) clearNativeVodStallTimer();
           // A user pause (native controls, iOS fullscreen) must not let the
           // watchdog reconnect and autoplay. Ignore the source-reset pause
           // before startup and the implicit pause that precedes 'ended'.
@@ -1279,9 +1391,11 @@ export function usePlayer(): {
           if (bgBufferTimer) { clearTimeout(bgBufferTimer); bgBufferTimer = null; }
           setStatus('playing');
           setupMediaSession(channel.name);
+          armNativeVodStallWatchdog();
         };
         video.ontimeupdate = () => {
           updateHtml5Clock();
+          noteNativeVodProgress();
           if (channel.dvrHls && isCurrentPlayback() && video.currentTime > lastMediaTime + 0.1) {
             lastMediaTime = video.currentTime;
             armFiniteHlsStallTimer(true);
@@ -1329,6 +1443,7 @@ export function usePlayer(): {
         video.onended = () => {
           if (!isCurrentPlayback() || !isCurrentAuthorization() || usePlayerStore.getState().status === 'error') return;
           clearNativeVodStartupTimer();
+          if (appleMobileVodPath) clearNativeVodStallTimer();
           log.info('HTML5 event: ended');
           if (isLiveTs && isCurrentPlayback()) {
             if (failEndedGestureTransport()) return;
@@ -1558,6 +1673,7 @@ export function usePlayer(): {
         video.src = playUrl;
         video.load();
         if (appleMobileVodPath) {
+          armActiveNativeVodWatchdog = () => armNativeVodStallWatchdog();
           // Paused iOS HLS can stop at loadedmetadata until play() is requested.
           // The server already applies the resume offset, so there is no local
           // seek to wait for. Start inside the original tap's gesture as well.
@@ -1775,12 +1891,10 @@ export function usePlayer(): {
           }
         })().catch(error => toast(`Recording seek failed: ${error instanceof Error ? error.message : String(error)}`));
       } else if (appleMobileVodPath) {
-        const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
-        video.dataset.streamOffset = String(targetTime);
-        video.src = `${apiBaseUrl}${appleMobileVodPath}`;
-        video.load();
-        restartSelectedSubtitles();
-        video.play().catch(() => {});
+        // A user seek replaces the session; its stall watchdog starts over.
+        resetNativeVodStallWatchdog();
+        reloadAppleMobileVod(video, channel, appleMobileVodPath, targetTime,
+          subtitleTracksRef.current.find(candidate => candidate.index === selectedSubtitleIndexRef.current));
       } else if (usesTranscode) {
         const apiBaseUrl = useChannelStore.getState().apiBaseUrl;
         video.dataset.streamOffset = String(targetTime);
@@ -1820,6 +1934,16 @@ export function usePlayer(): {
     const unsubscribe = browserSubtitleSession.subscribe(syncBrowserSubtitleSession);
     syncBrowserSubtitleSession();
     return unsubscribe;
+  }, []);
+
+  // The iPhone VOD stall watchdog runs only while a player is mounted.
+  useEffect(() => {
+    nativeVodWatchdogMounts += 1;
+    armActiveNativeVodWatchdog?.();
+    return () => {
+      nativeVodWatchdogMounts -= 1;
+      if (nativeVodWatchdogMounts === 0) clearNativeVodStallTimer();
+    };
   }, []);
 
   // Tizen: release/restore the AVPlay decoder across app hide/show.
