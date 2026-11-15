@@ -110,6 +110,11 @@ let activeMpegtsPlayer: MpegtsType.Player | null = null;
 let disposeFiniteHls: (() => void) | null = null;
 let finiteHlsRetry = { channelId: '', position: -1, attempts: 0, at: 0 };
 let finiteHlsStallTimer: ReturnType<typeof setTimeout> | null = null;
+let nativeVodStartupTimer: ReturnType<typeof setTimeout> | null = null;
+function clearNativeVodStartupTimer() {
+  if (nativeVodStartupTimer) clearTimeout(nativeVodStartupTimer);
+  nativeVodStartupTimer = null;
+}
 function clearFiniteHlsStallTimer() {
   if (finiteHlsStallTimer) clearTimeout(finiteHlsStallTimer);
   finiteHlsStallTimer = null;
@@ -431,6 +436,7 @@ export function stopActivePlayback() {
   resumeGesturePlayback = null;
 
   stopBgProgressTracking();
+  clearNativeVodStartupTimer();
   clearFiniteHlsStallTimer();
   clearAvplayDeferredRetryTimer();
   avplayConsecutiveFailures = 0;
@@ -598,6 +604,7 @@ export function usePlayer(): {
     }
 
     const playStartedAt = Date.now();
+    clearNativeVodStartupTimer();
     resumeGesturePlayback = null;
     const recoveringProgressedLive = liveRecoveryRestartFromProgress;
     liveRecoveryRestartFromProgress = false;
@@ -1066,6 +1073,21 @@ export function usePlayer(): {
       };
       let gesturePlayPending = false;
       let transportInvalidated = false;
+      const armNativeVodStartupTimer = () => {
+        if (!appleMobileVodPath) return;
+        clearNativeVodStartupTimer();
+        nativeVodStartupTimer = setTimeout(() => {
+          nativeVodStartupTimer = null;
+          if (!isCurrentPlayback() || !isCurrentAuthorization() ||
+              ['error', 'awaiting-gesture'].includes(usePlayerStore.getState().status)) return;
+          transportInvalidated = true;
+          resumeGesturePlayback = null;
+          setError('Playback could not start. Check the connection and tap to retry.');
+          video.pause();
+          video.removeAttribute('src');
+          video.load();
+        }, 30_000);
+      };
       const failEndedGestureTransport = () => {
         // Latch terminal failure even before the initial play promise settles.
         transportInvalidated = true;
@@ -1083,6 +1105,7 @@ export function usePlayer(): {
         gesturePlayPending = true;
         if (fromGesture) {
           setStatus('loading');
+          armNativeVodStartupTimer();
           // Bound even a play() promise that never settles; denial suspends it again.
           if (isLiveTs) liveStreamRecovery.resume();
         }
@@ -1101,6 +1124,7 @@ export function usePlayer(): {
           // source and its recovery callback; repeated denials never reauthorize.
           if (name === 'NotAllowedError') {
             log.info('HTML5: user gesture required');
+            clearNativeVodStartupTimer();
             if (bgBufferTimer) { clearTimeout(bgBufferTimer); bgBufferTimer = null; }
             clearFiniteHlsStallTimer();
             if (isLiveTs) liveStreamRecovery.suspend();
@@ -1114,6 +1138,7 @@ export function usePlayer(): {
             return;
           }
           resumeGesturePlayback = null;
+          clearNativeVodStartupTimer();
           // Never serialize the browser error: it can contain signed media URLs.
           log.error('HTML5: play() failed');
           if (isLiveTs) disableLiveStreamRecovery();
@@ -1248,6 +1273,7 @@ export function usePlayer(): {
         };
         video.onplaying = () => {
           if (!isCurrentPlayback() || ['error', 'awaiting-gesture'].includes(usePlayerStore.getState().status)) return;
+          clearNativeVodStartupTimer();
           log.info('HTML5 event: playing');
           reportFirstFrameOffset(video, 'playing');
           if (bgBufferTimer) { clearTimeout(bgBufferTimer); bgBufferTimer = null; }
@@ -1278,6 +1304,7 @@ export function usePlayer(): {
         video.onsuspend = () => log.debug('HTML5 event: suspend');
         video.onerror = () => {
           if (!isCurrentPlayback() || !isCurrentAuthorization() || usePlayerStore.getState().status === 'error') return;
+          clearNativeVodStartupTimer();
           if (isLiveTs && failEndedGestureTransport()) return;
           resumeGesturePlayback = null;
           const err = video.error;
@@ -1301,6 +1328,7 @@ export function usePlayer(): {
         video.onabort = () => log.warn('HTML5 event: abort');
         video.onended = () => {
           if (!isCurrentPlayback() || !isCurrentAuthorization() || usePlayerStore.getState().status === 'error') return;
+          clearNativeVodStartupTimer();
           log.info('HTML5 event: ended');
           if (isLiveTs && isCurrentPlayback()) {
             if (failEndedGestureTransport()) return;
@@ -1529,6 +1557,14 @@ export function usePlayer(): {
           ? String(resumePosition) : '0';
         video.src = playUrl;
         video.load();
+        if (appleMobileVodPath) {
+          // Paused iOS HLS can stop at loadedmetadata until play() is requested.
+          // The server already applies the resume offset, so there is no local
+          // seek to wait for. Start inside the original tap's gesture as well.
+          armNativeVodStartupTimer();
+          canPlay = true;
+          void completeHtml5Startup();
+        }
 
         if (appleRecordingHlsPath && !channel.recordingVodReady && channel.recordingId) {
           clearRecordingVodPoll();
