@@ -175,6 +175,13 @@ describe('buildIosHlsArgs', () => {
     expect(args).toContain('independent_segments+delete_segments');
   });
 
+  it('omits fMP4 edit lists so copied video and re-encoded audio share one timeline', () => {
+    for (const [video, audio] of [['copy', 'transcode'], ['copy', 'copy'], ['transcode', 'transcode']] as const) {
+      const args = buildIosHlsArgs('http://source', '/tmp/session/index.m3u8', 131.4, video, audio);
+      expect(args[args.indexOf('-hls_segment_options') + 1]).toBe('use_editlist=0');
+    }
+  });
+
   it('keeps the H.264 transcode fallback for incompatible video codecs', () => {
     const mode = selectIosHlsVideoMode(JSON.stringify({
       streams: [{ codec_name: 'mpeg4', pix_fmt: 'yuv420p', width: 1280, height: 720 }],

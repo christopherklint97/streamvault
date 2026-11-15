@@ -237,6 +237,11 @@ export function buildIosHlsArgs(
     '-hls_list_size', '900',
     '-hls_delete_threshold', '30',
     '-hls_segment_type', 'fmp4',
+    // FFmpeg 9 writes a ~4 s empty edit before copied video when the audio is
+    // re-encoded, so init.mp4 puts video seconds behind the audio that
+    // tfdt aligns it with. iPhones then refetch the first segment until playback
+    // fails. Segment timestamps already carry the timeline; omit edit lists.
+    '-hls_segment_options', 'use_editlist=0',
     '-hls_flags', 'independent_segments+delete_segments',
     '-hls_fmp4_init_filename', 'init.mp4',
     '-hls_segment_filename', `${outputDir}/segment-%05d.m4s`,
