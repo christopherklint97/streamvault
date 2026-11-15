@@ -87,7 +87,7 @@ import { authorizeHlsProxyUrl, rewriteHlsManifest, signHlsProxyUrl } from './hls
 import { buildFragmentedMp4Args } from './vod-remux.js';
 import { buildBrowserCompatibleVideoArgs } from './browser-transcode.js';
 import { buildIosHlsArgs, buildIosHlsRecoveryUrl, iosHlsContentType, iosHlsModesNeedRetry, iosHlsPlaylistReady, probeIosHlsMediaModes, stabilizeIosHlsPlaylist } from './ios-hls.js';
-import { IOS_HLS_IDLE_TIMEOUT_MS, findReusableIosHlsSession, iosHlsProcessExitState, iosHlsSessionKey, iosHlsSessionLimitReason, selectIosHlsSessionsToRetire } from './ios-hls-sessions.js';
+import { IOS_HLS_IDLE_TIMEOUT_MS, ReplacedIosHlsSessions, findReusableIosHlsSession, iosHlsProcessExitState, iosHlsSessionKey, iosHlsSessionLimitReason, selectIosHlsSessionsToRetire } from './ios-hls-sessions.js';
 import { buildRecordingHlsArgs, findRecordingHlsCut, parseRecordingHlsStart } from './recording-hls.js';
 import { registerRecordingVodRoutes } from './recording-vod-routes.js';
 import { probeVideoCodec } from './h264-access-units.js';
@@ -165,11 +165,13 @@ type IosHlsSession = {
   expiresAt: number;
 };
 const iosHlsSessions = new Map<string, IosHlsSession>();
+const replacedIosHlsSessions = new ReplacedIosHlsSessions();
 
 function retireIosHlsSession(sessionId: string, reason: string): void {
   const session = iosHlsSessions.get(sessionId);
   if (!session) return;
   iosHlsSessions.delete(sessionId);
+  replacedIosHlsSessions.noteRetired(sessionId, reason);
   if (!session.process.killed) session.process.kill('SIGKILL');
   fs.rmSync(session.directory, { recursive: true, force: true });
   logger.info(`iOS HLS session retired: ${sessionId} (${reason})`);
@@ -1313,6 +1315,11 @@ app.get('/api/ios-hls/:channelId/index.m3u8', async (req, res) => {
   const existingSessionId = typeof req.query.session === 'string' ? req.query.session : undefined;
   if (existingSessionId) {
     const existing = iosHlsSessions.get(existingSessionId);
+    if (!existing && replacedIosHlsSessions.has(existingSessionId)) {
+      // Newer playback replaced this session; recovering it would retire that.
+      res.status(410).set('Cache-Control', 'no-store').json({ error: 'iPhone stream was replaced by newer playback' });
+      return;
+    }
     if (!existing || existing.channelId !== channelId) {
       res.set('Cache-Control', 'no-store').redirect(302, buildIosHlsRecoveryUrl(
         channelId,
