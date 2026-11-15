@@ -46,6 +46,12 @@ describe('proxy log hygiene', () => {
     expect(safeProxyMime('application/javascript')).toBe('other');
     expect(safeProxyMime('application/vnd.apple.mpegurl; charset=UTF-8')).toBe('application/vnd.apple.mpegurl');
     expect(safeRequestLogPath('/api/health')).toBe('/api/health');
+    expect(safeRequestLogPath('/api/live/live_79452/authorize')).toBe('/api/live/live_79452/authorize');
+    expect(safeRequestLogPath('/api/live-compatible/live_79452/index.m3u8')).toBe('/api/live-compatible/live_79452/index.m3u8');
+    expect(safeRequestLogPath('/api/live/live_79452/segment/123.ts')).toBe('/api/live/live_79452/segment');
+    expect(safeRequestLogPath('/api/live/token%3Dhidden/authorize')).toBe('/api/live/:route');
+    expect(safeRequestLogPath('/api/live-compatible/x/segment/1.ts/token=hidden')).toBe('/api/live-compatible/:route');
+    expect(safeRequestLogPath('/API/LIVE/live_1/AUTHORIZE')).toBe('/api/live/live_1/authorize');
   });
   it('accepts only loopback requests with a well-formed capture session tag', () => {
     const session = '11111111-1111-4111-8111-111111111111';

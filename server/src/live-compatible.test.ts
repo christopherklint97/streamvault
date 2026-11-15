@@ -110,12 +110,10 @@ it('serves native-compatible signed HLS with independent tickets, cache epochs a
   const cold = await fetch(`${origin}/api/live-compatible/channel-b/index.m3u8`, auth);
   expect(cold.status).toBe(503);
   expect(cold.headers.get('retry-after')).toBe('2');
+  // Only the channel a player claimed last may open an upstream; polls for
+  // other channels start nothing (worker capacity is covered in live-buffer.test.ts).
   await compatible.playlist('channel-c', source);
-  await compatible.playlist('channel-d', source);
-  expect(compatible.activeCount).toBe(4);
-  const capped = await fetch(`${origin}/api/live-compatible/channel-e/index.m3u8`, auth);
-  expect(capped.status).toBe(503);
-  expect(compatible.activeCount).toBe(4);
+  expect(compatible.activeCount).toBe(1);
   await Promise.all([primary.stop(), compatible.stop()]);
   expect(primary.activeCount).toBe(0);
   expect(compatible.activeCount).toBe(0);
