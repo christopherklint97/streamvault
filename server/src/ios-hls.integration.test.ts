@@ -93,6 +93,13 @@ describe('iOS HLS session output', () => {
     const init = fs.readFileSync(path.join(outputDir, 'init.mp4'));
     expect(init.includes('elst')).toBe(false);
 
+    // One trun per track means all video precedes all audio in the segment,
+    // which iPhones refuse at 1080p bitrates; interleaving yields many runs.
+    const segment = fs.readFileSync(path.join(outputDir, 'segment-00000.m4s'));
+    let runs = 0;
+    for (let at = segment.indexOf('trun'); at >= 0; at = segment.indexOf('trun', at + 4)) runs++;
+    expect(runs).toBeGreaterThan(2);
+
     const firstSegment = path.join(outputDir, 'first.mp4');
     fs.writeFileSync(firstSegment, Buffer.concat([init, fs.readFileSync(path.join(outputDir, 'segment-00000.m4s'))]));
     const probe = JSON.parse(execFileSync('ffprobe', [
