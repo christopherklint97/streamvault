@@ -53,7 +53,30 @@ export interface LiveBufferOptions {
   onUnsafe?: (reason: string, id?: string) => void; // fixed, non-URL diagnostic categories
   packetAware?: boolean;
   nativeStartOffset?: boolean; // advertise EXT-X-START for native players
+  /** Shared by every buffer drawing on the same provider connection. */
+  claims?: LiveClaims;
+  /** Cooldown after each consecutive retryable start failure of a channel. */
+  retryBackoffMs?: number[];
 }
+
+/**
+ * The channel a player most recently started, across every live buffer. The
+ * provider allows one connection, so only that channel may open an upstream:
+ * a request still running for a channel the viewer left must not reopen it.
+ */
+export function createLiveClaims() {
+  let latest: { owner: object | null; id: string | null; seq: number } = { owner: null, id: null, seq: 0 };
+  return {
+    claim(owner: object, id: string) { latest = { owner, id, seq: latest.seq + 1 }; },
+    /** Other playback took the provider connection: start nothing until a player claims again. */
+    revoke() { latest = { owner: null, id: null, seq: latest.seq + 1 }; },
+    /** Nothing was ever claimed (direct playlist use), or `id` in `owner` is the newest claim. */
+    allows(owner: object, id: string) { return latest.seq === 0 || (latest.owner === owner && latest.id === id); },
+  };
+}
+export type LiveClaims = ReturnType<typeof createLiveClaims>;
+// After this long without a failure, a channel's backoff starts over.
+const LIVE_RETRY_BACKOFF_RESET_MS = 60_000;
 
 export function newStageIndices(indices: number[], last: number): number[] | null {
   const fresh: number[] = [];
@@ -131,6 +154,10 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
   const unsafeMarkerStat = options.unsafeMarkerStat ?? (async (file: string) => { await stat(file); });
   const packetAware = options.packetAware ?? false;
   const nativeStartOffset = options.nativeStartOffset ?? false;
+  const claims = options.claims ?? createLiveClaims();
+  const claimOwner = {};
+  const retryBackoffMs = options.retryBackoffMs ?? [2_000, 5_000, 15_000, 30_000];
+  if (!retryBackoffMs.length || !retryBackoffMs.every(n => Number.isFinite(n) && n > 0)) throw Error('Invalid live retry backoff');
   if (![maxChannels, maxBytes, maxSegmentBytes, maxReaders, stallMs, maxUnpublishedMs, idleMs, retryMs, pollMs, segmentSeconds, minFreeBytes]
     .every(n => Number.isFinite(n) && n > 0) || maxBytes < maxSegmentBytes * 2 || !Number.isInteger(maxReaders)) throw Error('Invalid live buffer limits');
   const channels = new Map<string, Channel>();
@@ -144,6 +171,18 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     if (unsafeChannels.size >= maxChannels * 16) unsafeCapacityExhausted = true;
     else unsafeChannels.add(id);
   }
+  // A provider refusal (e.g. 403) ends a start attempt within milliseconds.
+  // Without a cooldown every authorization or playlist poll starts another.
+  const cooldowns = new Map<string, { failures: number; until: number }>();
+  function noteRetryableFailure(id: string) {
+    const now = Date.now();
+    const previous = cooldowns.get(id);
+    const failures = previous && now - previous.until < LIVE_RETRY_BACKOFF_RESET_MS ? previous.failures + 1 : 1;
+    cooldowns.delete(id);
+    if (cooldowns.size >= maxChannels * 16) cooldowns.delete(cooldowns.keys().next().value!);
+    cooldowns.set(id, { failures, until: now + retryBackoffMs[Math.min(failures, retryBackoffMs.length) - 1] });
+  }
+  const cooldownRemaining = (id: string): number => Math.max(0, (cooldowns.get(id)?.until ?? 0) - Date.now());
   let activeReaders = 0;
   let stopped = false;
   // Keep HLS media sequence modest and monotonic per channel within a process.
@@ -278,6 +317,7 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       ch.segments.push({ id, name: key, duration: publishedDuration, bytes: data.length, discontinuity });
       ch.bytes += data.length;
       ch.lastPublish = Date.now();
+      cooldowns.delete(ch.id);
       // The served copy is now independent of FFmpeg's rolling staging list.
       // Reclaim published stage bytes so a longer manifest can absorb bursts
       // without retaining an unbounded second copy of the media.
@@ -399,7 +439,8 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
           // Every failed seam or emitted packet remains latched unavailable.
           const retryable = ch.segments.length === 0 && await stat(path.join(working, 'RETRYABLE'))
             .then(() => true, () => false);
-          if (!retryable) markUnsafe(ch.id);
+          if (retryable) noteRetryableFailure(ch.id);
+          else markUnsafe(ch.id);
           await retire(ch); return;
         }
         // Relaunch without the H.264-only delimiter rewrite for other codecs.
@@ -429,6 +470,9 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
       ch.lastAccess = Date.now(); return ch;
     }
     if (stopped) return null;
+    // Only the channel a player started last may open an upstream, and not
+    // while the provider is refusing it.
+    if (!claims.allows(claimOwner, id) || cooldownRemaining(id) > 0) return null;
     // A new channel means the viewer switched: release channels no longer
     // being polled so their upstream connections cannot evict this one.
     for (const other of [...channels.values()]) {
@@ -464,8 +508,13 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
      * viewer just left from one still played, so idle checks miss quick switches.
      */
     async claim(id: string) {
+      claims.claim(claimOwner, id); // before any await: the newest claim wins
       await Promise.all([...channels.values()].filter(ch => ch.id !== id).map(retire));
     },
+    /** False once a player started another channel after claiming `id`. */
+    ownsClaim(id: string) { return claims.allows(claimOwner, id); },
+    /** Milliseconds until `id` may try its upstream again after a refusal. */
+    cooldownRemaining,
     /** Another kind of playback took the provider connection; close every channel. */
     async releaseAll() {
       await Promise.all([...channels.values()].map(retire));
@@ -527,6 +576,10 @@ export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, so
     const expected = Buffer.from(signature(id, expiry));
     return actual.length === expected.length && timingSafeEqual(actual, expected);
   };
+  const retryAfter = (id: string) => {
+    const cooldown = buffer.cooldownRemaining(id);
+    return cooldown > 0 ? String(Math.ceil(cooldown / 1000)) : '2';
+  };
   const prepare = (req: Request, res: import('express').Response, id: string) => {
     res.set('Cache-Control', 'private, no-store').set('X-Content-Type-Options', 'nosniff');
     if (!allowed(req, id)) { res.status(401).end(); return null; }
@@ -549,12 +602,17 @@ export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, so
     if (authorizationWaiters >= 8) { res.set('Retry-After', '2').status(503).end(); return; }
     authorizationWaiters++;
     let ready = false;
+    let superseded = false;
     try {
+      const claimed = buffer.claim(id);
       await options.onClaim?.(id);
-      await buffer.claim(id);
+      await claimed;
       const deadline = Date.now() + 5_000;
       let firstSegmentAt: number | null = null;
       while (Date.now() < deadline && !req.destroyed) {
+        // A player started another channel: stop, never reopen this upstream.
+        if (!buffer.ownsClaim(id)) { superseded = true; break; }
+        if (buffer.cooldownRemaining(id) > 0) break;
         const manifest = await buffer.playlist(id, url);
         if (buffer.isUnsafe(id)) break;
         if (manifest?.includes('\nsegment/')) {
@@ -567,7 +625,7 @@ export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, so
     } finally { authorizationWaiters--; }
     if (req.destroyed) return;
     if (buffer.isUnsafe(id)) { res.status(501).end(); return; }
-    if (!ready) { res.set('Retry-After', '2').status(503).end(); return; }
+    if (!ready || superseded) { res.set('Retry-After', retryAfter(id)).status(503).end(); return; }
     const { ticket, expiresAt } = ticketFor(id);
     res.set('Cache-Control', 'private, no-store').json({ playlistUrl: `${basePath}/${encodeURIComponent(id)}/index.m3u8?ticket=${ticket}`, expiresAt });
   });
@@ -580,7 +638,7 @@ export function createLiveRouter(buffer: ReturnType<typeof createLiveBuffer>, so
     try {
       const manifest = await buffer.playlist(id, url, ticket);
       if (buffer.isUnsafe(id)) { res.status(501).end(); return; }
-      if (!manifest) { res.set('Retry-After', '2').status(503).end(); return; }
+      if (!manifest) { res.set('Retry-After', retryAfter(id)).status(503).end(); return; }
       res.type('application/vnd.apple.mpegurl').send(manifest);
     } catch { res.status(503).end(); }
   });

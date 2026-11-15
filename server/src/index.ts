@@ -110,7 +110,7 @@ import {
 } from './subtitles.js';
 import { parseByteRange } from './ranges.js';
 import { createArchiveRouter } from './archive-routes.js';
-import { createLiveBuffer, createLiveRouter, packetAwareLiveEnabled } from './live-buffer.js';
+import { createLiveBuffer, createLiveClaims, createLiveRouter, packetAwareLiveEnabled } from './live-buffer.js';
 import { loadArchiveSigningKey } from './archive-hls.js';
 import { ArchiveCapture } from './archive-capture.js';
 import { pruneArchive } from './archive-retention.js';
@@ -239,7 +239,10 @@ app.use(createArchiveRouter({ store: archiveStore, root: archiveRoot, secret: ar
   prioritize: (id, start, end) => archiveCapture.prioritizeWindow(id, start, end) }));
 const liveBufferRoot = path.resolve(process.env.STREAMVAULT_LIVE_BUFFER_DIR ||
   path.join(process.env.TMPDIR || '/var/tmp', 'streamvault-live-buffer'));
-const liveBuffer = createLiveBuffer({ root: liveBufferRoot,
+// Both buffers share the single provider connection, so they share one record
+// of the channel a player started last; only that channel may open an upstream.
+const liveClaims = createLiveClaims();
+const liveBuffer = createLiveBuffer({ root: liveBufferRoot, claims: liveClaims,
   packetAware: packetAwareLiveEnabled(process.env.STREAMVAULT_LIVE_PACKET_AWARE),
   // IDs are validated by packet ingestion; reasons are fixed server categories.
   // Never log source URLs, tickets, or worker stderr.
@@ -247,7 +250,7 @@ const liveBuffer = createLiveBuffer({ root: liveBufferRoot,
 // Separate disposable cache and router secret: never reopen a latched primary
 // presentation or make its old tickets/segment epochs valid in compatibility mode.
 const compatibleLiveBuffer = createLiveBuffer({
-  root: `${liveBufferRoot}-compatible`,
+  root: `${liveBufferRoot}-compatible`, claims: liveClaims,
   packetAware: false, maxChannels: 4, nativeStartOffset: true,
   // Native players hold ~36 s of buffer: ride out provider pauses instead of
   // reconnecting, which replays old media behind a discontinuity.
@@ -269,6 +272,20 @@ function retireRunningIosHlsSessions(reason: string): void {
     if (session.state === 'running') retireIosHlsSession(sessionId, reason);
   }
 }
+// Request logging (live routes included); include completion timing only when a request is slow.
+app.use((req, res, next) => {
+  const start = performance.now();
+  const loggedPath = safeRequestLogPath(req.path);
+  logger.info(`${req.method} ${loggedPath}`);
+  res.on('finish', () => {
+    const duration = performance.now() - start;
+    if (duration >= 500 && req.path.startsWith('/api/')) {
+      logger.warn(`Slow ${req.method} ${loggedPath}: ${Math.round(duration)}ms (${res.statusCode})`);
+    }
+  });
+  next();
+});
+
 app.use('/api/live', createLiveRouter(liveBuffer, liveSource, {
   onClaim: async () => {
     retireRunningIosHlsSessions('live-started');
@@ -282,20 +299,6 @@ app.use('/api/live-compatible', createLiveRouter(compatibleLiveBuffer, liveSourc
     await liveBuffer.releaseAll();
   },
 }));
-
-// Request logging; include completion timing only when a request is slow.
-app.use((req, res, next) => {
-  const start = performance.now();
-  const loggedPath = safeRequestLogPath(req.path);
-  logger.info(`${req.method} ${loggedPath}`);
-  res.on('finish', () => {
-    const duration = performance.now() - start;
-    if (duration >= 500 && req.path.startsWith('/api/')) {
-      logger.warn(`Slow ${req.method} ${loggedPath}: ${Math.round(duration)}ms (${res.statusCode})`);
-    }
-  });
-  next();
-});
 
 const stopEventLoopMonitor = startEventLoopMonitor(message => logger.warn(message));
 
@@ -1388,6 +1391,7 @@ app.get('/api/ios-hls/:channelId/index.m3u8', async (req, res) => {
   // already opens it): close live channels and any session the viewer left,
   // including an earlier start point of this title after a seek.
   retireRunningIosHlsSessions('vod-started');
+  liveClaims.revoke(); // a left live player's late poll must not reopen its channel
   await Promise.all([liveBuffer.releaseAll(), compatibleLiveBuffer.releaseAll()]);
   const releaseProbe = iosHlsProbes.acquire();
   if (!releaseProbe) {

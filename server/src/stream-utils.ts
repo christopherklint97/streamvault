@@ -34,6 +34,13 @@ export function safeRequestLogPath(value: string): string {
   if (value === '/') return '/';
   if (/^\/api\/health$/i.test(value)) return '/api/health';
   if (value.toLowerCase().startsWith('/api/stream')) return '/api/stream/:channelId';
+  const live = /^\/api\/(live|live-compatible)(?:\/([A-Za-z0-9_-]{1,64})\/(authorize|index\.m3u8|segment\/\d{1,15}\.ts))?(?=\/|$)/i.exec(value);
+  if (live) {
+    const base = `/api/${live[1].toLowerCase()}`;
+    if (!live[2] || live[0] !== value) return `${base}/:route`;
+    const action = live[3].toLowerCase();
+    return `${base}/${live[2]}/${action.startsWith('segment/') ? 'segment' : action}`;
+  }
   if (value.toLowerCase().startsWith('/api/')) return '/api/:route';
   return '/:path';
 }
