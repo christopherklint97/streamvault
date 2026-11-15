@@ -69,3 +69,29 @@ export function selectIosHlsSessionsToRetire(
   }
   return [...retire];
 }
+
+/** Retirement reasons meaning newer playback took the session's place. */
+const REPLACED_REASONS = new Set(['vod-started', 'live-started', 'superseded']);
+
+/**
+ * Remembers recently replaced session IDs (bounded, oldest evicted). A replaced
+ * session must not be recovered: an orphaned player still polling it would
+ * otherwise start a new session that retires the one actually playing, and
+ * the two would keep replacing each other.
+ */
+export class ReplacedIosHlsSessions {
+  private readonly ids = new Set<string>();
+
+  constructor(private readonly limit = 256) {}
+
+  noteRetired(sessionId: string, reason: string): void {
+    if (!REPLACED_REASONS.has(reason)) return;
+    this.ids.delete(sessionId);
+    this.ids.add(sessionId);
+    if (this.ids.size > this.limit) this.ids.delete(this.ids.values().next().value!);
+  }
+
+  has(sessionId: string): boolean {
+    return this.ids.has(sessionId);
+  }
+}

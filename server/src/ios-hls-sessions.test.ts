@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { IOS_HLS_IDLE_TIMEOUT_MS, findReusableIosHlsSession, iosHlsProcessExitState, iosHlsSessionKey, iosHlsSessionLimitReason, selectIosHlsSessionsToRetire } from './ios-hls-sessions';
+import { IOS_HLS_IDLE_TIMEOUT_MS, findReusableIosHlsSession, iosHlsProcessExitState, iosHlsSessionKey, iosHlsSessionLimitReason, selectIosHlsSessionsToRetire, ReplacedIosHlsSessions } from './ios-hls-sessions';
 
 describe('iOS HLS session lifetime', () => {
   it('keeps prefetched movie segments available across Safari buffer gaps', () => {
@@ -67,5 +67,28 @@ describe('selectIosHlsSessionsToRetire', () => {
     expect(iosHlsSessionLimitReason(session, 701, 10, 600, 100)).toBe('lifetime');
     expect(iosHlsSessionLimitReason(session, 200, 101, 600, 100)).toBe('storage');
     expect(iosHlsSessionLimitReason(session, 200, 10, 600, 100)).toBeNull();
+  });
+});
+
+describe('replaced iOS HLS sessions', () => {
+  it('remembers sessions that newer playback replaced, not ones that failed or idled', () => {
+    const replaced = new ReplacedIosHlsSessions();
+    replaced.noteRetired('seek-old', 'vod-started');
+    replaced.noteRetired('evicted-by-live', 'live-started');
+    replaced.noteRetired('over-cap', 'superseded');
+    replaced.noteRetired('quiet', 'idle');
+    replaced.noteRetired('crashed', 'ffmpeg-exit-1');
+    expect(['seek-old', 'evicted-by-live', 'over-cap'].every(id => replaced.has(id))).toBe(true);
+    // Lost or failed sessions keep their recovery path.
+    expect(replaced.has('quiet')).toBe(false);
+    expect(replaced.has('crashed')).toBe(false);
+  });
+
+  it('stays bounded by evicting the oldest replaced session', () => {
+    const replaced = new ReplacedIosHlsSessions(2);
+    for (const id of ['a', 'b', 'c']) replaced.noteRetired(id, 'vod-started');
+    expect(replaced.has('a')).toBe(false);
+    expect(replaced.has('b')).toBe(true);
+    expect(replaced.has('c')).toBe(true);
   });
 });

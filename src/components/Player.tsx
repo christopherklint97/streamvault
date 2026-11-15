@@ -465,21 +465,35 @@ export default function Player() {
     resetOSDTimer();
   }, [togglePlay, resetOSDTimer]);
 
+  // One seek-bar gesture: where it started and where the thumb is now. A tap
+  // without a drag fires no change event on iOS, and iOS follows touchend with
+  // a synthetic mouseup; seeking on every end event jumped to a stale value
+  // (0 on first use) and started duplicate server sessions.
+  const seekGestureRef = useRef<{ start: number; value: number } | null>(null);
+
   const handleSeekStart = useCallback(() => {
+    if (!seekGestureRef.current) {
+      seekGestureRef.current = { start: currentTime, value: currentTime };
+      setSeekValue(currentTime);
+    }
     beginManualSeek();
     setIsSeeking(true);
-  }, [beginManualSeek]);
+  }, [beginManualSeek, currentTime]);
 
   const handleSeekChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = parseFloat(e.target.value);
+    seekGestureRef.current = { start: seekGestureRef.current?.start ?? currentTime, value };
     beginManualSeek();
-    setSeekValue(parseFloat(e.target.value));
-  }, [beginManualSeek]);
+    setSeekValue(value);
+  }, [beginManualSeek, currentTime]);
 
   const handleSeekEnd = useCallback(() => {
-    seek(seekValue);
+    const gesture = seekGestureRef.current;
+    seekGestureRef.current = null;
+    if (gesture && gesture.value !== gesture.start) seek(gesture.value);
     setIsSeeking(false);
     resetOSDTimer();
-  }, [seek, seekValue, resetOSDTimer]);
+  }, [seek, resetOSDTimer]);
 
   const handleSeekKeyUp = useCallback((event: React.KeyboardEvent<HTMLInputElement>) => {
     if (['ArrowLeft', 'ArrowRight', 'PageDown', 'PageUp', 'Home', 'End'].includes(event.key)) {
