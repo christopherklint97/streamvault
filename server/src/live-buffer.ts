@@ -9,6 +9,24 @@ import { fileURLToPath } from 'node:url';
 import { isAuthorizedRequest } from './security.js';
 import { H264_AUD_FIRST_ARGS, isUnsupportedBitstreamFilterError } from './h264-access-units.js';
 
+/**
+ * Some providers round frame timestamps to whole milliseconds, so 29.97 fps
+ * frames arrive 33 and 34 ms apart instead of every 33.37 ms. Desktop players
+ * hide that, but Apple's native HLS player visibly hitches every few seconds.
+ * Snap each timestamp to the stream's own frame grid (anchored at its first
+ * DTS) without re-encoding. FFmpeg reports the frame duration in whole 90 kHz
+ * ticks, so NTSC rates (1501 for 59.94 fps) use their exact 90090/fps value;
+ * otherwise the grid would drift away from the audio. Packets without a
+ * timestamp or duration pass through unchanged.
+ */
+function frameGridTimestamp(field: 'PTS' | 'DTS'): string {
+  return `if(eq(${field}\\,NOPTS)+eq(DURATION\\,0)\\,${field}\\,`
+    + 'st(0\\,round(90000/DURATION))*0'
+    + '+st(1\\,if(lt(abs(DURATION-90090/ld(0))\\,1)\\,90090/ld(0)\\,DURATION))*0'
+    + `+STARTDTS+round(round((${field}-STARTDTS)/ld(1))*ld(1)))`;
+}
+export const EVEN_FRAME_TIMESTAMPS_BSF = `setts=pts=${frameGridTimestamp('PTS')}:dts=${frameGridTimestamp('DTS')}`;
+
 interface Segment { id: number; name: string; duration: number; bytes: number; discontinuity: boolean; }
 const probeFile = promisify(execFile);
 export const packetAwareLiveEnabled = (value: string | undefined): boolean => value === '1';
@@ -408,7 +426,8 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
     ch.lastPublish = Date.now();
     const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-i', url,
       '-map', '0:v?', '-map', '0:a?', '-map', '0:s?', '-c', 'copy',
-      ...(ch.plainVideo ? [] : H264_AUD_FIRST_ARGS), '-f', 'segment',
+      '-bsf:v', ch.plainVideo ? EVEN_FRAME_TIMESTAMPS_BSF : `${H264_AUD_FIRST_ARGS[1]},${EVEN_FRAME_TIMESTAMPS_BSF}`,
+      '-f', 'segment',
       // HLS's subtitle sidecar muxer only accepts WebVTT; MPEG-TS segments
       // preserve native DVB subtitles. The list names only closed segments;
       // publication builds its own bounded live playlist and reclaims files.
@@ -443,7 +462,8 @@ export function createLiveBuffer(options: LiveBufferOptions = {}) {
           else markUnsafe(ch.id);
           await retire(ch); return;
         }
-        // Relaunch without the H.264-only delimiter rewrite for other codecs.
+        // Relaunch without the H.264-only delimiter rewrite for other codecs
+        // (the timestamp filter is codec-independent and stays).
         if (!ch.plainVideo && isUnsupportedBitstreamFilterError(stderrTail)) ch.plainVideo = true;
         await publishInOrder(ch); // FFmpeg may have finalized its last segment at EOF.
         ch.working = undefined;
